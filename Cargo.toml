@@ -1,9 +1,15 @@
 [package]
 name = "besu"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 
+[features]
+default = ["tokio", "sqlite"]  # TODO: Disable as default
+tokio = ["sqlx/runtime-tokio"]
+sqlite = ["sqlx/sqlite"]
+
 [dependencies]
+sqlx = { version = "0.7.2", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.34.0", features = ["full"] }

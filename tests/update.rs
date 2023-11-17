@@ -10,7 +10,7 @@ mod schema;
 
 #[tokio::test]
 async fn update() {
-    let db = Database::new(":memory:");
+    let db = Database::new(":memory:").await.unwrap();
 
     // db.update(User)
     //     .set(User::enabled, true)
@@ -31,7 +31,7 @@ async fn update() {
 
 #[tokio::test]
 async fn update_many() {
-    let db = Database::new(":memory:");
+    let db = Database::new(":memory:").await.unwrap();
 
     todo!();
 }

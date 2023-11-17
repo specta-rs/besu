@@ -8,7 +8,7 @@ mod schema;
 
 #[tokio::test]
 async fn insert() {
-    let db = Database::new(":memory:");
+    let db = Database::new(":memory:").await.unwrap();
 
     db.insert()
         .value(User::insert {
@@ -40,7 +40,7 @@ async fn insert() {
 
 #[tokio::test]
 async fn insert_many() {
-    let db = Database::new(":memory:");
+    let db = Database::new(":memory:").await.unwrap();
 
     db.insert().values(&[User::insert("George")]).await.unwrap();
 

@@ -58,8 +58,8 @@ pub mod Post {
     pub const id: () = ();
 }
 
-pub fn init() -> Database {
-    let db = Database::new(":memory:");
+pub async fn init() -> Database {
+    let db = Database::new(":memory:").await.unwrap();
     // TODO: Migrations
     db
 }
