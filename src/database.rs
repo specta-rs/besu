@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::{marker::PhantomData, path::Path};
 
-use crate::queries::InsertQuery;
+use crate::queries::{InsertQuery, UpdateQuery};
 
 pub struct Database {}
 
@@ -11,5 +11,12 @@ impl Database {
 
     pub fn insert(&self) -> InsertQuery {
         InsertQuery {}
+    }
+
+    // TODO: Generics
+    pub fn update(&self, model: ()) -> UpdateQuery<()> {
+        UpdateQuery {
+            phantom: PhantomData,
+        }
     }
 }

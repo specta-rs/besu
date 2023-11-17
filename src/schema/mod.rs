@@ -1,3 +1,6 @@
+mod field;
+mod model;
+
 #[macro_export]
 macro_rules! table {
     ($name:ident, { $($k:ident: $t:ty),* $(,)? }) => {

@@ -14,6 +14,7 @@ pub const User: () = ();
 #[allow(non_snake_case)]
 pub mod User {
     pub const id: () = ();
+    pub const enabled: () = ();
 
     #[allow(non_camel_case_types)]
     pub struct insert {
@@ -50,6 +51,11 @@ pub mod User {
             password: None,
         }
     }
+}
+
+#[allow(non_snake_case)]
+pub mod Post {
+    pub const id: () = ();
 }
 
 pub fn init() -> Database {

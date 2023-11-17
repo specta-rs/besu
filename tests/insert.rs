@@ -49,3 +49,7 @@ async fn insert_many() {
         .await
         .unwrap();
 }
+
+// TODO: https://orm.drizzle.team/docs/insert#upserts-and-conflicts
+
+// TODO: https://orm.drizzle.team/docs/insert#insert-returning
