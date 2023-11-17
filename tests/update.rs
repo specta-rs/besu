@@ -2,7 +2,7 @@ use besu::Database;
 
 pub use schema::User;
 
-use crate::schema::Post;
+// use crate::schema::Post;
 
 mod schema;
 
@@ -11,6 +11,8 @@ mod schema;
 #[tokio::test]
 async fn update() {
     let db = Database::new(":memory:").await.unwrap();
+
+    // db.update(User);
 
     // db.update(User)
     //     .set(User::enabled, true)
