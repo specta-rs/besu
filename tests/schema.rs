@@ -51,7 +51,9 @@ table!(Comment, comments, {
 
 pub async fn init() -> Database {
     let db = Database::new(":memory:").await.unwrap();
-    // TODO: Migrations
+    db.migrate(users).await.unwrap();
+    db.migrate(posts).await.unwrap();
+
     // TODO: Seed data
 
     db

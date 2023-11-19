@@ -61,6 +61,33 @@ impl Database {
         }
     }
 
+    // TODO: Allow providing multiple models.
+    pub async fn migrate<M>(&self, table: Table<M>) -> Result<(), ()> {
+        let mut sql = "CREATE TABLE ".to_string();
+        sql.push_str(table.table.name);
+        sql.push_str(" (");
+        for (i, (name, ty)) in table.table.fields.iter().enumerate() {
+            if i != 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(name);
+            sql.push_str(" ");
+            // TODO: Do this via a trait cause this is bad.
+            sql.push_str(match *ty {
+                "u8" | "i32" | "u64" => "INTEGER NOT NULL",
+                "bool" => "BOOLEAN NOT NULL",
+                "String" => "TEXT NOT NULL",
+                "Option<String>" => "TEXT",
+                v => todo!("Missing type: {v}"),
+            });
+        }
+        sql.push_str(");");
+
+        println!("{sql:?}");
+        self.conn.execute(sql).await.unwrap();
+        Ok(())
+    }
+
     pub fn query<M>(&self, table: Table<M>) -> Query<M> {
         Query::new(self.conn.clone(), table)
     }
