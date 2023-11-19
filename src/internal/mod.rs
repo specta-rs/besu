@@ -10,7 +10,7 @@ pub use contains::*;
 pub mod construct {
     use std::marker::PhantomData;
 
-    use crate::schema::{Column, ErasedTable, Table};
+    use crate::schema::{ColumnDef, ErasedTable, Table};
 
     pub const fn table<M>(
         name: &'static str,
@@ -22,11 +22,7 @@ pub mod construct {
         }
     }
 
-    pub const fn column<M, T>(table_name: &'static str, name: &'static str) -> Column<M, T> {
-        Column {
-            table_name,
-            name,
-            phantom: core::marker::PhantomData,
-        }
+    pub const fn column_def(table_name: &'static str, name: &'static str) -> ColumnDef {
+        ColumnDef { table_name, name }
     }
 }

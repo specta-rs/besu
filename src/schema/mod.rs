@@ -2,7 +2,7 @@ mod column;
 mod model;
 mod table;
 
-pub use column::Column;
+pub use column::{Column, ColumnDef};
 pub use model::Model;
 pub use table::Table;
 
@@ -35,11 +35,16 @@ macro_rules! table {
         #[allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
         pub mod $name_def {
             $(
-                pub const $k: $crate::schema::Column<super::$name, $t> = $crate::internal::construct::column(stringify!($name), stringify!($k));
-            )*
+                pub struct $k;
 
-            $(
-                pub type $k = $crate::schema::Column<super::$name, $t>;
+                impl $crate::schema::Column for $k {
+                    type Model = super::$name;
+                    type Type = $t;
+
+                    fn def() -> $crate::schema::ColumnDef {
+                        $crate::internal::construct::column_def(stringify!($name), stringify!($k))
+                    }
+                }
             )*
 
             // The `pub const COLUMN_NAME` conflict so this separate them.

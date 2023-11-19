@@ -1,11 +1,17 @@
-use std::marker::PhantomData;
-
 use super::Model;
 
-pub struct Column<M, T> {
+// This type is sealed!
+pub struct ColumnDef {
     pub(crate) table_name: &'static str,
     pub(crate) name: &'static str,
-    pub(crate) phantom: PhantomData<(M, T)>,
 }
 
-impl<M: Model, T> Column<M, T> {}
+pub trait Column {
+    /// The Rust struct which represents the model this column belongs to.
+    type Model: Model;
+
+    /// The Rust type of the column.
+    type Type;
+
+    fn def() -> ColumnDef;
+}

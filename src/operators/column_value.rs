@@ -89,14 +89,15 @@ impl SealedColumnValue for bool {
     }
 }
 
-impl<M, T> SealedColumnValue for Column<M, T> {
-    type Model<MM> = M;
-    type Type = T;
+impl<C: Column> SealedColumnValue for C {
+    type Model<MM> = C::Model;
+    type Type = C::Type;
 
     fn into_condition(self) -> Condition {
+        let def = C::def();
         Condition::Column {
-            table: self.table_name,
-            column: self.name,
+            table: def.table_name,
+            column: def.name,
         }
     }
 }
