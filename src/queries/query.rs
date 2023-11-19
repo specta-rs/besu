@@ -115,7 +115,7 @@ impl<M: 'static> IntoFuture for Query<M> {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let (sql, values) = self.to_sql()?;
-            self.db.execute(sql).await?;
+            self.db.execute(sql.into()).await?;
             Ok(vec![])
         })
     }

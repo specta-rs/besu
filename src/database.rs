@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 use sqlx::{Executor, Pool};
 
-use crate::{queries::Query, schema::Table};
+use crate::{queries::Query, schema::Table, SqlValue};
 
 // Sqlx's `Any` connector provides basically no options so we do this. This will also future proof for non-sqlx connectors.
 #[derive(Clone)]
@@ -12,26 +12,43 @@ pub(crate) enum Connection {
 }
 
 impl Connection {
-    pub(crate) async fn execute(&self, sql: String) -> Result<(), ()> {
+    pub(crate) async fn execute(&self, sql: Cow<'static, str>) -> Result<(), ()> {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(db) => {
-                let _ = db.execute(sql.as_str()).await.map_err(|err| {
-                    println!("{err:?}");
-                    ()
-                })?; // TODO: Handle response type
+                let _ = db
+                    .execute(match &sql {
+                        Cow::Borrowed(sql) => sql,
+                        Cow::Owned(sql) => sql.as_str(),
+                    })
+                    .await
+                    .map_err(|err| {
+                        println!("{err:?}");
+                        ()
+                    })?; // TODO: Handle response type
                 Ok(())
             }
         }
     }
 }
 
+pub type LoggerFn = fn(&str) -> ();
+
 pub struct Database {
+    logger: LoggerFn,
     conn: Connection,
 }
 
 impl Database {
     pub async fn new(path: impl AsRef<Path>) -> Result<Self, sqlx::Error> {
+        // Self::new_with_logger(path, |_| ()).await
+        Self::new_with_logger(path, |sql| println!("EXECUTE: {sql}")).await // TODO: Remove this line
+    }
+
+    pub async fn new_with_logger(
+        path: impl AsRef<Path>,
+        logger: LoggerFn,
+    ) -> Result<Self, sqlx::Error> {
         #[cfg(not(feature = "sqlite"))]
         {
             compile_error!("sqlite feature must be enabled!");
@@ -40,6 +57,7 @@ impl Database {
 
         #[cfg(feature = "sqlite")]
         Ok(Self {
+            logger,
             conn: Connection::Sqlite(
                 Pool::connect_with(
                     sqlx::sqlite::SqliteConnectOptions::new()
@@ -59,6 +77,17 @@ impl Database {
         match &self.conn {
             Connection::Sqlite(db) => db,
         }
+    }
+
+    // TODO: Using `Cow` style thing for `values`
+    pub async fn execute(
+        &self,
+        sql: impl Into<Cow<'static, str>>,
+        values: Vec<SqlValue>,
+    ) -> Result<(), ()> {
+        let sql = sql.into();
+        (self.logger)(&sql);
+        self.conn.execute(sql).await
     }
 
     // TODO: Allow providing multiple models.
@@ -84,9 +113,7 @@ impl Database {
         }
         sql.push_str(");");
 
-        println!("{sql:?}");
-        self.conn.execute(sql).await.unwrap();
-        Ok(())
+        self.execute(sql, vec![]).await
     }
 
     // TODO: Rename `select`???
