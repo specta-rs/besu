@@ -8,7 +8,7 @@ use crate::{
     database::Connection,
     operators::{Condition, ErasedWhereCondition, WhereCondition},
     schema::{Table, TableDef},
-    SqlValue,
+    FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
 };
 
 pub struct Query<M> {
@@ -20,7 +20,7 @@ pub struct Query<M> {
 }
 
 impl<M> Query<M> {
-    pub(crate) fn new<T: Table<Model = M>>(db: Connection, table: fn() -> T) -> Self {
+    pub(crate) fn new<T: Table<Model = M>>(db: Connection, _: fn() -> T) -> Self {
         Self {
             db,
             from: T::def(),
@@ -48,17 +48,37 @@ impl<M> Query<M> {
 
     // TODO: Cursor pagination
 
-    // TODO: Where condition type - `M2` is not correct
     pub fn left_join<T: Table>(
         self,
         table: T,
-        condition: WhereCondition<(M, Option<T::Model>)>,
-    ) -> Query<(M, Option<T::Model>)> {
+        condition: WhereCondition<LeftJoin<T, T::Model>>,
+    ) -> Query<LeftJoin<T, T::Model>> {
         todo!();
     }
 
-    // TODO: Right Join
-    // TODO: Inner Join
+    pub fn right_join<T: Table>(
+        self,
+        table: T,
+        condition: WhereCondition<RightJoin<T, T::Model>>,
+    ) -> Query<RightJoin<T, T::Model>> {
+        todo!();
+    }
+
+    pub fn inner_join<T: Table>(
+        self,
+        table: T,
+        condition: WhereCondition<InnerJoin<T, T::Model>>,
+    ) -> Query<InnerJoin<T, T::Model>> {
+        todo!();
+    }
+
+    pub fn full_join<T: Table>(
+        self,
+        table: T,
+        condition: WhereCondition<FullJoin<T, T::Model>>,
+    ) -> Query<FullJoin<T, T::Model>> {
+        todo!();
+    }
 
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
         let mut sql = "SELECT ".to_string();
@@ -107,7 +127,7 @@ impl<M> Query<M> {
     }
 }
 
-// This is definetly DX over preformance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
+// This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
 impl<M: 'static> IntoFuture for Query<M> {
     type Output = Result<Vec<M>, ()>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;

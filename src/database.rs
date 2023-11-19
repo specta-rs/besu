@@ -91,7 +91,7 @@ impl Database {
     }
 
     // TODO: Allow providing multiple models.
-    pub async fn migrate<T: Table>(&self, table: fn() -> T) -> Result<(), ()> {
+    pub async fn migrate<T: Table>(&self, _: fn() -> T) -> Result<(), ()> {
         let table = T::def();
         let mut sql = "CREATE TABLE ".to_string();
         sql.push_str(table.name);
