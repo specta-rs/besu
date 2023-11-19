@@ -1,6 +1,6 @@
 use besu::table;
 
-table!(User, {
+table!(User, users, {
     id: u64,
     name: String,
     age: u8,
@@ -19,7 +19,7 @@ table!(User, {
     },
 });
 
-table!(Post, {
+table!(Post, posts, {
    // TODO
 },
 // Right now the macro isn't very smart. The following will all be derived from the above.

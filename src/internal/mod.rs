@@ -1,11 +1,11 @@
 pub mod construct {
-    use crate::schema::{Column, Table};
+    use crate::schema::{Column, TableDef};
 
-    pub const fn table(
+    pub const fn table_def(
         name: &'static str,
         fields: &'static [(&'static str, &'static str)],
-    ) -> Table {
-        Table { name, fields }
+    ) -> TableDef {
+        TableDef { name, fields }
     }
 
     pub const fn column<T>(name: &'static str) -> Column<T> {

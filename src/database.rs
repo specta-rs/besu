@@ -2,7 +2,10 @@ use std::{marker::PhantomData, path::Path};
 
 use sqlx::{ConnectOptions, Pool};
 
-use crate::queries::{InsertQuery, UpdateQuery};
+use crate::{
+    queries::{InsertQuery, Query, UpdateQuery},
+    schema::Table,
+};
 
 // Sqlx's `Any` connector provides basically no options so we do this. This will also future proof for non-sqlx connectors.
 #[derive(Clone)]
@@ -46,14 +49,20 @@ impl Database {
         }
     }
 
-    pub fn insert(&self) -> InsertQuery {
-        InsertQuery {}
+    pub fn query<T: Table>(&self, table: T) -> Query<T> {
+        Query::new()
     }
 
-    // TODO: Generics
-    pub fn update(&self, model: ()) -> UpdateQuery<()> {
-        UpdateQuery {
-            phantom: PhantomData,
-        }
-    }
+    // pub fn insert(&self) -> InsertQuery {
+    //     InsertQuery {}
+    // }
+
+    // // TODO: Generics
+    // pub fn update(&self, model: ()) -> UpdateQuery<()> {
+    //     UpdateQuery {
+    //         phantom: PhantomData,
+    //     }
+    // }
+
+    // pub fn count(&self)
 }

@@ -1,15 +1,24 @@
-// use besu::Database;
+mod schema;
 
-// #[tokio::test]
-// async fn count() {
-//     let db = Database::new(":memory:").await.unwrap();
+// SELECT COUNT(column_name) FROM table_name;
+#[tokio::test]
+async fn count() {
+    let db = schema::init().await;
 
-//     todo!();
-// }
+    // db.count(User::)
 
-// #[tokio::test]
-// async fn sum() {
-//     let db = Database::new(":memory:").await.unwrap();
+    // db.count(User::name).await.unwrap();
+    // db.count(User::name)._where(gt(User::id, 5)).await.unwrap();
 
-//     todo!();
-// }
+    // db.query()._where(gt(User::id, 5)).count().await.unwrap();
+
+    // TODO
+}
+
+// SELECT SUM(column_name) FROM table_name;
+#[tokio::test]
+async fn sum() {
+    let db = schema::init().await;
+
+    // TODO
+}

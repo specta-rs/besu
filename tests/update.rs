@@ -28,14 +28,14 @@ async fn update() {
     //     .set(User::enabled, true)
     //     .await;
 
-    todo!();
+    // TODO
 }
 
 #[tokio::test]
 async fn update_many() {
     let db = Database::new(":memory:").await.unwrap();
 
-    todo!();
+    // TODO
 }
 
 // TODO: https://orm.drizzle.team/docs/update#update-with-returning
