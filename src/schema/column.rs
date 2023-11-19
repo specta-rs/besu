@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
 
-pub struct Column<T> {
+use super::Model;
+
+pub struct Column<M, T> {
     pub(crate) name: &'static str,
-    pub(crate) phantom: PhantomData<T>,
+    pub(crate) phantom: PhantomData<(M, T)>,
 }
 
-impl<T> Column<T> {}
+impl<M: Model, T> Column<M, T> {}

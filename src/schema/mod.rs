@@ -1,8 +1,10 @@
 mod column;
+mod model;
 mod table;
 
 pub use column::Column;
-pub use table::{Table, TableDef};
+pub use model::Model;
+pub use table::Table;
 
 // TODO: Error on reserved field names - `insert`, etc
 
@@ -12,7 +14,11 @@ macro_rules! table {
         insert: { $($ik:ident: $it:ty),* $(,)? },
     }) => {
         #[allow(non_upper_case_globals)]
-        pub const $name_def: $name_def::Table = $name_def::new_table();
+        pub const $name_def: $crate::schema::Table<$name> = $crate::internal::construct::table(stringify!($name), &[
+            $(
+                (stringify!($k), stringify!($t))
+            ),*
+        ]);
 
         #[derive(Debug)]
         pub struct $name {
@@ -21,29 +27,14 @@ macro_rules! table {
             ),*
         }
 
+        impl $crate::schema::Model for $name {
+        }
+
         #[allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
         pub mod $name_def {
             $(
-                pub const $k: $crate::schema::Column<$t> = $crate::internal::construct::column(stringify!($k));
+                pub const $k: $crate::schema::Column<super::$name, $t> = $crate::internal::construct::column(stringify!($k));
             )*
-
-
-            pub struct Table(());
-
-            #[doc(hidden)]
-            pub(super) const fn new_table() -> Table {
-                Table(())
-            }
-
-            impl $crate::schema::Table for Table {
-                fn def() -> $crate::schema::TableDef {
-                    $crate::internal::construct::table_def(stringify!($name), &[
-                        $(
-                            (stringify!($k), stringify!($t))
-                        ),*
-                    ])
-                }
-            }
 
             // The `pub const COLUMN_NAME` conflict so this separate them.
             mod inner {

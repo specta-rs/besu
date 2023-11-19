@@ -49,9 +49,13 @@ impl Database {
         }
     }
 
-    pub fn query<T: Table>(&self, table: T) -> Query<T> {
-        Query::new()
+    pub fn query<M>(&self, query: Query<M>) -> Query<M> {
+        todo!();
     }
+
+    // pub fn query<T: Table>(&self, table: T) -> Query<T> {
+    //     Query::new()
+    // }
 
     // pub fn insert(&self) -> InsertQuery {
     //     InsertQuery {}

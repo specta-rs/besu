@@ -1,14 +1,20 @@
 pub mod construct {
-    use crate::schema::{Column, TableDef};
+    use std::marker::PhantomData;
 
-    pub const fn table_def(
+    use crate::schema::{Column, Table};
+
+    pub const fn table<M>(
         name: &'static str,
         fields: &'static [(&'static str, &'static str)],
-    ) -> TableDef {
-        TableDef { name, fields }
+    ) -> Table<M> {
+        Table {
+            name,
+            fields,
+            phantom: PhantomData,
+        }
     }
 
-    pub const fn column<T>(name: &'static str) -> Column<T> {
+    pub const fn column<M, T>(name: &'static str) -> Column<M, T> {
         Column {
             name,
             phantom: core::marker::PhantomData,
