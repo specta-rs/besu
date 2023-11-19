@@ -49,7 +49,8 @@ impl Database {
         }
     }
 
-    pub fn query<M>(&self, query: Query<M>) -> Query<M> {
+    // TODO: This should probs return a different type as the qy
+    pub fn query<M>(&self, table: Table<M>) -> Query<M> {
         todo!();
     }
 

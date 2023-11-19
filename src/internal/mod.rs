@@ -1,3 +1,12 @@
+mod contains;
+mod equals;
+
+// pub(crate) use contains::Contains;
+pub(crate) use equals::TyEq;
+
+// TODO: Remove
+pub use contains::*;
+
 pub mod construct {
     use std::marker::PhantomData;
 

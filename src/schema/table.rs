@@ -11,9 +11,9 @@ pub struct Table<M> {
 }
 
 impl<M: Model> Table<M> {
-    pub fn _where(self, condition: WhereCondition<M>) -> Query<M> {
-        todo!();
-    }
+    // pub fn _where(self, condition: WhereCondition<M>) -> Query<M> {
+    //     todo!();
+    // }
 
     // pub fn _as(self, name: &'static str) -> Self {
     //     todo!();

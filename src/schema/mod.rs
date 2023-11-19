@@ -36,6 +36,10 @@ macro_rules! table {
                 pub const $k: $crate::schema::Column<super::$name, $t> = $crate::internal::construct::column(stringify!($k));
             )*
 
+            $(
+                pub type $k = $crate::schema::Column<super::$name, $t>;
+            )*
+
             // The `pub const COLUMN_NAME` conflict so this separate them.
             mod inner {
                 #[derive(Debug)]
