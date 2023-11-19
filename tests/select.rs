@@ -3,7 +3,7 @@ mod schema;
 use besu::{
     operators::{eq, WhereCondition},
     queries::Query,
-    SqlValue,
+    FromValue, LeftJoin, SqlValue,
 };
 
 use crate::schema::{comments, init, posts, users, Post, User};
@@ -18,6 +18,16 @@ async fn conditions() {
     // let _: WhereCondition<(User, Post)> = eq(users::id, posts::title); // Won't compile. type mismatch
     let _: WhereCondition<(User, Post)> = eq(users::id, posts::owner_id);
     // let _: WhereCondition<User> = eq(users::id, posts::owner_id); // Won't compile. Missing `Post`.
+}
+
+#[tokio::test]
+async fn values() {
+    assert_eq!(
+        <u64 as FromValue>::from_value(vec![SqlValue::Integer(5i64)]),
+        Ok(5u64)
+    );
+
+    // TODO: More tests
 }
 
 fn assert_sql(
@@ -36,7 +46,7 @@ async fn select() {
     let db = init().await;
 
     {
-        let query = db.select(users);
+        let query: Query<User> = db.select(users);
         assert_sql(
             query.to_sql(),
             "SELECT id, name, age, bio, phone FROM users",
@@ -48,7 +58,7 @@ async fn select() {
     }
 
     {
-        let query = db.select(users)._where(eq(users::id, 0u64));
+        let query: Query<User> = db.select(users)._where(eq(users::id, 0u64));
         assert_sql(
             query.to_sql(),
             "SELECT id, name, age, bio, phone FROM users WHERE users.id = 0",
@@ -61,7 +71,7 @@ async fn select() {
     }
 
     {
-        let query = db
+        let query: Query<User> = db
             .select(users)
             ._where(eq(users::id, 0u64))
             ._where(eq(users::name, "Monty Beaumont".to_string()));
@@ -75,6 +85,26 @@ async fn select() {
         assert_eq!(result.len(), 1);
         // TODO: Actually assert some values.
     }
+
+    {
+        let query: Query<LeftJoin<Post, User>> = db
+            .select(posts)
+            .left_join(users, eq(posts::owner_id, users::id));
+        assert_sql(
+            query.to_sql(),
+            // TODO: Fix the column selection part of this
+            "SELECT id, title, owner_id FROM posts LEFT JOIN users ON posts.owner_id = users.id",
+            vec![],
+        );
+        // let result: Vec<LeftJoin<User, Post>> = query.await.unwrap();
+        // println!("{result:?}"); // TODO
+        // assert_eq!(result.len(), 1);
+        // TODO: Actually assert some values.
+    }
+
+    // TODO: What happens if we try and do the join in reverse.
+    // TODO: What if `left_join` original table.
+    // TODO: `left_join` another table multiple times.
 
     // let _r: Vec<(User, Option<Post>)> = db
     //     .query(users)

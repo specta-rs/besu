@@ -84,6 +84,27 @@ pub async fn init() -> Database {
     .await
     .unwrap();
 
+    db.execute(
+        r#"INSERT INTO posts(id, title, owner_id) VALUES (0, 'Post One', 0) "#,
+        vec![],
+    )
+    .await
+    .unwrap();
+
+    db.execute(
+        r#"INSERT INTO posts(id, title, owner_id) VALUES (1, 'Post Two', 1) "#,
+        vec![],
+    )
+    .await
+    .unwrap();
+
+    db.execute(
+        r#"INSERT INTO posts(id, title, owner_id) VALUES (2, 'Post Three', 1) "#,
+        vec![],
+    )
+    .await
+    .unwrap();
+
     // TODO: Seed data
 
     db

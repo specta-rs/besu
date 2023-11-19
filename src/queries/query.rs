@@ -10,20 +10,38 @@ use crate::{
     Database, FromValue, FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
 };
 
+pub struct Join {
+    table: &'static str,
+    condition: ErasedWhereCondition,
+}
+
 pub struct Query<M> {
     db: Database,
     // We can't use `M` as joins will change it.
     from: TableDef,
     _where: Option<Vec<ErasedWhereCondition>>,
+    joins: Option<Vec<Join>>,
     phantom: PhantomData<M>,
 }
 
 impl<M> Query<M> {
-    pub(crate) fn new<T: Table<Model = M>>(db: Database, _: fn() -> T) -> Self {
+    pub(crate) fn new<T: Table<Model = M>>(db: Database, table: fn() -> T) -> Self {
+        let _ = table;
         Self {
             db,
             from: T::def(),
             _where: None,
+            joins: None,
+            phantom: PhantomData,
+        }
+    }
+
+    fn new_t<T>(self) -> Query<T> {
+        Query {
+            db: self.db,
+            from: self.from,
+            _where: self._where,
+            joins: self.joins,
             phantom: PhantomData,
         }
     }
@@ -48,34 +66,44 @@ impl<M> Query<M> {
     // TODO: Cursor pagination
 
     pub fn left_join<T: Table>(
-        self,
-        table: T,
-        condition: WhereCondition<LeftJoin<T, T::Model>>,
-    ) -> Query<LeftJoin<T, T::Model>> {
-        todo!();
+        mut self,
+        table: fn() -> T,
+        condition: WhereCondition<LeftJoin<M, T::Model>>,
+    ) -> Query<LeftJoin<M, T::Model>> {
+        let _ = table;
+
+        self.joins.get_or_insert_with(Default::default).push(Join {
+            table: T::def().name,
+            condition: condition.condition,
+        });
+
+        self.new_t()
     }
 
     pub fn right_join<T: Table>(
         self,
-        table: T,
-        condition: WhereCondition<RightJoin<T, T::Model>>,
-    ) -> Query<RightJoin<T, T::Model>> {
+        table: fn() -> T,
+        condition: WhereCondition<RightJoin<M, T::Model>>,
+    ) -> Query<RightJoin<M, T::Model>> {
+        let _ = table;
         todo!();
     }
 
     pub fn inner_join<T: Table>(
         self,
-        table: T,
-        condition: WhereCondition<InnerJoin<T, T::Model>>,
-    ) -> Query<InnerJoin<T, T::Model>> {
+        table: fn() -> T,
+        condition: WhereCondition<InnerJoin<M, T::Model>>,
+    ) -> Query<InnerJoin<M, T::Model>> {
+        let _ = table;
         todo!();
     }
 
     pub fn full_join<T: Table>(
         self,
         table: T,
-        condition: WhereCondition<FullJoin<T, T::Model>>,
-    ) -> Query<FullJoin<T, T::Model>> {
+        condition: WhereCondition<FullJoin<M, T::Model>>,
+    ) -> Query<FullJoin<M, T::Model>> {
+        let _ = table;
         todo!();
     }
 
@@ -89,6 +117,40 @@ impl<M> Query<M> {
         }
         sql.push_str(" FROM ");
         sql.push_str(self.from.name);
+
+        for joins in self.joins.iter().flatten() {
+            sql.push_str(" LEFT JOIN ");
+            sql.push_str(joins.table);
+            sql.push_str(" ON ");
+            match &joins.condition {
+                ErasedWhereCondition::Raw(raw) => sql.push_str(&raw),
+                ErasedWhereCondition::Condition { a, operator, b } => {
+                    match a {
+                        Condition::Value(value) => {
+                            sql.push_str(&value.to_sql());
+                        }
+                        Condition::Column { table, column } => {
+                            sql.push_str(table);
+                            sql.push('.');
+                            sql.push_str(column);
+                        }
+                    }
+                    sql.push(' ');
+                    sql.push_str(operator);
+                    sql.push(' ');
+                    match b {
+                        Condition::Value(value) => {
+                            sql.push_str(&value.to_sql());
+                        }
+                        Condition::Column { table, column } => {
+                            sql.push_str(table);
+                            sql.push('.');
+                            sql.push_str(column);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut where_clause = false;
         for condition in self._where.iter().flatten() {
