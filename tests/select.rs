@@ -60,14 +60,21 @@ async fn select() {
         // TODO: Actually assert some values.
     }
 
-    // let _r: Vec<User> = db.query(users)._where(eq(users::id, 5u64)).await.unwrap();
-
-    // let _r: Vec<User> = db
-    //     .query(users)
-    //     ._where(gt(users::id, 5u64))
-    //     ._where(lt(users::id, 10u64))
-    //     .await
-    //     .unwrap();
+    {
+        let query = db
+            .select(users)
+            ._where(eq(users::id, 0u64))
+            ._where(eq(users::name, "Monty Beaumont".to_string()));
+        assert_sql(
+            query.to_sql(),
+            "SELECT id, name, age, bio, phone FROM users WHERE users.id = 0 AND users.name = 'Monty Beaumont'",
+            vec![],
+        );
+        let result: Vec<User> = query.await.unwrap();
+        println!("{result:?}"); // TODO
+        assert_eq!(result.len(), 1);
+        // TODO: Actually assert some values.
+    }
 
     // let _r: Vec<(User, Option<Post>)> = db
     //     .query(users)

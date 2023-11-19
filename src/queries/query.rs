@@ -90,8 +90,15 @@ impl<M> Query<M> {
         sql.push_str(" FROM ");
         sql.push_str(self.from.name);
 
+        let mut where_clause = false;
         for condition in self._where.iter().flatten() {
-            sql.push_str(" WHERE ");
+            if where_clause {
+                sql.push_str(" AND ");
+            } else {
+                where_clause = true;
+                sql.push_str(" WHERE ");
+            }
+
             match condition {
                 ErasedWhereCondition::Raw(raw) => sql.push_str(&raw),
                 ErasedWhereCondition::Condition { a, operator, b } => {
