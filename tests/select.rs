@@ -41,8 +41,8 @@ async fn select() {
         "SELECT id, name, age, bio, phone FROM User WHERE User.id = 5",
         vec![],
     );
-    let users2: Vec<User> = query.await.unwrap(); // TODO: You can't have a variable called `users` or a function argument because it conflicts with the constant. This is a big gotcha.
-    assert_eq!(users2.len(), 0); // TODO: Actually assert some values. We need to seed the DB first.
+    let users: Vec<User> = query.await.unwrap();
+    assert_eq!(users.len(), 0); // TODO: Actually assert some values. We need to seed the DB first.
 
     // let (query, values) = db
     //     .query(users)

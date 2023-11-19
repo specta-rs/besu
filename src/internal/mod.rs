@@ -8,18 +8,13 @@ pub(crate) use equals::TyEq;
 pub use contains::*;
 
 pub mod construct {
-    use std::marker::PhantomData;
+    use crate::schema::{ColumnDef, TableDef};
 
-    use crate::schema::{ColumnDef, ErasedTable, Table};
-
-    pub const fn table<M>(
+    pub const fn table_def(
         name: &'static str,
         fields: &'static [(&'static str, &'static str)],
-    ) -> Table<M> {
-        Table {
-            table: ErasedTable { name, fields },
-            phantom: PhantomData,
-        }
+    ) -> TableDef {
+        TableDef { name, fields }
     }
 
     pub const fn column_def(table_name: &'static str, name: &'static str) -> ColumnDef {

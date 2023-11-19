@@ -4,9 +4,7 @@ mod table;
 
 pub use column::{Column, ColumnDef};
 pub use model::Model;
-pub use table::Table;
-
-pub(crate) use table::ErasedTable;
+pub use table::{Table, TableDef};
 
 // TODO: Error on reserved field names - `insert`, etc
 
@@ -15,13 +13,6 @@ macro_rules! table {
     ($name:ident, $name_def:ident, { $($k:ident: $t:ty $(; $(@default($default:expr))? )?),* $(,)? }, {
         insert: { $($ik:ident: $it:ty),* $(,)? },
     }) => {
-        #[allow(non_upper_case_globals)]
-        pub const $name_def: $crate::schema::Table<$name> = $crate::internal::construct::table(stringify!($name), &[
-            $(
-                (stringify!($k), stringify!($t))
-            ),*
-        ]);
-
         #[derive(Debug)]
         pub struct $name {
             $(
@@ -29,11 +20,29 @@ macro_rules! table {
             ),*
         }
 
-        impl $crate::schema::Model for $name {
+        impl $crate::schema::Model for $name {}
+
+        pub const fn $name_def() -> $name_def::model {
+            $name_def::model
         }
 
         #[allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
         pub mod $name_def {
+            #[doc(hidden)]
+            pub struct model;
+
+            impl $crate::schema::Table for model {
+                type Model = super::$name;
+
+                fn def() -> $crate::schema::TableDef {
+                    $crate::internal::construct::table_def(stringify!($name), &[
+                        $(
+                            (stringify!($k), stringify!($t))
+                        ),*
+                    ])
+                }
+            }
+
             $(
                 pub struct $k;
 

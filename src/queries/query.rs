@@ -7,23 +7,23 @@ use std::{
 use crate::{
     database::Connection,
     operators::{Condition, ErasedWhereCondition, WhereCondition},
-    schema::{ErasedTable, Table},
+    schema::{Table, TableDef},
     SqlValue,
 };
 
 pub struct Query<M> {
     db: Connection,
     // We can't use `M` as joins will change it.
-    from: ErasedTable,
+    from: TableDef,
     _where: Option<Vec<ErasedWhereCondition>>,
     phantom: PhantomData<M>,
 }
 
 impl<M> Query<M> {
-    pub(crate) fn new(db: Connection, table: Table<M>) -> Self {
+    pub(crate) fn new<T: Table<Model = M>>(db: Connection, table: fn() -> T) -> Self {
         Self {
             db,
-            from: table.table,
+            from: T::def(),
             _where: None,
             phantom: PhantomData,
         }
@@ -49,11 +49,11 @@ impl<M> Query<M> {
     // TODO: Cursor pagination
 
     // TODO: Where condition type - `M2` is not correct
-    pub fn left_join<M2>(
+    pub fn left_join<T: Table>(
         self,
-        table: Table<M2>,
-        condition: WhereCondition<(M, Option<M2>)>,
-    ) -> Query<(M, Option<M2>)> {
+        table: T,
+        condition: WhereCondition<(M, Option<T::Model>)>,
+    ) -> Query<(M, Option<T::Model>)> {
         todo!();
     }
 

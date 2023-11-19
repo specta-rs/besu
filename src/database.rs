@@ -62,11 +62,12 @@ impl Database {
     }
 
     // TODO: Allow providing multiple models.
-    pub async fn migrate<M>(&self, table: Table<M>) -> Result<(), ()> {
+    pub async fn migrate<T: Table>(&self, table: fn() -> T) -> Result<(), ()> {
+        let table = T::def();
         let mut sql = "CREATE TABLE ".to_string();
-        sql.push_str(table.table.name);
+        sql.push_str(table.name);
         sql.push_str(" (");
-        for (i, (name, ty)) in table.table.fields.iter().enumerate() {
+        for (i, (name, ty)) in table.fields.iter().enumerate() {
             if i != 0 {
                 sql.push_str(", ");
             }
@@ -88,7 +89,8 @@ impl Database {
         Ok(())
     }
 
-    pub fn query<M>(&self, table: Table<M>) -> Query<M> {
+    // TODO: Rename `select`???
+    pub fn query<T: Table>(&self, table: fn() -> T) -> Query<T::Model> {
         Query::new(self.conn.clone(), table)
     }
 
