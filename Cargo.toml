@@ -3,12 +3,18 @@ name = "besu"
 version = "0.0.1"
 edition = "2021"
 
+# /bin/sh RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["tokio", "sqlite"]  # TODO: Disable as default
 tokio = ["sqlx/runtime-tokio"]
 sqlite = ["sqlx/sqlite"]
 
 [dependencies]
+futures = { version = "0.3.29", default-features = false }
 sqlx = { version = "0.7.2", default-features = false }
 
 [dev-dependencies]
@@ -17,9 +23,7 @@ sqlx = { version = "0.7.2", features = ["macros"] }
 example-sqlite = { path = "./examples/sqlite" }
 
 [workspace]
-members = [
-    "./examples/*"
-]
+members = ["./examples/*"]
 
 [patch.crates-io]
 besu = { path = "." }

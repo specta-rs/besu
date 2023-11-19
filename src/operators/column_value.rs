@@ -85,7 +85,7 @@ impl SealedColumnValue for bool {
     type Type = Self;
 
     fn into_condition(self) -> Condition {
-        Condition::Value(SqlValue::Bool(self))
+        Condition::Value(SqlValue::Boolean(self))
     }
 }
 

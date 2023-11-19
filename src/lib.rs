@@ -8,7 +8,7 @@ pub mod schema;
 mod value;
 
 pub use database::Database;
-pub use value::SqlValue;
+pub use value::{FromValue, SqlValue};
 
 pub type RightJoin<T, U> = (T, Option<U>);
 pub type LeftJoin<T, U> = (Option<T>, U);

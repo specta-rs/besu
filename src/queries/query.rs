@@ -5,14 +5,13 @@ use std::{
 };
 
 use crate::{
-    database::Connection,
     operators::{Condition, ErasedWhereCondition, WhereCondition},
     schema::{Table, TableDef},
-    FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
+    Database, FromValue, FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
 };
 
 pub struct Query<M> {
-    db: Connection,
+    db: Database,
     // We can't use `M` as joins will change it.
     from: TableDef,
     _where: Option<Vec<ErasedWhereCondition>>,
@@ -20,7 +19,7 @@ pub struct Query<M> {
 }
 
 impl<M> Query<M> {
-    pub(crate) fn new<T: Table<Model = M>>(db: Connection, _: fn() -> T) -> Self {
+    pub(crate) fn new<T: Table<Model = M>>(db: Database, _: fn() -> T) -> Self {
         Self {
             db,
             from: T::def(),
@@ -128,15 +127,23 @@ impl<M> Query<M> {
 }
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
-impl<M: 'static> IntoFuture for Query<M> {
+impl<M: FromValue + 'static> IntoFuture for Query<M> {
     type Output = Result<Vec<M>, ()>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let (sql, values) = self.to_sql()?;
-            self.db.execute(sql.into()).await?;
-            Ok(vec![])
+            let values = self
+                .db
+                .execute(sql, values)
+                .await?
+                .expect("no return value. Skill issue!");
+
+            Ok(values
+                .into_iter()
+                .map(|v| M::from_value(v).unwrap())
+                .collect())
         })
     }
 }

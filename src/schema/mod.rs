@@ -22,6 +22,20 @@ macro_rules! table {
 
         impl $crate::schema::Model for $name {}
 
+        impl $crate::FromValue for $name {
+            fn from_value(values: Vec<$crate::SqlValue>) -> Result<Self, ()>
+            where
+                Self: Sized
+            {
+                let mut values = values.into_iter();
+                Ok(Self {
+                    $(
+                        $k: <$t as $crate::FromValue>::from_value(vec![values.next().expect("length mismatch. skill issue.")])?
+                    ),*
+                })
+            }
+        }
+
         pub const fn $name_def() -> $name_def::model {
             $name_def::model
         }
@@ -35,7 +49,7 @@ macro_rules! table {
                 type Model = super::$name;
 
                 fn def() -> $crate::schema::TableDef {
-                    $crate::internal::construct::table_def(stringify!($name), &[
+                    $crate::internal::construct::table_def(stringify!($name_def), &[
                         $(
                             (stringify!($k), stringify!($t))
                         ),*
@@ -51,7 +65,7 @@ macro_rules! table {
                     type Type = $t;
 
                     fn def() -> $crate::schema::ColumnDef {
-                        $crate::internal::construct::column_def(stringify!($name), stringify!($k))
+                        $crate::internal::construct::column_def(stringify!($name_def), stringify!($k))
                     }
                 }
             )*

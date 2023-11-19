@@ -35,25 +35,30 @@ fn assert_sql(
 async fn select() {
     let db = init().await;
 
-    let query = db.query(users)._where(eq(users::id, 5u64));
-    assert_sql(
-        query.to_sql(),
-        "SELECT id, name, age, bio, phone FROM User WHERE User.id = 5",
-        vec![],
-    );
-    let users: Vec<User> = query.await.unwrap();
-    assert_eq!(users.len(), 0); // TODO: Actually assert some values. We need to seed the DB first.
+    {
+        let query = db.select(users);
+        assert_sql(
+            query.to_sql(),
+            "SELECT id, name, age, bio, phone FROM users",
+            vec![],
+        );
+        let result: Vec<User> = query.await.unwrap();
+        println!("{result:?}"); // TODO
+        assert_eq!(result.len(), 3); // TODO: Actually assert some values.
+    }
 
-    // let (query, values) = db
-    //     .query(users)
-    //     ._where(eq(users::id, 5u64))
-    //     .to_sql()
-    //     .unwrap();
-    // assert_eq!(
-    //     query,
-    //     "SELECT id, name, age, bio, phone FROM User WHERE User.id = 5"
-    // );
-    // assert_eq!(values, vec![]);
+    {
+        let query = db.select(users)._where(eq(users::id, 0u64));
+        assert_sql(
+            query.to_sql(),
+            "SELECT id, name, age, bio, phone FROM users WHERE users.id = 0",
+            vec![],
+        );
+        let result: Vec<User> = query.await.unwrap();
+        println!("{result:?}"); // TODO
+        assert_eq!(result.len(), 1);
+        // TODO: Actually assert some values.
+    }
 
     // let _r: Vec<User> = db.query(users)._where(eq(users::id, 5u64)).await.unwrap();
 
