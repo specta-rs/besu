@@ -6,6 +6,8 @@ pub use column::Column;
 pub use model::Model;
 pub use table::Table;
 
+pub(crate) use table::ErasedTable;
+
 // TODO: Error on reserved field names - `insert`, etc
 
 #[macro_export]
@@ -33,7 +35,7 @@ macro_rules! table {
         #[allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
         pub mod $name_def {
             $(
-                pub const $k: $crate::schema::Column<super::$name, $t> = $crate::internal::construct::column(stringify!($k));
+                pub const $k: $crate::schema::Column<super::$name, $t> = $crate::internal::construct::column(stringify!($name), stringify!($k));
             )*
 
             $(

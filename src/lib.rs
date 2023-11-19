@@ -1,12 +1,14 @@
 //! Besu: Typesafe query builder for Rust
+// TODO: No panics, enforce docs, etc lints
 
 mod database;
-mod operators;
+pub mod operators;
 pub mod queries;
 pub mod schema;
+mod value;
 
 pub use database::Database;
-pub use operators::{eq, WhereCondition};
+pub use value::SqlValue;
 
 #[doc(hidden)]
 pub mod internal;

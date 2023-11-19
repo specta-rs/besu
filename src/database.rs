@@ -1,17 +1,29 @@
-use std::{marker::PhantomData, path::Path};
+use std::path::Path;
 
-use sqlx::{ConnectOptions, Pool};
+use sqlx::{Executor, Pool};
 
-use crate::{
-    queries::{InsertQuery, Query, UpdateQuery},
-    schema::Table,
-};
+use crate::{queries::Query, schema::Table};
 
 // Sqlx's `Any` connector provides basically no options so we do this. This will also future proof for non-sqlx connectors.
 #[derive(Clone)]
 pub(crate) enum Connection {
     #[cfg(feature = "sqlite")]
     Sqlite(sqlx::Pool<sqlx::Sqlite>),
+}
+
+impl Connection {
+    pub(crate) async fn execute(&self, sql: String) -> Result<(), ()> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(db) => {
+                let _ = db.execute(sql.as_str()).await.map_err(|err| {
+                    println!("{err:?}");
+                    ()
+                })?; // TODO: Handle response type
+                Ok(())
+            }
+        }
+    }
 }
 
 pub struct Database {
@@ -49,14 +61,9 @@ impl Database {
         }
     }
 
-    // TODO: This should probs return a different type as the qy
     pub fn query<M>(&self, table: Table<M>) -> Query<M> {
-        todo!();
+        Query::new(self.conn.clone(), table)
     }
-
-    // pub fn query<T: Table>(&self, table: T) -> Query<T> {
-    //     Query::new()
-    // }
 
     // pub fn insert(&self) -> InsertQuery {
     //     InsertQuery {}
