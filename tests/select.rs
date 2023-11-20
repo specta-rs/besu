@@ -6,7 +6,7 @@ use besu::{
     FromValue, LeftJoin, SqlValue,
 };
 
-use crate::schema::{comments, init, posts, users, Post, User};
+use crate::schema::{init, posts, users, Post, User};
 
 #[tokio::test]
 async fn conditions() {

@@ -10,18 +10,36 @@ mod schema;
 async fn update() {
     let db = schema::init().await;
 
-    db.update(users)
+    let query = db
+        .update(users)
         .set(users::name, "My New Name")
-        ._where(eq(users::id, 0u64))
-        .await
-        .unwrap();
+        ._where(eq(users::id, 0u64));
+    assert_eq!(
+        query.to_sql().unwrap().0,
+        "UPDATE users SET name = 'My New Name' WHERE users.id = 0"
+    );
+    query.await.unwrap();
     // TODO: Assert it updated correctly
 
     // Update all values
-    db.update(users)
+    let query = db.update(users).set(users::name, "My New Name");
+    assert_eq!(
+        query.to_sql().unwrap().0,
+        "UPDATE users SET name = 'My New Name'"
+    );
+    query.await.unwrap();
+    // TODO: Assert it updated correctly
+
+    // Update all values
+    let query = db
+        .update(users)
         .set(users::name, "My New Name")
-        .await
-        .unwrap();
+        ._where(eq(users::id, 0u64));
+    assert_eq!(
+        query.to_sql().unwrap().0,
+        "UPDATE users SET name = 'My New Name' WHERE users.id = 0"
+    );
+    query.await.unwrap();
     // TODO: Assert it updated correctly
 
     // TODO: Update many style thing

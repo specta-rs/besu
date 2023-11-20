@@ -1,4 +1,4 @@
-use besu::{table, Database};
+use besu::Database;
 
 #[tokio::main]
 async fn main() {

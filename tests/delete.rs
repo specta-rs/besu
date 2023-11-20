@@ -11,7 +11,12 @@ mod schema;
 async fn delete() {
     let db: besu::Database = schema::init().await;
 
-    db.delete(users)._where(eq(users::id, 0u64)).await.unwrap();
+    let query = db.delete(users)._where(eq(users::id, 0u64));
+    assert_eq!(
+        query.to_sql().unwrap().0,
+        "DELETE FROM users WHERE users.id = 0"
+    );
+    query.await.unwrap();
     // TODO: Assert it was deleted correctly
 
     // db.delete(users)._where(gt(users::id, 0u64)).await.unwrap();
