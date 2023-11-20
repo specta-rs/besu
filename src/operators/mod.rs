@@ -3,9 +3,11 @@ use std::borrow::Cow;
 use crate::internal::{Contains, TyEq};
 
 mod column_value;
+mod order;
 mod where_condition;
 
 pub use column_value::ColumnValue;
+pub use order::{asc, desc, OrderClause};
 pub use where_condition::WhereCondition;
 pub(crate) use where_condition::{Condition, ErasedWhereCondition};
 

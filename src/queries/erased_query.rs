@@ -1,8 +1,6 @@
-use std::ops::Range;
-
 use crate::{
     internal::{Either, IntersperseIter},
-    operators::{Condition, ErasedWhereCondition},
+    operators::{Condition, ErasedWhereCondition, OrderClause},
     schema::TableDef,
     SqlValue,
 };
@@ -12,11 +10,15 @@ pub(crate) struct Join {
     pub(crate) condition: ErasedWhereCondition,
 }
 
-// `Query` is generic on the model and we wanna avoid monomorphisation (especially on the `to_sql` function).
+// `Query` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
 pub(crate) struct ErasedQuery {
     pub(crate) from: TableDef,
     pub(crate) _where: Option<Vec<ErasedWhereCondition>>,
     pub(crate) joins: Option<Vec<Join>>,
+    pub(crate) order_by: Option<Vec<OrderClause>>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) offset: Option<usize>,
+    pub(crate) distinct: bool,
 }
 
 impl ErasedQuery {
@@ -25,6 +27,10 @@ impl ErasedQuery {
             from,
             _where: None,
             joins: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            distinct: false,
         }
     }
 
@@ -45,6 +51,10 @@ impl ErasedQuery {
 
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
         let mut sql = "SELECT ".to_string();
+
+        if self.distinct {
+            sql.push_str("DISTINCT ");
+        }
 
         let fields = self
             .from
@@ -152,6 +162,26 @@ impl ErasedQuery {
                     }
                 }
             }
+        }
+
+        for clause in self.order_by.iter().flatten() {
+            sql.push_str(clause.table_name);
+            sql.push('.');
+            sql.push_str(clause.column_name);
+            if let Some(suffix) = clause.suffix {
+                sql.push(' ');
+                sql.push_str(suffix);
+            }
+        }
+
+        if let Some(limit) = self.limit {
+            sql.push_str(" LIMIT ");
+            sql.push_str(&limit.to_string());
+        }
+
+        if let Some(offset) = self.offset {
+            sql.push_str(" OFFSET ");
+            sql.push_str(&offset.to_string());
         }
 
         Ok((sql, vec![]))

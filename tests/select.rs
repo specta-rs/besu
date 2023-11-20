@@ -101,7 +101,6 @@ async fn select() {
         println!("{result:#?}");
         assert_eq!(result.len(), 3);
         // TODO: Actually assert some values.
-        todo!();
     }
 
     // TODO: What happens if we try and do the join in reverse.
@@ -129,6 +128,8 @@ async fn select() {
     //     .unwrap();
     // TODO: Redo this test with mismatch of join types
 }
+
+// TODO: Unit test limit/offset
 
 #[tokio::test]
 async fn select_inner_join() {

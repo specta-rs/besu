@@ -6,8 +6,9 @@ use std::{
 };
 
 use crate::{
-    operators::WhereCondition, schema::Table, Database, FromValue, FullJoin, InnerJoin, LeftJoin,
-    RightJoin, SqlValue,
+    operators::{OrderClause, WhereCondition},
+    schema::{Column, Table},
+    Database, FromValue, FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
 };
 
 use super::{erased_query::Join, ErasedQuery};
@@ -44,14 +45,29 @@ impl<M> Query<M> {
         self
     }
 
-    // pub fn order(&mut self) {}
+    pub fn order_by<C: Column>(mut self, clause: OrderClause) -> Self {
+        self.query
+            .order_by
+            .get_or_insert_with(Default::default)
+            .push(clause);
+        self
+    }
 
-    // pub fn limit(&mut self) {}
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.query.limit = Some(limit);
+        self
+    }
 
-    // pub fn distinct(mut self) -> Self {
-    //     // TODO
-    //     self
-    // }
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.query.offset = Some(offset);
+        self
+    }
+
+    // TODO: Should this be `db.selectDistinct` instead like Drizzle?
+    pub fn distinct(mut self) -> Self {
+        self.query.distinct = true;
+        self
+    }
 
     // TODO: Cursor pagination
 
