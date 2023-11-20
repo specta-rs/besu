@@ -3,7 +3,11 @@ use std::{borrow::Cow, path::Path};
 use futures::stream::StreamExt;
 use sqlx::{Either, Error, Executor, Row, ValueRef};
 
-use crate::{queries::Query, schema::Table, SqlValue};
+use crate::{
+    queries::{InsertQuery, Query},
+    schema::Table,
+    SqlValue,
+};
 
 // Sqlx's `Any` connector provides basically no options so we do this. This will also future proof for non-sqlx connectors.
 #[derive(Clone)]
@@ -22,8 +26,7 @@ pub struct Database {
 
 impl Database {
     pub async fn new(path: impl AsRef<Path>) -> Result<Self, sqlx::Error> {
-        // Self::new_with_logger(path, |_| ()).await
-        Self::new_with_logger(path, |sql| println!("EXECUTE: {sql}")).await // TODO: Remove this line
+        Self::new_with_logger(path, |_| ()).await
     }
 
     pub async fn new_with_logger(
@@ -152,7 +155,10 @@ impl Database {
             sql.push_str(" ");
             // TODO: Do this via a trait cause this is bad.
             sql.push_str(match *ty {
-                "u8" | "i32" | "u64" => "INTEGER NOT NULL",
+                "u8" | "i32" | "u64" => match i {
+                    0 => "INTEGER PRIMARY KEY AUTOINCREMENT", // TODO: Auto incrementing ID should be configured by the user not implied.
+                    _ => "INTEGER NOT NULL",
+                },
                 "bool" => "BOOLEAN NOT NULL",
                 "String" => "TEXT NOT NULL",
                 "Option<String>" => "TEXT",
@@ -170,9 +176,9 @@ impl Database {
         Query::new(self.clone(), table)
     }
 
-    // pub fn insert(&self) -> InsertQuery {
-    //     InsertQuery {}
-    // }
+    pub fn insert(&self) -> InsertQuery {
+        InsertQuery { db: self.clone() }
+    }
 
     // // TODO: Generics
     // pub fn update(&self, model: ()) -> UpdateQuery<()> {

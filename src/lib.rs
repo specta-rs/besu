@@ -2,13 +2,16 @@
 // TODO: No panics, enforce docs, etc lints
 
 mod database;
+mod error;
+mod from_value;
 pub mod operators;
 pub mod queries;
 pub mod schema;
 mod value;
 
 pub use database::Database;
-pub use value::{FromValue, SqlValue};
+pub use from_value::FromValue;
+pub use value::SqlValue;
 
 pub type RightJoin<T, U> = (T, Option<U>);
 pub type LeftJoin<T, U> = (Option<T>, U);

@@ -59,7 +59,9 @@ pub async fn init() -> Database {
         std::fs::remove_file(&path).unwrap();
     }
 
-    let db = Database::new(path).await.unwrap();
+    let db = Database::new_with_logger(path, |sql| println!("EXECUTE: {sql}"))
+        .await
+        .unwrap();
     db.migrate(users).await.unwrap();
     db.migrate(posts).await.unwrap();
 

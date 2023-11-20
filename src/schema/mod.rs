@@ -22,6 +22,16 @@ macro_rules! table {
 
         impl $crate::schema::Model for $name {}
 
+        impl $name {
+            pub fn insert($($ik: impl Into<$it>),*) -> $name_def::insert {
+                $name_def::insert {
+                    $(
+                        $ik: $ik.into()
+                    ),*
+                }
+            }
+        }
+
         impl $crate::FromValue for $name {
             fn from_value(values: Vec<$crate::SqlValue>) -> Result<Self, ()>
             where
@@ -79,7 +89,19 @@ macro_rules! table {
                     ),*
                 }
 
-                impl $crate::queries::InsertValue for insert {}
+                impl $crate::queries::InsertValue for insert {
+                    fn def() -> $crate::queries::InsertDef {
+                        $crate::internal::construct::insert_def(stringify!($name_def), &[$( stringify!($ik) ),*])
+                    }
+
+                    fn values(self) -> Vec<$crate::SqlValue> {
+                        vec![
+                            $(
+                                self.$ik.into()
+                            ),*
+                        ]
+                    }
+                }
 
                 impl insert {
                     pub fn edit(&mut self) -> insert_mut {
@@ -98,22 +120,15 @@ macro_rules! table {
 
                 impl<'a> insert_mut<'a> {
                     $(
-                        pub fn $ik<V: Into<$it>>(&mut self, $ik: V) {
+                        pub fn $ik<V: Into<$it>>(&mut self, $ik: V) -> &mut Self {
                             self.0.$ik = $ik.into();
+                            self
                         }
                     )*
                 }
-
-                pub fn insert($($ik: impl Into<$it>),*) -> insert {
-                    insert {
-                        $(
-                            $ik: $ik.into()
-                        ),*
-                    }
-                }
             }
 
-            pub use inner::{insert};
+            pub use inner::insert;
         }
     };
 

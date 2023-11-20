@@ -131,6 +131,10 @@ async fn select() {
 
 // TODO: Unit test limit/offset
 
+// TODO: Unit test order by
+
+// TODO: Unit test distict -> How does this work with joins?
+
 #[tokio::test]
 async fn select_inner_join() {
     // TODO

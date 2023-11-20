@@ -1,55 +1,90 @@
-// use besu::Database;
+pub use schema::User;
 
-// pub use schema::User;
+use crate::schema::users;
 
-// mod schema;
+mod schema;
 
-// // INSERT INTO table_name(id, name, etc) VALUES (value1, value2, value3, ...);
+// INSERT INTO table_name(id, name, etc) VALUES (value1, value2, value3, ...);
 
-// #[tokio::test]
-// async fn insert() {
-//     let db = Database::new(":memory:").await.unwrap();
+#[tokio::test]
+async fn insert_struct_syntax() {
+    let db = schema::init().await;
 
-//     db.insert()
-//         .value(User::insert {
-//             name: "Monty Beaumont".into(),
-//             password: None,
-//         })
-//         .await
-//         .unwrap();
+    db.insert()
+        .value(
+            users::insert {
+                name: "Oscar Beaumont".into(),
+                age: 21,
+                bio: Some("Rust, rust, rust".into()),
+                phone: None,
+            }
+            // Set optional fields or update other fields
+            .bio(Some("My new bio".into())),
+        )
+        .await
+        .unwrap();
+    // TODO: Assert it was inserted correctly
 
-//     db.insert()
-//         .value(User::insert("Oscar Beaumont").password("hunter2"))
-//         .await
-//         .unwrap();
+    let mut user = users::insert {
+        name: "Oscar Beaumont".into(),
+        age: 21,
+        bio: Some("Rust, rust, rust".into()),
+        phone: None,
+    };
 
-//     let mut new_user = User::insert("Millie Beaumont");
+    // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
+    user.edit().bio(Some("My new bio".into())).age(21);
 
-//     // Don't do
-//     new_user = new_user.password("hunter2");
+    db.insert().value(user).await.unwrap();
+    // TODO: Assert it was inserted correctly
+}
 
-//     // Do this instead
-//     new_user.edit().password("hunter4");
+#[tokio::test]
+async fn insert_function_syntax() {
+    let db = schema::init().await;
 
-//     db.insert().value(new_user).await.unwrap();
+    db.insert()
+        .value(
+            User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None)
+                .bio(Some("My new bio".into())),
+        )
+        .await
+        .unwrap();
 
-//     // TODO: Insert and link with relation
+    let mut user = User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None);
 
-//     // TODO: Insert and create relation at same time???
-// }
+    // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
+    user.edit().bio(Some("My new bio".into())).age(21);
 
-// #[tokio::test]
-// async fn insert_many() {
-//     let db = Database::new(":memory:").await.unwrap();
+    db.insert().value(user).await.unwrap();
+}
 
-//     db.insert().values(&[User::insert("George")]).await.unwrap();
+#[tokio::test]
+async fn insert_many() {
+    let db = schema::init().await;
 
-//     db.insert()
-//         .values(vec![User::insert("George")])
-//         .await
-//         .unwrap();
-// }
+    db.insert().values([] as [users::insert; 0]).await.unwrap();
 
-// // TODO: https://orm.drizzle.team/docs/insert#upserts-and-conflicts
+    db.insert()
+        .values([
+            users::insert {
+                name: "Oscar Beaumont".into(),
+                age: 21,
+                bio: Some("Rust, rust, rust".into()),
+                phone: None,
+            },
+            users::insert {
+                name: "Oscar Beaumont".into(),
+                age: 21,
+                bio: Some("Rust, rust, rust".into()),
+                phone: None,
+            },
+        ])
+        .await
+        .unwrap();
+    // TODO: Assert they were inserted correctly
+}
 
-// // TODO: https://orm.drizzle.team/docs/insert#insert-returning
+// TODO: https://orm.drizzle.team/docs/insert#upserts-and-conflicts
+
+// TODO: https://orm.drizzle.team/docs/insert#insert-returning

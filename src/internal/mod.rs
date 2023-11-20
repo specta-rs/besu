@@ -9,7 +9,10 @@ pub(crate) use equals::TyEq;
 pub(crate) use intersperse::IntersperseIter;
 
 pub mod construct {
-    use crate::schema::{ColumnDef, TableDef};
+    use crate::{
+        queries::InsertDef,
+        schema::{ColumnDef, TableDef},
+    };
 
     pub const fn table_def(
         name: &'static str,
@@ -25,5 +28,15 @@ pub mod construct {
 
     pub const fn column_def(table_name: &'static str, name: &'static str) -> ColumnDef {
         ColumnDef { table_name, name }
+    }
+
+    pub const fn insert_def(
+        table_name: &'static str,
+        columns: &'static [&'static str],
+    ) -> InsertDef {
+        InsertDef {
+            table_name,
+            columns,
+        }
     }
 }
