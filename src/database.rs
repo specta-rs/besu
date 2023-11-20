@@ -1,10 +1,10 @@
-use std::{borrow::Cow, marker::PhantomData, path::Path};
+use std::{borrow::Cow, path::Path};
 
 use futures::stream::StreamExt;
 use sqlx::{Either, Error, Executor, Row, ValueRef};
 
 use crate::{
-    queries::{InsertQuery, Query, UpdateQuery},
+    queries::{DeleteQuery, InsertQuery, Query, UpdateQuery},
     schema::Table,
     SqlValue,
 };
@@ -182,5 +182,9 @@ impl Database {
 
     pub fn update<T: Table>(&self, table: fn() -> T) -> UpdateQuery<T::Model> {
         UpdateQuery::new(self.clone(), table)
+    }
+
+    pub fn delete<T: Table>(&self, table: fn() -> T) -> DeleteQuery<T::Model> {
+        DeleteQuery::new(self.clone(), table)
     }
 }

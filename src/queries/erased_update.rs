@@ -9,7 +9,7 @@ pub(crate) struct SetColumn {
     pub(crate) value: SqlValue,
 }
 
-// `Update` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
+// `UpdateQuery` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
 pub(crate) struct ErasedUpdate {
     pub(crate) table_name: &'static str,
     pub(crate) columns: Vec<SetColumn>,
