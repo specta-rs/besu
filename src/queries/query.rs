@@ -107,9 +107,13 @@ impl<M> Query<M> {
         todo!();
     }
 
+    // TODO: Cross join
+
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
         let mut sql = "SELECT ".to_string();
         for (i, (column_name, _)) in self.from.fields.iter().enumerate() {
+            sql.push_str(self.from.name);
+            sql.push_str(".");
             sql.push_str(column_name);
             if i != self.from.fields.len() - 1 {
                 sql.push_str(", ");

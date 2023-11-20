@@ -30,6 +30,7 @@ async fn values() {
     // TODO: More tests
 }
 
+#[track_caller]
 fn assert_sql(
     v: Result<(String, Vec<SqlValue>), ()>,
     expected_query: impl Into<String>,
@@ -49,7 +50,7 @@ async fn select() {
         let query: Query<User> = db.select(users);
         assert_sql(
             query.to_sql(),
-            "SELECT id, name, age, bio, phone FROM users",
+            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users",
             vec![],
         );
         let result: Vec<User> = query.await.unwrap();
@@ -61,7 +62,7 @@ async fn select() {
         let query: Query<User> = db.select(users)._where(eq(users::id, 0u64));
         assert_sql(
             query.to_sql(),
-            "SELECT id, name, age, bio, phone FROM users WHERE users.id = 0",
+            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users WHERE users.id = 0",
             vec![],
         );
         let result: Vec<User> = query.await.unwrap();
@@ -77,7 +78,7 @@ async fn select() {
             ._where(eq(users::name, "Monty Beaumont".to_string()));
         assert_sql(
             query.to_sql(),
-            "SELECT id, name, age, bio, phone FROM users WHERE users.id = 0 AND users.name = 'Monty Beaumont'",
+            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users WHERE users.id = 0 AND users.name = 'Monty Beaumont'",
             vec![],
         );
         let result: Vec<User> = query.await.unwrap();
@@ -93,7 +94,7 @@ async fn select() {
         assert_sql(
             query.to_sql(),
             // TODO: Fix the column selection part of this
-            "SELECT id, title, owner_id FROM posts LEFT JOIN users ON posts.owner_id = users.id",
+            "SELECT posts.id, posts.title, posts.owner_id FROM posts LEFT JOIN users ON posts.owner_id = users.id",
             vec![],
         );
         // let result: Vec<LeftJoin<User, Post>> = query.await.unwrap();
