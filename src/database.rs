@@ -1,10 +1,10 @@
-use std::{borrow::Cow, path::Path};
+use std::{borrow::Cow, marker::PhantomData, path::Path};
 
 use futures::stream::StreamExt;
 use sqlx::{Either, Error, Executor, Row, ValueRef};
 
 use crate::{
-    queries::{InsertQuery, Query},
+    queries::{InsertQuery, Query, UpdateQuery},
     schema::Table,
     SqlValue,
 };
@@ -180,12 +180,7 @@ impl Database {
         InsertQuery { db: self.clone() }
     }
 
-    // // TODO: Generics
-    // pub fn update(&self, model: ()) -> UpdateQuery<()> {
-    //     UpdateQuery {
-    //         phantom: PhantomData,
-    //     }
-    // }
-
-    // pub fn count(&self)
+    pub fn update<T: Table>(&self, table: fn() -> T) -> UpdateQuery<T::Model> {
+        UpdateQuery::new(self.clone(), table)
+    }
 }

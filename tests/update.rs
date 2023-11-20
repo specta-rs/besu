@@ -1,8 +1,6 @@
-use besu::Database;
+use besu::operators::eq;
 
-pub use schema::User;
-
-// use crate::schema::Post;
+use crate::schema::users;
 
 mod schema;
 
@@ -10,32 +8,29 @@ mod schema;
 
 #[tokio::test]
 async fn update() {
-    let db = Database::new(":memory:").await.unwrap();
+    let db = schema::init().await;
 
-    // db.update(User);
+    db.update(users)
+        .set(users::name, "My New Name")
+        ._where(eq(users::id, 0u64))
+        .await
+        .unwrap();
+    // TODO: Assert it updated correctly
 
-    // db.update(User)
-    //     .set(User::enabled, true)
-    //     ._where(gt(User::id, 5))
-    //     .await;
+    // Update all values
+    db.update(users)
+        .set(users::name, "My New Name")
+        .await
+        .unwrap();
+    // TODO: Assert it updated correctly
 
-    // // TODO: Assert it won't compile
-    // db.update(User).set(User::enabled, true).set(Post::id, true);
+    // TODO: Update many style thing
 
-    // db.query(User)
-    //     ._where(gt(User::id, 5))
-    //     .update()
-    //     .set(User::enabled, true)
-    //     .await;
-
-    // TODO
-}
-
-#[tokio::test]
-async fn update_many() {
-    let db = Database::new(":memory:").await.unwrap();
-
-    // TODO
+    // TODO: Trybuild test
+    // db.update(users)
+    //     .set(posts::title, "My New Name")
+    //     .await
+    //     .unwrap();
 }
 
 // TODO: https://orm.drizzle.team/docs/update#update-with-returning

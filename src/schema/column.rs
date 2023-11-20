@@ -1,3 +1,5 @@
+use crate::SqlValue;
+
 use super::Model;
 
 // This type is sealed!
@@ -11,7 +13,7 @@ pub trait Column {
     type Model: Model;
 
     /// The Rust type of the column.
-    type Type;
+    type Type: Into<SqlValue> + 'static;
 
     fn def() -> ColumnDef;
 }
