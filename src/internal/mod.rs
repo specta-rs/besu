@@ -13,9 +13,14 @@ pub mod construct {
 
     pub const fn table_def(
         name: &'static str,
-        fields: &'static [(&'static str, &'static str)],
+        columns: &'static [&'static str],
+        column_types: &'static [&'static str],
     ) -> TableDef {
-        TableDef { name, fields }
+        TableDef {
+            name,
+            columns,
+            column_types,
+        }
     }
 
     pub const fn column_def(table_name: &'static str, name: &'static str) -> ColumnDef {

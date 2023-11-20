@@ -76,7 +76,7 @@ impl SealedColumnValue for String {
     type Type = Self;
 
     fn into_condition(self) -> Condition {
-        Condition::Value(SqlValue::Text(self))
+        Condition::Value(SqlValue::String(self))
     }
 }
 

@@ -49,11 +49,11 @@ macro_rules! table {
                 type Model = super::$name;
 
                 fn def() -> $crate::schema::TableDef {
-                    $crate::internal::construct::table_def(stringify!($name_def), &[
-                        $(
-                            (stringify!($k), stringify!($t))
-                        ),*
-                    ])
+                    $crate::internal::construct::table_def(
+                        stringify!($name_def),
+                        &[$( stringify!($k) ),*],
+                        &[$( stringify!($t) ),*]
+                    )
                 }
             }
 

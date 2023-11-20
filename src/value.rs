@@ -1,24 +1,25 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlValue {
-    Null,
+    Binary(Vec<u8>),
+    // Sqlite doesn't have a dedicated `BOOL`
     Boolean(bool),
-    Integer(i64),
     Float(f64),
-    Text(String),
-    Array(Vec<SqlValue>),
+    Integer(i64),
+    String(String),
+    Null,
 }
 
 impl SqlValue {
     // TODO: Don't put user values in the query string. Use the `values` collection for it!
     pub(crate) fn to_sql(&self) -> String {
-        // This function is 100% vunerable to SQL injection
+        // This function is 100% vulnerable to SQL injection
         match self {
-            SqlValue::Null => "NULL".to_string(),
+            SqlValue::Binary(binary) => todo!(),
             SqlValue::Boolean(b) => b.to_string(),
-            SqlValue::Integer(i) => i.to_string(),
             SqlValue::Float(f) => f.to_string(),
-            SqlValue::Text(s) => format!("'{}'", s),
-            SqlValue::Array(a) => todo!(), // TODO: I don't think Sqlite supports this
+            SqlValue::Integer(i) => i.to_string(),
+            SqlValue::String(s) => format!("'{}'", s),
+            SqlValue::Null => "NULL".to_string(),
         }
     }
 }
@@ -46,7 +47,7 @@ impl<T: FromValue> FromValue for Option<T> {
 impl FromValue for String {
     fn from_value(value: Vec<SqlValue>) -> Result<Self, ()> {
         if let Some(value) = value.into_iter().next() {
-            if let SqlValue::Text(s) = value {
+            if let SqlValue::String(s) = value {
                 Ok(s)
             } else {
                 Err(())

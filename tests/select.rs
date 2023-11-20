@@ -98,8 +98,8 @@ async fn select() {
             vec![],
         );
         let result: Vec<LeftJoin<Post, User>> = query.await.unwrap();
-        println!("{result:?}");
-        // assert_eq!(result.len(), 1);
+        println!("{result:#?}");
+        assert_eq!(result.len(), 3);
         // TODO: Actually assert some values.
         todo!();
     }

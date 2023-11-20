@@ -103,7 +103,7 @@ impl<M> Query<M> {
     // TODO: Cross join
 
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
-        self.query.to_sql(None)
+        self.query.to_sql()
     }
 }
 
@@ -136,46 +136,30 @@ impl<T: FromValue + 'static, U: FromValue + 'static> IntoFuture for Query<LeftJo
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let mut fields = Vec::with_capacity(self.query.fields_len());
-            let (sql, values) = self.query.to_sql(Some(&mut fields))?;
-
-            #[cfg(debug_assertions)]
-            if fields.len() != self.query.fields_len() {
-                // This indicates a bug, but it's also not a fatal error.
-                println!(
-                    "WARN: Besu expected length {} but got {}",
-                    self.query.fields_len(),
-                    fields.len()
-                )
-            }
-
+            let (sql, values) = self.query.to_sql()?;
             let values = self
                 .db
                 .execute(sql, values)
                 .await?
                 .expect("no return value. Skill issue!");
 
-            // TODO: We allocate a `Vec` then reallocate a `HashMap`. Surley this can be more efficient!
-
             let mut result = Vec::with_capacity(values.len());
-            for values in values {
-                let mut v = HashMap::with_capacity(values.len());
-                let mut fields = fields.iter();
-
-                for value in values {
-                    v.insert(fields.next().unwrap(), value);
+            for mut column in values {
+                // TODO: Make this way more typesafe
+                let mut left: Option<Option<T>> = None;
+                let mut right: Option<U> = None;
+                for (i, table) in self.query.decode_values(&mut column).enumerate() {
+                    match i {
+                        // 0 => left = Some(Option::<T>::from_value(table)?),
+                        0 => left = Some(Some(T::from_value(table)?)), // TODO: handle `Option` correctly
+                        1 => right = Some(U::from_value(table)?),
+                        _ => todo!("Multiple joins are not supported atm"),
+                    }
                 }
-
-                result.push(v)
+                result.push((left.unwrap(), right.unwrap()));
             }
 
-            println!("{:?}", result);
-
-            // Ok(values
-            //     .into_iter()
-            //     .map(|v| M::from_value(v).unwrap())
-            //     .collect())
-            todo!();
+            Ok(result)
         })
     }
 }

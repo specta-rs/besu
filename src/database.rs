@@ -114,7 +114,7 @@ impl Database {
 
                                 // TODO: There has gotta be a better way to do this without dropping sqlx compatibility!
                                 values.push(if let Ok(s) = sqlx::Value::try_decode::<String>(&y) {
-                                    SqlValue::Text(s)
+                                    SqlValue::String(s)
                                 } else if let Ok(s) = sqlx::Value::try_decode::<i32>(&y) {
                                     SqlValue::Integer(s as i64) // SAFTEY: Cast to bigger type
                                 } else if let Ok(s) = sqlx::Value::try_decode::<bool>(&y) {
@@ -140,11 +140,15 @@ impl Database {
         let mut sql = "CREATE TABLE IF NOT EXISTS ".to_string();
         sql.push_str(table.name);
         sql.push_str(" (");
-        for (i, (name, ty)) in table.fields.iter().enumerate() {
+        for (i, col_name) in table.columns.iter().enumerate() {
+            let ty = table
+                .column_types
+                .get(i)
+                .expect("Column and column types length mismatch.");
             if i != 0 {
                 sql.push_str(", ");
             }
-            sql.push_str(name);
+            sql.push_str(col_name);
             sql.push_str(" ");
             // TODO: Do this via a trait cause this is bad.
             sql.push_str(match *ty {

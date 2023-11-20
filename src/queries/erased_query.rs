@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::ops::Range;
 
 use crate::{
     internal::{Either, IntersperseIter},
@@ -28,36 +28,38 @@ impl ErasedQuery {
         }
     }
 
-    pub fn fields_len(&self) -> usize {
-        self.from.fields.len()
-            + self
-                .joins
+    // TODO: Can be avoid the inner `Vec`'s by using lifetimes instead?
+    // TOOD: `.drain` requires the `Vec` to reshuffle. Surley we can avoid that???
+    pub fn decode_values<'a>(
+        &'a self,
+        values: &'a mut Vec<SqlValue>,
+    ) -> impl Iterator<Item = Vec<SqlValue>> + 'a {
+        let y = values.drain(0..self.from.columns.len()).collect::<Vec<_>>();
+        [y].into_iter().chain(
+            self.joins
                 .iter()
                 .flatten()
-                .map(|j| j.table.fields.len())
-                .sum::<usize>()
+                .map(|j| values.drain(0..j.table.columns.len()).collect::<Vec<_>>()),
+        )
     }
 
-    pub fn to_sql(
-        &self,
-        mut field_map: Option<&mut Vec<(&'static str, &'static str)>>,
-    ) -> Result<(String, Vec<SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
         let mut sql = "SELECT ".to_string();
 
         let fields = self
             .from
-            .fields
+            .columns
             .iter()
-            .map(|(col_name, _)| Either::Left((self.from.name, col_name)))
+            .map(|col_name| Either::Left((self.from.name, col_name)))
             .chain(
                 self.joins
                     .iter()
                     .flatten()
                     .map(|j| {
                         j.table
-                            .fields
+                            .columns
                             .iter()
-                            .map(|(col_name, _)| Either::Left((j.table.name, col_name)))
+                            .map(|col_name| Either::Left((j.table.name, col_name)))
                     })
                     .flatten(),
             )
@@ -66,9 +68,6 @@ impl ErasedQuery {
         for v in fields {
             match v {
                 Either::Left((table_name, column_name)) => {
-                    if let Some(fields) = &mut field_map {
-                        fields.push((table_name, column_name));
-                    }
                     sql.push_str(table_name);
                     sql.push('.');
                     sql.push_str(column_name);
