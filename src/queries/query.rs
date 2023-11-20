@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::{Future, IntoFuture},
     marker::PhantomData,
     pin::Pin,
@@ -102,7 +103,7 @@ impl<M> Query<M> {
     // TODO: Cross join
 
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
-        self.query.to_sql()
+        self.query.to_sql(None)
     }
 }
 
@@ -135,14 +136,40 @@ impl<T: FromValue + 'static, U: FromValue + 'static> IntoFuture for Query<LeftJo
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let (sql, values) = self.to_sql()?;
+            let mut fields = Vec::with_capacity(self.query.fields_len());
+            let (sql, values) = self.query.to_sql(Some(&mut fields))?;
+
+            #[cfg(debug_assertions)]
+            if fields.len() != self.query.fields_len() {
+                // This indicates a bug, but it's also not a fatal error.
+                println!(
+                    "WARN: Besu expected length {} but got {}",
+                    self.query.fields_len(),
+                    fields.len()
+                )
+            }
+
             let values = self
                 .db
                 .execute(sql, values)
                 .await?
                 .expect("no return value. Skill issue!");
 
-            println!("{values:?}");
+            // TODO: We allocate a `Vec` then reallocate a `HashMap`. Surley this can be more efficient!
+
+            let mut result = Vec::with_capacity(values.len());
+            for values in values {
+                let mut v = HashMap::with_capacity(values.len());
+                let mut fields = fields.iter();
+
+                for value in values {
+                    v.insert(fields.next().unwrap(), value);
+                }
+
+                result.push(v)
+            }
+
+            println!("{:?}", result);
 
             // Ok(values
             //     .into_iter()

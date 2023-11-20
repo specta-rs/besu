@@ -1,11 +1,12 @@
 mod contains;
+mod either;
 mod equals;
+mod intersperse;
 
-// pub(crate) use contains::Contains;
+pub(crate) use contains::Contains;
+pub(crate) use either::Either;
 pub(crate) use equals::TyEq;
-
-// TODO: Remove
-pub use contains::*;
+pub(crate) use intersperse::IntersperseIter;
 
 pub mod construct {
     use crate::schema::{ColumnDef, TableDef};

@@ -1,7 +1,10 @@
+use std::{borrow::Cow, collections::HashMap};
+
 use crate::{
+    internal::{Either, IntersperseIter},
     operators::{Condition, ErasedWhereCondition},
     schema::TableDef,
-    Database, SqlValue,
+    SqlValue,
 };
 
 pub(crate) struct Join {
@@ -24,13 +27,28 @@ impl ErasedQuery {
             joins: None,
         }
     }
-    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
+
+    pub fn fields_len(&self) -> usize {
+        self.from.fields.len()
+            + self
+                .joins
+                .iter()
+                .flatten()
+                .map(|j| j.table.fields.len())
+                .sum::<usize>()
+    }
+
+    pub fn to_sql(
+        &self,
+        mut field_map: Option<&mut Vec<(&'static str, &'static str)>>,
+    ) -> Result<(String, Vec<SqlValue>), ()> {
         let mut sql = "SELECT ".to_string();
-        for (i, (table_name, column_name)) in self
+
+        let fields = self
             .from
             .fields
             .iter()
-            .map(|(col_name, _)| (self.from.name, col_name))
+            .map(|(col_name, _)| Either::Left((self.from.name, col_name)))
             .chain(
                 self.joins
                     .iter()
@@ -39,18 +57,26 @@ impl ErasedQuery {
                         j.table
                             .fields
                             .iter()
-                            .map(|(col_name, _)| (j.table.name, col_name))
+                            .map(|(col_name, _)| Either::Left((j.table.name, col_name)))
                     })
                     .flatten(),
             )
-            .enumerate()
-        {
-            if i != 0 {
-                sql.push_str(", ");
+            ._intersperse(Either::Right(", "));
+
+        for v in fields {
+            match v {
+                Either::Left((table_name, column_name)) => {
+                    if let Some(fields) = &mut field_map {
+                        fields.push((table_name, column_name));
+                    }
+                    sql.push_str(table_name);
+                    sql.push('.');
+                    sql.push_str(column_name);
+                }
+                Either::Right(value) => {
+                    sql.push_str(value);
+                }
             }
-            sql.push_str(table_name);
-            sql.push_str(".");
-            sql.push_str(column_name);
         }
 
         sql.push_str(" FROM ");
