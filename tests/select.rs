@@ -94,13 +94,14 @@ async fn select() {
         assert_sql(
             query.to_sql(),
             // TODO: Fix the column selection part of this
-            "SELECT posts.id, posts.title, posts.owner_id FROM posts LEFT JOIN users ON posts.owner_id = users.id",
+            "SELECT posts.id, posts.title, posts.owner_id, users.id, users.name, users.age, users.bio, users.phone FROM posts LEFT JOIN users ON posts.owner_id = users.id",
             vec![],
         );
-        // let result: Vec<LeftJoin<User, Post>> = query.await.unwrap();
-        // println!("{result:?}"); // TODO
+        let result: Vec<LeftJoin<Post, User>> = query.await.unwrap();
+        println!("{result:?}");
         // assert_eq!(result.len(), 1);
         // TODO: Actually assert some values.
+        todo!();
     }
 
     // TODO: What happens if we try and do the join in reverse.
