@@ -20,6 +20,7 @@ impl Builder {
 
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         let mut sql = format!("DELETE FROM {}", self.table_name);
+        let mut values = Vec::new();
 
         // TODO: Deduplicate this with the `ErasedQuery` code that is identical.
         let mut where_clause = false;
@@ -36,7 +37,8 @@ impl Builder {
                 ErasedWhereCondition::Condition { a, operator, b } => {
                     match a {
                         Condition::Value(value) => {
-                            sql.push_str(&value.to_sql());
+                            sql.push_str("?");
+                            values.push(value.clone());
                         }
                         Condition::Column { table, column } => {
                             sql.push_str(table);
@@ -49,7 +51,8 @@ impl Builder {
                     sql.push(' ');
                     match b {
                         Condition::Value(value) => {
-                            sql.push_str(&value.to_sql());
+                            sql.push_str("?");
+                            values.push(value.clone());
                         }
                         Condition::Column { table, column } => {
                             sql.push_str(table);
@@ -61,6 +64,6 @@ impl Builder {
             }
         }
 
-        Ok((sql, Vec::new()))
+        Ok((sql, values))
     }
 }

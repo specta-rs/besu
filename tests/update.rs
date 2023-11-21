@@ -1,6 +1,6 @@
 use besu::operators::eq;
 
-use crate::schema::users;
+use crate::schema::{assert_sql, users};
 
 mod schema;
 
@@ -10,37 +10,44 @@ mod schema;
 async fn update() {
     let db = schema::init().await;
 
-    let query = db
-        .update(users)
-        .set(users::name, "My New Name")
-        ._where(eq(users::id, 0u64));
-    assert_eq!(
-        query.to_sql().unwrap().0,
-        "UPDATE users SET name = 'My New Name' WHERE users.id = 0"
-    );
-    query.await.unwrap();
-    // TODO: Assert it updated correctly
+    {
+        let query = db
+            .update(users)
+            .set(users::name, "My New Name")
+            ._where(eq(users::id, 0u64));
+        assert_sql(
+            query.to_sql(),
+            "UPDATE users SET name = ? WHERE users.id = ?",
+            vec!["My New Name".into(), 0u64.into()],
+        );
+        query.await.unwrap();
+        // TODO: Assert it updated correctly
+    }
 
-    // Update all values
-    let query = db.update(users).set(users::name, "My New Name");
-    assert_eq!(
-        query.to_sql().unwrap().0,
-        "UPDATE users SET name = 'My New Name'"
-    );
-    query.await.unwrap();
-    // TODO: Assert it updated correctly
+    {
+        let query = db.update(users).set(users::name, "My New Name");
+        assert_sql(
+            query.to_sql(),
+            "UPDATE users SET name = ?",
+            vec!["My New Name".into()],
+        );
+        query.await.unwrap();
+        // TODO: Assert it updated correctly
+    }
 
-    // Update all values
-    let query = db
-        .update(users)
-        .set(users::name, "My New Name")
-        ._where(eq(users::id, 0u64));
-    assert_eq!(
-        query.to_sql().unwrap().0,
-        "UPDATE users SET name = 'My New Name' WHERE users.id = 0"
-    );
-    query.await.unwrap();
-    // TODO: Assert it updated correctly
+    {
+        let query = db
+            .update(users)
+            .set(users::name, "My New Name")
+            ._where(eq(users::id, 0u64));
+        assert_sql(
+            query.to_sql(),
+            "UPDATE users SET name = ? WHERE users.id = ?",
+            vec!["My New Name".into(), 0u64.into()],
+        );
+        query.await.unwrap();
+        // TODO: Assert it updated correctly
+    }
 
     // TODO: Update many style thing
 

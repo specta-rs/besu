@@ -1,10 +1,10 @@
 use std::{borrow::Cow, path::Path};
 
 use futures::stream::StreamExt;
-use sqlx::{Either, Executor, Row, ValueRef};
+use sqlx::{Either, Executor, FromRow, Row, Statement, ValueRef};
 
 use crate::{
-    queries::{DeleteQuery, InsertQuery, Query, UpdateQuery},
+    queries::{DeleteQuery, InsertQuery, SelectQuery, UpdateQuery},
     schema::Table,
     Error, SqlValue,
 };
@@ -18,9 +18,19 @@ pub(crate) enum Connection {
 
 pub type LoggerFn = fn(&str) -> ();
 
+// TODO: Break this out into `sqlx` submodule
+pub struct SqlxDecoder {}
+
+impl<'r, R: Row> FromRow<'r, R> for SqlxDecoder {
+    fn from_row(row: &'r R) -> Result<Self, sqlx::Error> {
+        todo!();
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     logger: LoggerFn,
+    pub(crate) positional_param: fn(usize) -> Cow<'static, str>,
     conn: Connection,
 }
 
@@ -43,6 +53,8 @@ impl Database {
         #[cfg(feature = "sqlite")]
         Ok(Self {
             logger,
+            // TODO: Allow configuring this. This is SQLite specific.
+            positional_param: |_| Cow::Borrowed("?"),
             conn: Connection::Sqlite({
                 let mut pool = sqlx::sqlite::SqlitePoolOptions::new();
 
@@ -79,6 +91,7 @@ impl Database {
     pub async fn execute(
         &self,
         sql: impl Into<Cow<'static, str>>,
+        // TODO: Allow slice
         values: Vec<SqlValue>,
     ) -> Result<Option<Vec<Vec<SqlValue>>>, Error> {
         let sql = sql.into();
@@ -86,11 +99,24 @@ impl Database {
         match &self.conn {
             #[cfg(feature = "sqlite")]
             Connection::Sqlite(db) => {
-                let rows = db
-                    .fetch_many(match &sql {
-                        Cow::Borrowed(sql) => sql,
-                        Cow::Owned(sql) => sql.as_str(),
-                    })
+                // TOOD: Should *we* cache this statement?
+                // TODO: Should we use `prepare_with`?
+                let statement = db.prepare(&sql).await.unwrap();
+
+                let mut query = statement.query();
+                for value in values {
+                    query = match value {
+                        SqlValue::String(v) => query.bind(v),
+                        SqlValue::Integer(v) => query.bind(v),
+                        SqlValue::Boolean(v) => query.bind(v),
+                        SqlValue::Binary(binary) => todo!(),
+                        SqlValue::Float(v) => query.bind(v),
+                        SqlValue::Null => query.bind(None as Option<String>), // TODO: Is the `String` bit fine?
+                    };
+                }
+
+                let rows = query
+                    .fetch_many(db)
                     .collect::<Vec<
                         Result<
                             Either<sqlx::sqlite::SqliteQueryResult, sqlx::sqlite::SqliteRow>,
@@ -169,8 +195,8 @@ impl Database {
         self.execute(sql, vec![]).await.map(|_| ())
     }
 
-    pub fn select<T: Table>(&self, table: fn() -> T) -> Query<T::Model> {
-        Query::new(self.clone(), table)
+    pub fn select<T: Table>(&self, table: fn() -> T) -> SelectQuery<T::Model> {
+        SelectQuery::new(self.clone(), table)
     }
 
     pub fn insert(&self) -> InsertQuery {

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use besu::{table, Database};
+use besu::{table, Database, Error, SqlValue};
 
 // pub use example_sqlite::{posts, users, Post, User};
 
@@ -110,4 +110,15 @@ pub async fn init() -> Database {
     // TODO: Seed data
 
     db
+}
+
+#[track_caller]
+pub fn assert_sql(
+    v: Result<(String, Vec<SqlValue>), Error>,
+    expected_query: impl Into<String>,
+    expected_values: Vec<SqlValue>,
+) {
+    let (query, values) = v.unwrap();
+    assert_eq!(query, expected_query.into());
+    assert_eq!(values, expected_values);
 }

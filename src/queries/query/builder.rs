@@ -51,6 +51,7 @@ impl Builder {
 
     pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         let mut sql = "SELECT ".to_string();
+        let mut values = Vec::new();
 
         if self.distinct {
             sql.push_str("DISTINCT ");
@@ -100,7 +101,8 @@ impl Builder {
                 ErasedWhereCondition::Condition { a, operator, b } => {
                     match a {
                         Condition::Value(value) => {
-                            sql.push_str(&value.to_sql());
+                            values.push(value.clone());
+                            sql.push_str("?"); // TODO: Get this from the DB
                         }
                         Condition::Column { table, column } => {
                             sql.push_str(table);
@@ -113,7 +115,8 @@ impl Builder {
                     sql.push(' ');
                     match b {
                         Condition::Value(value) => {
-                            sql.push_str(&value.to_sql());
+                            values.push(value.clone());
+                            sql.push_str("?"); // TODO: Get this from the DB
                         }
                         Condition::Column { table, column } => {
                             sql.push_str(table);
@@ -139,7 +142,8 @@ impl Builder {
                 ErasedWhereCondition::Condition { a, operator, b } => {
                     match a {
                         Condition::Value(value) => {
-                            sql.push_str(&value.to_sql());
+                            values.push(value.clone());
+                            sql.push_str("?"); // TODO: Get this from the DB
                         }
                         Condition::Column { table, column } => {
                             sql.push_str(table);
@@ -152,7 +156,8 @@ impl Builder {
                     sql.push(' ');
                     match b {
                         Condition::Value(value) => {
-                            sql.push_str(&value.to_sql());
+                            values.push(value.clone());
+                            sql.push_str("?"); // TODO: Get this from the DB
                         }
                         Condition::Column { table, column } => {
                             sql.push_str(table);
@@ -184,6 +189,6 @@ impl Builder {
             sql.push_str(&offset.to_string());
         }
 
-        Ok((sql, vec![]))
+        Ok((sql, values))
     }
 }

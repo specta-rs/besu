@@ -14,13 +14,13 @@ use builder::{Builder, Join};
 
 mod builder;
 
-pub struct Query<M> {
+pub struct SelectQuery<M> {
     db: Database,
     query: Builder,
     phantom: PhantomData<M>,
 }
 
-impl<M> Query<M> {
+impl<M> SelectQuery<M> {
     pub(crate) fn new<T: Table<Model = M>>(db: Database, table: fn() -> T) -> Self {
         let _ = table;
         Self {
@@ -30,8 +30,8 @@ impl<M> Query<M> {
         }
     }
 
-    fn new_t<T>(self) -> Query<T> {
-        Query {
+    fn new_t<T>(self) -> SelectQuery<T> {
+        SelectQuery {
             db: self.db,
             query: self.query,
             phantom: PhantomData,
@@ -76,7 +76,7 @@ impl<M> Query<M> {
         mut self,
         table: fn() -> T,
         condition: WhereCondition<LeftJoin<M, T::Model>>,
-    ) -> Query<LeftJoin<M, T::Model>> {
+    ) -> SelectQuery<LeftJoin<M, T::Model>> {
         let _ = table;
 
         self.query
@@ -94,7 +94,7 @@ impl<M> Query<M> {
         self,
         table: fn() -> T,
         condition: WhereCondition<RightJoin<M, T::Model>>,
-    ) -> Query<RightJoin<M, T::Model>> {
+    ) -> SelectQuery<RightJoin<M, T::Model>> {
         let _ = table;
         todo!();
     }
@@ -103,7 +103,7 @@ impl<M> Query<M> {
         self,
         table: fn() -> T,
         condition: WhereCondition<InnerJoin<M, T::Model>>,
-    ) -> Query<InnerJoin<M, T::Model>> {
+    ) -> SelectQuery<InnerJoin<M, T::Model>> {
         let _ = table;
         todo!();
     }
@@ -112,7 +112,7 @@ impl<M> Query<M> {
         self,
         table: T,
         condition: WhereCondition<FullJoin<M, T::Model>>,
-    ) -> Query<FullJoin<M, T::Model>> {
+    ) -> SelectQuery<FullJoin<M, T::Model>> {
         let _ = table;
         todo!();
     }
@@ -125,7 +125,7 @@ impl<M> Query<M> {
 }
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
-impl<M: FromValue + 'static> IntoFuture for Query<M> {
+impl<M: FromValue + 'static> IntoFuture for SelectQuery<M> {
     type Output = Result<Vec<M>, Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
@@ -147,7 +147,7 @@ impl<M: FromValue + 'static> IntoFuture for Query<M> {
 }
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
-impl<T: FromValue + 'static, U: FromValue + 'static> IntoFuture for Query<LeftJoin<T, U>> {
+impl<T: FromValue + 'static, U: FromValue + 'static> IntoFuture for SelectQuery<LeftJoin<T, U>> {
     type Output = Result<Vec<LeftJoin<T, U>>, Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 

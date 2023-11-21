@@ -2,11 +2,11 @@ mod schema;
 
 use besu::{
     operators::{eq, WhereCondition},
-    queries::Query,
-    Error, FromValue, LeftJoin, SqlValue,
+    queries::SelectQuery,
+    FromValue, LeftJoin, SqlValue,
 };
 
-use crate::schema::{init, posts, users, Post, User};
+use crate::schema::{assert_sql, init, posts, users, Post, User};
 
 #[tokio::test]
 async fn conditions() {
@@ -30,24 +30,13 @@ async fn values() {
     // TODO: More tests
 }
 
-#[track_caller]
-fn assert_sql(
-    v: Result<(String, Vec<SqlValue>), Error>,
-    expected_query: impl Into<String>,
-    expected_values: Vec<SqlValue>,
-) {
-    let (query, values) = v.unwrap();
-    assert_eq!(query, expected_query.into());
-    assert_eq!(values, expected_values);
-}
-
 // SELECT * FROM table_name WHERE condition;
 #[tokio::test]
 async fn select() {
     let db = init().await;
 
     {
-        let query: Query<User> = db.select(users);
+        let query: SelectQuery<User> = db.select(users);
         assert_sql(
             query.to_sql(),
             "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users",
@@ -59,11 +48,11 @@ async fn select() {
     }
 
     {
-        let query: Query<User> = db.select(users)._where(eq(users::id, 0u64));
+        let query: SelectQuery<User> = db.select(users)._where(eq(users::id, 0u64));
         assert_sql(
             query.to_sql(),
-            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users WHERE users.id = 0",
-            vec![],
+            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users WHERE users.id = ?",
+            vec![0u64.into()],
         );
         let result: Vec<User> = query.await.unwrap();
         println!("{result:?}"); // TODO
@@ -72,14 +61,14 @@ async fn select() {
     }
 
     {
-        let query: Query<User> = db
+        let query: SelectQuery<User> = db
             .select(users)
             ._where(eq(users::id, 0u64))
             ._where(eq(users::name, "Monty Beaumont".to_string()));
         assert_sql(
             query.to_sql(),
-            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users WHERE users.id = 0 AND users.name = 'Monty Beaumont'",
-            vec![],
+            "SELECT users.id, users.name, users.age, users.bio, users.phone FROM users WHERE users.id = ? AND users.name = ?",
+            vec![0u64.into(), "Monty Beaumont".into()],
         );
         let result: Vec<User> = query.await.unwrap();
         println!("{result:?}"); // TODO
@@ -88,7 +77,7 @@ async fn select() {
     }
 
     {
-        let query: Query<LeftJoin<Post, User>> = db
+        let query: SelectQuery<LeftJoin<Post, User>> = db
             .select(posts)
             .left_join(users, eq(posts::owner_id, users::id));
         assert_sql(

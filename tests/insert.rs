@@ -89,6 +89,8 @@ async fn insert_many() {
     // TODO: Assert they were inserted correctly
 }
 
+// TODO: Some basic unit tests for SQL injection just to be sure
+
 // TODO: https://orm.drizzle.team/docs/insert#upserts-and-conflicts
 
 // TODO: https://orm.drizzle.team/docs/insert#insert-returning

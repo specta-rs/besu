@@ -11,6 +11,7 @@ pub enum SqlValue {
 
 impl SqlValue {
     // TODO: Don't put user values in the query string. Use the `values` collection for it!
+    #[deprecated(note = "This function is 100% vulnerable to SQL injection")]
     pub(crate) fn to_sql(&self) -> String {
         // This function is 100% vulnerable to SQL injection
         match self {
@@ -27,6 +28,12 @@ impl SqlValue {
 impl<T: Into<SqlValue>> Into<SqlValue> for Option<T> {
     fn into(self) -> SqlValue {
         self.map(Into::into).unwrap_or(SqlValue::Null)
+    }
+}
+
+impl From<&'static str> for SqlValue {
+    fn from(value: &'static str) -> Self {
+        SqlValue::String(value.to_string()) // TODO: Maybe use `Cow` so it's no alloc?
     }
 }
 
