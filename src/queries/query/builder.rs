@@ -1,18 +1,18 @@
 use crate::{
     internal::{Either, IntersperseIter},
     operators::{Condition, ErasedWhereCondition, OrderClause},
-    schema::TableDef,
+    schema::TableDefinition,
     Error, SqlValue,
 };
 
 pub(crate) struct Join {
-    pub(crate) table: TableDef,
+    pub(crate) table: TableDefinition,
     pub(crate) condition: ErasedWhereCondition,
 }
 
 // `Query` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
 pub(super) struct Builder {
-    pub(crate) from: TableDef,
+    pub(crate) from: TableDefinition,
     pub(crate) _where: Option<Vec<ErasedWhereCondition>>,
     pub(crate) joins: Option<Vec<Join>>,
     pub(crate) order_by: Option<Vec<OrderClause>>,
@@ -22,7 +22,7 @@ pub(super) struct Builder {
 }
 
 impl Builder {
-    pub fn new(from: TableDef) -> Self {
+    pub fn new(from: TableDefinition) -> Self {
         Self {
             from,
             _where: None,

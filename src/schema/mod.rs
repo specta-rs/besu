@@ -2,9 +2,9 @@ mod column;
 mod model;
 mod table;
 
-pub use column::{Column, ColumnDef};
+pub use column::{Column, ColumnDefinition};
 pub use model::Model;
-pub use table::{Table, TableDef};
+pub use table::{Table, TableDefinition};
 
 // TODO: Error on reserved field names - `insert`, etc
 
@@ -58,7 +58,7 @@ macro_rules! table {
             impl $crate::schema::Table for model {
                 type Model = super::$name;
 
-                fn def() -> $crate::schema::TableDef {
+                fn def() -> $crate::schema::TableDefinition {
                     $crate::internal::construct::table_def(
                         stringify!($name_def),
                         &[$( stringify!($k) ),*],
@@ -74,7 +74,7 @@ macro_rules! table {
                     type Model = super::$name;
                     type Type = $t;
 
-                    fn def() -> $crate::schema::ColumnDef {
+                    fn def() -> $crate::schema::ColumnDefinition {
                         $crate::internal::construct::column_def(stringify!($name_def), stringify!($k))
                     }
                 }
@@ -90,7 +90,7 @@ macro_rules! table {
                 }
 
                 impl $crate::queries::InsertValue for insert {
-                    fn def() -> $crate::queries::InsertDef {
+                    fn def() -> $crate::queries::InsertDefinition {
                         $crate::internal::construct::insert_def(stringify!($name_def), &[$( stringify!($ik) ),*])
                     }
 

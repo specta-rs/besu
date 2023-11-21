@@ -10,31 +10,31 @@ pub(crate) use intersperse::IntersperseIter;
 
 pub mod construct {
     use crate::{
-        queries::InsertDef,
-        schema::{ColumnDef, TableDef},
+        queries::InsertDefinition,
+        schema::{ColumnDefinition, TableDefinition},
     };
 
     pub const fn table_def(
         name: &'static str,
         columns: &'static [&'static str],
         column_types: &'static [&'static str],
-    ) -> TableDef {
-        TableDef {
+    ) -> TableDefinition {
+        TableDefinition {
             name,
             columns,
             column_types,
         }
     }
 
-    pub const fn column_def(table_name: &'static str, name: &'static str) -> ColumnDef {
-        ColumnDef { table_name, name }
+    pub const fn column_def(table_name: &'static str, name: &'static str) -> ColumnDefinition {
+        ColumnDefinition { table_name, name }
     }
 
     pub const fn insert_def(
         table_name: &'static str,
         columns: &'static [&'static str],
-    ) -> InsertDef {
-        InsertDef {
+    ) -> InsertDefinition {
+        InsertDefinition {
             table_name,
             columns,
         }

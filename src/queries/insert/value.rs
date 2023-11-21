@@ -1,9 +1,9 @@
 use crate::SqlValue;
 
-use super::InsertDef;
+use super::InsertDefinition;
 
 pub trait InsertValue {
-    fn def() -> InsertDef;
+    fn def() -> InsertDefinition;
 
     fn values(self) -> Vec<SqlValue>;
 }
@@ -12,7 +12,7 @@ pub trait InsertValue {
 
 // Required for `Iterator` of `&[]` because it yields `&V` not `V` as the value can't be owned.
 impl<V: InsertValue + Clone> InsertValue for &V {
-    fn def() -> InsertDef {
+    fn def() -> InsertDefinition {
         V::def()
     }
 

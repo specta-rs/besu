@@ -10,7 +10,7 @@ pub use value::InsertValue;
 
 mod value;
 
-pub struct InsertDef {
+pub struct InsertDefinition {
     pub(crate) table_name: &'static str,
     pub(crate) columns: &'static [&'static str],
 }
@@ -36,7 +36,7 @@ impl InsertQuery {
 }
 
 pub struct InsertQueryFuture {
-    def: InsertDef,
+    def: InsertDefinition,
     // TODO: Construct this into a string at the start instead cause less allocs and simplier
     values: Vec<Vec<SqlValue>>,
     db: Database,

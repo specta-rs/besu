@@ -1,6 +1,6 @@
 use crate::{
     operators::{Condition, ErasedWhereCondition},
-    schema::TableDef,
+    schema::TableDefinition,
     Error, SqlValue,
 };
 
@@ -11,7 +11,7 @@ pub(super) struct Builder {
 }
 
 impl Builder {
-    pub fn new(from: TableDef) -> Self {
+    pub fn new(from: TableDefinition) -> Self {
         Self {
             table_name: from.name,
             _where: Vec::new(),
