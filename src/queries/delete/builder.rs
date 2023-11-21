@@ -5,12 +5,12 @@ use crate::{
 };
 
 // `DeleteQuery` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
-pub(crate) struct ErasedDelete {
+pub(super) struct Builder {
     pub(crate) table_name: &'static str,
     pub(crate) _where: Vec<ErasedWhereCondition>,
 }
 
-impl ErasedDelete {
+impl Builder {
     pub fn new(from: TableDef) -> Self {
         Self {
             table_name: from.name,

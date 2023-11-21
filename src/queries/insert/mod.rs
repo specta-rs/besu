@@ -6,7 +6,14 @@ use std::{
 
 use crate::{Database, SqlValue};
 
-use super::{InsertDef, InsertValue};
+pub use value::InsertValue;
+
+mod value;
+
+pub struct InsertDef {
+    pub(crate) table_name: &'static str,
+    pub(crate) columns: &'static [&'static str],
+}
 
 pub struct InsertQuery {
     pub(crate) db: Database,

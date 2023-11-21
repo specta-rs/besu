@@ -4,39 +4,26 @@ use std::{
     pin::Pin,
 };
 
-use crate::{
-    operators::WhereCondition,
-    schema::{Column, Table},
-    Database, SqlValue,
-};
+use crate::{operators::WhereCondition, schema::Table, Database, SqlValue};
 
-use super::{ErasedUpdate, SetColumn};
+mod builder;
 
-pub struct UpdateQuery<M> {
+use builder::Builder;
+
+pub struct DeleteQuery<M> {
     db: Database,
-    query: ErasedUpdate,
+    query: Builder,
     phantom: PhantomData<M>,
 }
 
-impl<M> UpdateQuery<M> {
+impl<M> DeleteQuery<M> {
     pub(crate) fn new<T: Table<Model = M>>(db: Database, table: fn() -> T) -> Self {
         let _ = table;
         Self {
             db,
-            query: ErasedUpdate::new(T::def()),
+            query: Builder::new(T::def()),
             phantom: PhantomData,
         }
-    }
-
-    pub fn set<C: Column<Model = M>, T: Into<C::Type>>(mut self, field: C, value: T) -> Self {
-        let _ = field;
-        let def = C::def();
-        let t: C::Type = value.into();
-        self.query.columns.push(SetColumn {
-            column_name: def.name,
-            value: t.into(),
-        });
-        self
     }
 
     pub fn _where(mut self, condition: WhereCondition<M>) -> Self {
@@ -49,7 +36,7 @@ impl<M> UpdateQuery<M> {
     }
 }
 
-impl<M: 'static> IntoFuture for UpdateQuery<M> {
+impl<M: 'static> IntoFuture for DeleteQuery<M> {
     type Output = Result<(), ()>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 

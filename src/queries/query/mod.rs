@@ -10,11 +10,13 @@ use crate::{
     Database, FromValue, FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
 };
 
-use super::{erased_query::Join, ErasedQuery};
+use builder::{Builder, Join};
+
+mod builder;
 
 pub struct Query<M> {
     db: Database,
-    query: ErasedQuery,
+    query: Builder,
     phantom: PhantomData<M>,
 }
 
@@ -23,7 +25,7 @@ impl<M> Query<M> {
         let _ = table;
         Self {
             db,
-            query: ErasedQuery::new(T::def()),
+            query: Builder::new(T::def()),
             phantom: PhantomData,
         }
     }

@@ -11,7 +11,7 @@ pub(crate) struct Join {
 }
 
 // `Query` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
-pub(crate) struct ErasedQuery {
+pub(super) struct Builder {
     pub(crate) from: TableDef,
     pub(crate) _where: Option<Vec<ErasedWhereCondition>>,
     pub(crate) joins: Option<Vec<Join>>,
@@ -21,7 +21,7 @@ pub(crate) struct ErasedQuery {
     pub(crate) distinct: bool,
 }
 
-impl ErasedQuery {
+impl Builder {
     pub fn new(from: TableDef) -> Self {
         Self {
             from,
