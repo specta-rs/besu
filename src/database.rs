@@ -18,15 +18,6 @@ pub(crate) enum Connection {
 
 pub type LoggerFn = fn(&str) -> ();
 
-// TODO: Break this out into `sqlx` submodule
-pub struct SqlxDecoder {}
-
-impl<'r, R: Row> FromRow<'r, R> for SqlxDecoder {
-    fn from_row(row: &'r R) -> Result<Self, sqlx::Error> {
-        todo!();
-    }
-}
-
 #[derive(Clone)]
 pub struct Database {
     logger: LoggerFn,
@@ -116,6 +107,7 @@ impl Database {
                 }
 
                 let rows = query
+                    .persistent(false) // TODO: We don't wanna prepare insert mant statements as they can have any number of values
                     .fetch_many(db)
                     .collect::<Vec<
                         Result<

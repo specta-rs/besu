@@ -1,6 +1,7 @@
+use besu::SqlValue;
 pub use schema::User;
 
-use crate::schema::users;
+use crate::schema::{assert_sql, users};
 
 mod schema;
 
@@ -10,55 +11,99 @@ mod schema;
 async fn insert_struct_syntax() {
     let db = schema::init().await;
 
-    let query = db.insert().value(
-        users::insert {
+    {
+        let query = db.insert().value(
+            users::insert {
+                name: "Oscar Beaumont".into(),
+                age: 21,
+                bio: Some("Rust, rust, rust".into()),
+                phone: None,
+            }
+            // Set optional fields or update other fields
+            .bio(Some("My new bio".into())),
+        );
+        assert_sql(
+            query.to_sql(),
+            "INSERT INTO users(name, age, bio, phone) VALUES (?, ?, ?, ?)",
+            vec![
+                "Oscar Beaumont".into(),
+                21.into(),
+                "My new bio".into(),
+                SqlValue::Null,
+            ],
+        );
+        query.await.unwrap();
+        // TODO: Assert it was inserted correctly
+    }
+
+    {
+        let mut user = users::insert {
             name: "Oscar Beaumont".into(),
             age: 21,
             bio: Some("Rust, rust, rust".into()),
             phone: None,
-        }
-        // Set optional fields or update other fields
-        .bio(Some("My new bio".into())),
-    );
-    assert_eq!(query.to_sql().unwrap().0, "INSERT INTO users(name, age, bio, phone) VALUES ('Oscar Beaumont', 21, 'My new bio', NULL)");
-    query.await.unwrap();
-    // TODO: Assert it was inserted correctly
+        };
 
-    let mut user = users::insert {
-        name: "Oscar Beaumont".into(),
-        age: 21,
-        bio: Some("Rust, rust, rust".into()),
-        phone: None,
-    };
+        // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
+        user.edit().bio(Some("My new bio".into())).age(21);
 
-    // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
-    user.edit().bio(Some("My new bio".into())).age(21);
-
-    let query = db.insert().value(user);
-    assert_eq!(query.to_sql().unwrap().0, "INSERT INTO users(name, age, bio, phone) VALUES ('Oscar Beaumont', 21, 'My new bio', NULL)");
-    query.await.unwrap();
-    // TODO: Assert it was inserted correctly
+        let query = db.insert().value(user);
+        assert_sql(
+            query.to_sql(),
+            "INSERT INTO users(name, age, bio, phone) VALUES (?, ?, ?, ?)",
+            vec![
+                "Oscar Beaumont".into(),
+                21.into(),
+                "My new bio".into(),
+                SqlValue::Null,
+            ],
+        );
+        query.await.unwrap();
+        // TODO: Assert it was inserted correctly
+    }
 }
 
 #[tokio::test]
 async fn insert_function_syntax() {
     let db = schema::init().await;
 
-    let query = db.insert().value(
-        User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None)
-            .bio(Some("My new bio".into())),
-    );
-    assert_eq!(query.to_sql().unwrap().0, "INSERT INTO users(name, age, bio, phone) VALUES ('Oscar Beaumont', 21, 'My new bio', NULL)");
-    query.await.unwrap();
+    {
+        let query = db.insert().value(
+            User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None)
+                .bio(Some("My new bio".into())),
+        );
+        assert_sql(
+            query.to_sql(),
+            "INSERT INTO users(name, age, bio, phone) VALUES (?, ?, ?, ?)",
+            vec![
+                "Oscar Beaumont".into(),
+                21.into(),
+                "My new bio".into(),
+                SqlValue::Null,
+            ],
+        );
+        query.await.unwrap();
+    }
 
-    let mut user = User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None);
+    {
+        let mut user = User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None);
 
-    // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
-    user.edit().bio(Some("My new bio".into())).age(21);
+        // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
+        user.edit().bio(Some("My new bio".into())).age(21);
 
-    let query = db.insert().value(user);
-    assert_eq!(query.to_sql().unwrap().0, "INSERT INTO users(name, age, bio, phone) VALUES ('Oscar Beaumont', 21, 'My new bio', NULL)");
-    query.await.unwrap();
+        let query = db.insert().value(user);
+        assert_sql(
+            query.to_sql(),
+            "INSERT INTO users(name, age, bio, phone) VALUES (?, ?, ?, ?)",
+            vec![
+                "Oscar Beaumont".into(),
+                21.into(),
+                "My new bio".into(),
+                SqlValue::Null,
+            ],
+        );
+        query.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -84,7 +129,20 @@ async fn insert_many() {
             phone: None,
         },
     ]);
-    assert_eq!(query.to_sql().unwrap().0, "INSERT INTO users(name, age, bio, phone) VALUES ('Oscar Beaumont', 21, 'Rust, rust, rust', NULL), ('Oscar Beaumont', 21, 'Rust, rust, rust', NULL)");
+    assert_sql(
+        query.to_sql(),
+        "INSERT INTO users(name, age, bio, phone) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+        vec![
+            "Oscar Beaumont".into(),
+            21.into(),
+            "Rust, rust, rust".into(),
+            SqlValue::Null,
+            "Oscar Beaumont".into(),
+            21.into(),
+            "Rust, rust, rust".into(),
+            SqlValue::Null,
+        ],
+    );
     query.await.unwrap();
     // TODO: Assert they were inserted correctly
 }

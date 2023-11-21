@@ -62,16 +62,16 @@ impl InsertQueryFuture {
             }
 
             sql.push_str("(");
-            for (i, value) in values.into_iter().map(|v| v.to_sql()).enumerate() {
+            for i in 0..values.len() {
                 if i != 0 {
                     sql.push_str(", ");
                 }
-                sql.push_str(&value);
+                sql.push_str("?");
             }
             sql.push_str(")");
         }
 
-        Ok((sql, Vec::new()))
+        Ok((sql, self.values.iter().flatten().cloned().collect()))
     }
 }
 
