@@ -1,7 +1,7 @@
 use crate::{
     operators::{Condition, ErasedWhereCondition},
     schema::TableDef,
-    SqlValue,
+    Error, SqlValue,
 };
 
 // `DeleteQuery` is generic on the model and we wanna avoid monomorphization (especially on the `to_sql` function).
@@ -18,7 +18,7 @@ impl Builder {
         }
     }
 
-    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         let mut sql = format!("DELETE FROM {}", self.table_name);
 
         // TODO: Deduplicate this with the `ErasedQuery` code that is identical.

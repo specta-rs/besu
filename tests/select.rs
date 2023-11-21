@@ -3,7 +3,7 @@ mod schema;
 use besu::{
     operators::{eq, WhereCondition},
     queries::Query,
-    FromValue, LeftJoin, SqlValue,
+    Error, FromValue, LeftJoin, SqlValue,
 };
 
 use crate::schema::{init, posts, users, Post, User};
@@ -32,7 +32,7 @@ async fn values() {
 
 #[track_caller]
 fn assert_sql(
-    v: Result<(String, Vec<SqlValue>), ()>,
+    v: Result<(String, Vec<SqlValue>), Error>,
     expected_query: impl Into<String>,
     expected_values: Vec<SqlValue>,
 ) {

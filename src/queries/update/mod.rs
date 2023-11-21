@@ -7,7 +7,7 @@ use std::{
 use crate::{
     operators::WhereCondition,
     schema::{Column, Table},
-    Database, SqlValue,
+    Database, Error, SqlValue,
 };
 
 use builder::{Builder, SetColumn};
@@ -46,13 +46,13 @@ impl<M> UpdateQuery<M> {
         self
     }
 
-    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         self.query.to_sql()
     }
 }
 
 impl<M: 'static> IntoFuture for UpdateQuery<M> {
-    type Output = Result<(), ()>;
+    type Output = Result<(), Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {

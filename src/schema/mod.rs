@@ -33,7 +33,7 @@ macro_rules! table {
         }
 
         impl $crate::FromValue for $name {
-            fn from_value(values: Vec<$crate::SqlValue>) -> Result<Self, ()>
+            fn from_value(values: Vec<$crate::SqlValue>) -> Result<Self, $crate::Error>
             where
                 Self: Sized
             {

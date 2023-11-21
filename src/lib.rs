@@ -10,6 +10,7 @@ pub mod schema;
 mod value;
 
 pub use database::Database;
+pub use error::Error;
 pub use from_value::FromValue;
 pub use value::SqlValue;
 

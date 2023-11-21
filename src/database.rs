@@ -1,12 +1,12 @@
 use std::{borrow::Cow, path::Path};
 
 use futures::stream::StreamExt;
-use sqlx::{Either, Error, Executor, Row, ValueRef};
+use sqlx::{Either, Executor, Row, ValueRef};
 
 use crate::{
     queries::{DeleteQuery, InsertQuery, Query, UpdateQuery},
     schema::Table,
-    SqlValue,
+    Error, SqlValue,
 };
 
 // Sqlx's `Any` connector provides basically no options so we do this. This will also future proof for non-sqlx connectors.
@@ -80,7 +80,7 @@ impl Database {
         &self,
         sql: impl Into<Cow<'static, str>>,
         values: Vec<SqlValue>,
-    ) -> Result<Option<Vec<Vec<SqlValue>>>, ()> {
+    ) -> Result<Option<Vec<Vec<SqlValue>>>, Error> {
         let sql = sql.into();
         (self.logger)(&sql);
         match &self.conn {
@@ -94,16 +94,13 @@ impl Database {
                     .collect::<Vec<
                         Result<
                             Either<sqlx::sqlite::SqliteQueryResult, sqlx::sqlite::SqliteRow>,
-                            Error,
+                            sqlx::Error,
                         >,
                     >>()
                     .await;
                 let mut result: Option<Vec<_>> = None;
                 for row in rows {
-                    let row = row.map_err(|err| {
-                        println!("{err:?}");
-                        ()
-                    })?;
+                    let row = row.map_err(|err| Error::Todo(err.to_string()))?;
 
                     // TODO: Handle more than one result.
                     match row {
@@ -138,7 +135,7 @@ impl Database {
     }
 
     // TODO: Allow providing multiple models.
-    pub async fn migrate<T: Table>(&self, _: fn() -> T) -> Result<(), ()> {
+    pub async fn migrate<T: Table>(&self, _: fn() -> T) -> Result<(), Error> {
         let table = T::def();
         let mut sql = "CREATE TABLE IF NOT EXISTS ".to_string();
         sql.push_str(table.name);

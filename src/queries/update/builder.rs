@@ -1,7 +1,7 @@
 use crate::{
     operators::{Condition, ErasedWhereCondition},
     schema::TableDef,
-    SqlValue,
+    Error, SqlValue,
 };
 
 pub(crate) struct SetColumn {
@@ -25,7 +25,7 @@ impl Builder {
         }
     }
 
-    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         let mut sql = format!("UPDATE ");
         sql.push_str(self.table_name);
         sql.push_str(" SET ");

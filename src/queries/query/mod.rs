@@ -7,7 +7,7 @@ use std::{
 use crate::{
     operators::{OrderClause, WhereCondition},
     schema::{Column, Table},
-    Database, FromValue, FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
+    Database, Error, FromValue, FullJoin, InnerJoin, LeftJoin, RightJoin, SqlValue,
 };
 
 use builder::{Builder, Join};
@@ -119,14 +119,14 @@ impl<M> Query<M> {
 
     // TODO: Cross join
 
-    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         self.query.to_sql()
     }
 }
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
 impl<M: FromValue + 'static> IntoFuture for Query<M> {
-    type Output = Result<Vec<M>, ()>;
+    type Output = Result<Vec<M>, Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -148,7 +148,7 @@ impl<M: FromValue + 'static> IntoFuture for Query<M> {
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
 impl<T: FromValue + 'static, U: FromValue + 'static> IntoFuture for Query<LeftJoin<T, U>> {
-    type Output = Result<Vec<LeftJoin<T, U>>, ()>;
+    type Output = Result<Vec<LeftJoin<T, U>>, Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {

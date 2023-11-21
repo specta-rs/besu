@@ -2,7 +2,7 @@ use crate::{
     internal::{Either, IntersperseIter},
     operators::{Condition, ErasedWhereCondition, OrderClause},
     schema::TableDef,
-    SqlValue,
+    Error, SqlValue,
 };
 
 pub(crate) struct Join {
@@ -49,7 +49,7 @@ impl Builder {
         )
     }
 
-    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<SqlValue>), Error> {
         let mut sql = "SELECT ".to_string();
 
         if self.distinct {

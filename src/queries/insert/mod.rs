@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{Database, SqlValue};
+use crate::{Database, Error, SqlValue};
 
 pub use value::InsertValue;
 
@@ -40,11 +40,11 @@ pub struct InsertQueryFuture {
     // TODO: Construct this into a string at the start instead cause less allocs and simplier
     values: Vec<Vec<SqlValue>>,
     db: Database,
-    future: Option<Pin<Box<dyn Future<Output = Result<(), ()>>>>>,
+    future: Option<Pin<Box<dyn Future<Output = Result<(), Error>>>>>,
 }
 
 impl InsertQueryFuture {
-    pub fn to_sql(&self) -> Result<(String, Vec<crate::SqlValue>), ()> {
+    pub fn to_sql(&self) -> Result<(String, Vec<crate::SqlValue>), Error> {
         let mut sql = format!(
             "INSERT INTO {}({}) VALUES ",
             self.def.table_name,
@@ -53,7 +53,7 @@ impl InsertQueryFuture {
 
         let mut values = self.values.iter().peekable();
         if values.peek().is_none() {
-            return Err(()); // TODO: What does drizzle do?
+            return Err(Error::ErrValuesEmpty);
         }
 
         for (i, values) in values.enumerate() {
@@ -76,10 +76,10 @@ impl InsertQueryFuture {
 }
 
 impl Future for InsertQueryFuture {
-    type Output = Result<(), ()>;
+    type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Shortcut if there are no values to insert
+        // Shortcut if there are no values to insert. This will skip the `Error::ErrValuesEmpty`.
         if self.values.is_empty() {
             return Poll::Ready(Ok(()));
         }
