@@ -36,9 +36,9 @@ impl<M> DeleteQuery<M> {
     }
 }
 
-impl<M: 'static> IntoFuture for DeleteQuery<M> {
+impl<M: Send + 'static> IntoFuture for DeleteQuery<M> {
     type Output = Result<(), Error>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {

@@ -61,3 +61,32 @@ impl FromValue for u64 {
         }
     }
 }
+
+impl FromValue for Option<Vec<u8>> {
+    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = value.into_iter().next() {
+            if let SqlValue::Binary(b) = value {
+                Ok(Some(b))
+            } else {
+                todo!();
+            }
+        } else {
+            todo!();
+        }
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl FromValue for uuid::Uuid {
+    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = value.into_iter().next() {
+            if let SqlValue::Binary(b) = value {
+                Ok(uuid::Uuid::from_bytes_le(b.try_into().unwrap()))
+            } else {
+                todo!();
+            }
+        } else {
+            todo!();
+        }
+    }
+}

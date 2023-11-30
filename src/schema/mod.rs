@@ -12,8 +12,9 @@ pub use table::{Table, TableDefinition};
 macro_rules! table {
     ($name:ident, $name_def:ident, { $($k:ident: $t:ty $(; $(@default($default:expr))? )?),* $(,)? }, {
         insert: { $($ik:ident: $it:ty),* $(,)? },
+        insertOptional: { $($iok:ident: $iot:ty),* $(,)? }
     }) => {
-        #[derive(Debug)]
+        #[derive(Debug, Clone)]
         pub struct $name {
             $(
                 pub $k: $t
@@ -21,16 +22,6 @@ macro_rules! table {
         }
 
         impl $crate::schema::Model for $name {}
-
-        impl $name {
-            pub fn insert($($ik: impl Into<$it>),*) -> $name_def::insert {
-                $name_def::insert {
-                    $(
-                        $ik: $ik.into()
-                    ),*
-                }
-            }
-        }
 
         impl $crate::FromValue for $name {
             fn from_value(values: Vec<$crate::SqlValue>) -> Result<Self, $crate::Error>
@@ -51,53 +42,70 @@ macro_rules! table {
         }
 
         #[allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
-        pub mod $name_def {
-            #[doc(hidden)]
-            pub struct model;
+        mod besu_internal {
+            use super::*;
 
-            impl $crate::schema::Table for model {
-                type Model = super::$name;
+            pub mod $name_def {
+                use super::*;
 
-                fn def() -> $crate::schema::TableDefinition {
-                    $crate::internal::construct::table_def(
-                        stringify!($name_def),
-                        &[$( stringify!($k) ),*],
-                        &[$( stringify!($t) ),*]
-                    )
-                }
-            }
+                #[doc(hidden)]
+                pub struct model;
 
-            $(
-                pub struct $k;
-
-                impl $crate::schema::Column for $k {
+                impl $crate::schema::Table for model {
                     type Model = super::$name;
-                    type Type = $t;
 
-                    fn def() -> $crate::schema::ColumnDefinition {
-                        $crate::internal::construct::column_def(stringify!($name_def), stringify!($k))
+                    fn def() -> $crate::schema::TableDefinition {
+                        $crate::internal::construct::table_def(
+                            stringify!($name_def),
+                            &[$( stringify!($k) ),*],
+                            &[$( stringify!($t) ),*]
+                        )
                     }
                 }
-            )*
+
+                $(
+                    pub struct $k;
+
+                    impl $crate::schema::Column for $k {
+                        type Model = super::$name;
+                        type Type = $t;
+
+                        fn def() -> $crate::schema::ColumnDefinition {
+                            $crate::internal::construct::column_def(stringify!($name_def), stringify!($k))
+                        }
+                    }
+                )*
+
+                pub use super::inner::{insert, insert_mut};
+            }
+
 
             // The `pub const COLUMN_NAME` conflict so this separate them.
             mod inner {
-                #[derive(Debug)]
+                use super::*;
+
+                #[derive(Debug, Default)] // TODO: Remove this `Default` impl once the macros are smarter
                 pub struct insert {
                     $(
-                        pub $ik: $it
+                        pub $ik: $it,
+                    )*
+                    $(
+                        pub $iok: Option<$iot>
                     ),*
                 }
 
                 impl $crate::queries::InsertValue for insert {
                     fn def() -> $crate::queries::InsertDefinition {
-                        $crate::internal::construct::insert_def(stringify!($name_def), &[$( stringify!($ik) ),*])
+                        $crate::internal::construct::insert_def(stringify!($name_def), &[$( stringify!($ik), )* $( stringify!($iok) ),*])
                     }
 
                     fn values(self) -> Vec<$crate::SqlValue> {
                         vec![
                             $(
-                                self.$ik.into()
+                                self.$ik.into(),
+                            )*
+                            $(
+                                self.$iok.into()
                             ),*
                         ]
                     }
@@ -114,6 +122,24 @@ macro_rules! table {
                             self
                         }
                     )*
+
+                    $(
+                        pub fn $iok<V: Into<Option<$iot>>>(mut self, $iok: V) -> Self {
+                            self.$iok = $iok.into();
+                            self
+                        }
+                    )*
+                }
+
+                pub fn insert($($ik: impl Into<$it>),*) -> $name_def::insert {
+                    $name_def::insert {
+                        $(
+                            $ik: $ik.into(),
+                        )*
+                        $(
+                            $iok: None
+                        ),*
+                    }
                 }
 
                 pub struct insert_mut<'a>(&'a mut insert);
@@ -125,11 +151,18 @@ macro_rules! table {
                             self
                         }
                     )*
+
+                    $(
+                        pub fn $iok<V: Into<Option<$iot>>>(&mut self, $iok: V) -> &mut Self {
+                            self.0.$iok = $iok.into();
+                            self
+                        }
+                    )*
                 }
             }
-
-            pub use inner::insert;
         }
+
+        pub use besu_internal::*;
     };
 
     (@internal; insert_ty; Option<$ty:path>) => {bool};

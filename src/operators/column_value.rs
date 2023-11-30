@@ -89,6 +89,25 @@ impl SealedColumnValue for bool {
     }
 }
 
+impl SealedColumnValue for Vec<u8> {
+    type Model<M> = M;
+    type Type = Self;
+
+    fn into_condition(self) -> Condition {
+        Condition::Value(SqlValue::Binary(self))
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl SealedColumnValue for uuid::Uuid {
+    type Model<M> = M;
+    type Type = Self;
+
+    fn into_condition(self) -> Condition {
+        Condition::Value(SqlValue::Binary(self.as_bytes().to_vec()))
+    }
+}
+
 impl<C: Column> SealedColumnValue for C {
     type Model<MM> = C::Model;
     type Type = C::Type;

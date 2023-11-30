@@ -2,7 +2,7 @@
 
 Typesafe query builder for Rust.
 
-This project is heavily inspired by [Drizzle ORM](https://github.com/drizzle-team/drizzle-orm).
+This project is heavily inspired by [Drizzle ORM](https://github.com/drizzle-team/drizzle-orm) and elements of [SQLx](https://github.com/launchbadge/sqlx) and [Prisma](https://www.prisma.io).
 
 ## Features
 

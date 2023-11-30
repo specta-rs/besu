@@ -4,6 +4,20 @@ use besu::{table, Database, Error, SqlValue};
 
 // pub use example_sqlite::{posts, users, Post, User};
 
+mod demo {
+    besu::table!(Demo, demo, {
+        id: u64,
+    },
+    // Right now the macro isn't very smart. The following will all be derived from the above.
+    {
+        // Strip PK, change to `Option` if has `@default`
+        insert: {},
+        insertOptional: {}
+    });
+}
+
+pub use demo::demo; // TODO: Make this compile
+
 table!(User, users, {
     id: u64,
     name: String,

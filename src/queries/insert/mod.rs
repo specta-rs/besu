@@ -40,7 +40,7 @@ pub struct InsertQueryFuture {
     // TODO: Construct this into a string at the start instead cause less allocs and simplier
     values: Vec<Vec<SqlValue>>,
     db: Database,
-    future: Option<Pin<Box<dyn Future<Output = Result<(), Error>>>>>,
+    future: Option<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
 }
 
 impl InsertQueryFuture {

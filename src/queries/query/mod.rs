@@ -125,9 +125,9 @@ impl<M> SelectQuery<M> {
 }
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
-impl<M: FromValue + 'static> IntoFuture for SelectQuery<M> {
+impl<M: FromValue + Send + 'static> IntoFuture for SelectQuery<M> {
     type Output = Result<Vec<M>, Error>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
@@ -147,9 +147,11 @@ impl<M: FromValue + 'static> IntoFuture for SelectQuery<M> {
 }
 
 // This is definitely DX over performance but `impl Trait` is gonna land soon and regardless I think I could make this no alloc for SQLite at least.
-impl<T: FromValue + 'static, U: FromValue + 'static> IntoFuture for SelectQuery<LeftJoin<T, U>> {
+impl<T: FromValue + Send + 'static, U: FromValue + 'static> IntoFuture
+    for SelectQuery<LeftJoin<T, U>>
+{
     type Output = Result<Vec<LeftJoin<T, U>>, Error>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {

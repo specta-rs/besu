@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::Path};
+use std::{borrow::Cow, fmt, path::Path};
 
 use futures::stream::StreamExt;
 use sqlx::{Either, Executor, FromRow, Row, Statement, ValueRef};
@@ -23,6 +23,17 @@ pub struct Database {
     logger: LoggerFn,
     pub(crate) positional_param: fn(usize) -> Cow<'static, str>,
     conn: Connection,
+}
+
+impl fmt::Debug for Database {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Database")
+            .field(match self.conn {
+                #[cfg(feature = "sqlite")]
+                Connection::Sqlite(_) => &"SQLite",
+            })
+            .finish()
+    }
 }
 
 impl Database {
@@ -100,7 +111,7 @@ impl Database {
                         SqlValue::String(v) => query.bind(v),
                         SqlValue::Integer(v) => query.bind(v),
                         SqlValue::Boolean(v) => query.bind(v),
-                        SqlValue::Binary(binary) => todo!(),
+                        SqlValue::Binary(binary) => query.bind(binary),
                         SqlValue::Float(v) => query.bind(v),
                         SqlValue::Null => query.bind(None as Option<String>), // TODO: Is the `String` bit fine?
                     };
@@ -177,6 +188,9 @@ impl Database {
                 "bool" => "BOOLEAN NOT NULL",
                 "String" => "TEXT NOT NULL",
                 "Option<String>" => "TEXT",
+                "Vec<u8>" => "BLOB NOT NULL",
+                "Option<Vec<u8>>" => "BLOB",
+                "Uuid" => "BLOB",
                 v => todo!("Missing type: {v}"),
             });
 

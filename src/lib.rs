@@ -4,6 +4,7 @@
 mod database;
 mod error;
 mod from_value;
+mod insert;
 pub mod operators;
 pub mod queries;
 pub mod schema;

@@ -50,3 +50,16 @@ impl From<bool> for SqlValue {
         SqlValue::Boolean(value)
     }
 }
+
+impl From<Vec<u8>> for SqlValue {
+    fn from(value: Vec<u8>) -> Self {
+        SqlValue::Binary(value)
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl From<uuid::Uuid> for SqlValue {
+    fn from(value: uuid::Uuid) -> Self {
+        SqlValue::Binary(value.to_bytes_le().to_vec())
+    }
+}

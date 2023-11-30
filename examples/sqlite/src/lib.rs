@@ -17,6 +17,7 @@ table!(User, users, {
         bio: Option<String>,
         phone: Option<String>,
     },
+    insertOptional: {}
 });
 
 table!(Post, posts, {
@@ -25,6 +26,6 @@ table!(Post, posts, {
 // Right now the macro isn't very smart. The following will all be derived from the above.
 {
     // Strip PK, change to `Option` if has `@default`
-    insert: {
-    },
+    insert: {},
+    insertOptional: {}
 });
