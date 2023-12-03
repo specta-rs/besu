@@ -1,10 +1,12 @@
 use proc_macro::TokenStream;
-use quote::quote;
+use util::ConstIdent;
+
+mod table;
+mod util;
+
+static CRATE_NAME: ConstIdent = ConstIdent::new("besu");
 
 #[proc_macro]
-pub fn table_v2(_tokens: TokenStream) -> TokenStream {
-    quote! {
-        todo!();
-    }
-    .into()
+pub fn table(tokens: TokenStream) -> TokenStream {
+    table::table(tokens)
 }

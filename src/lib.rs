@@ -10,6 +10,7 @@ pub mod queries;
 pub mod schema;
 mod value;
 
+pub use besu_macros::table;
 pub use database::Database;
 pub use error::Error;
 pub use from_value::FromValue;

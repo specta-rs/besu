@@ -4,65 +4,25 @@ use besu::{table, Database, Error, SqlValue};
 
 // pub use example_sqlite::{posts, users, Post, User};
 
-mod demo {
-    besu::table!(Demo, demo, {
-        id: u64,
-    },
-    // Right now the macro isn't very smart. The following will all be derived from the above.
-    {
-        // Strip PK, change to `Option` if has `@default`
-        insert: {},
-        insertOptional: {}
-    });
-}
-
-pub use demo::demo; // TODO: Make this compile
-
 table!(User, users, {
-    id: u64,
-    name: String,
-    age: u8,
-    bio: String; @default("Cool"),
-    phone: Option<String>,
+    id: |t| t.serial("id"),
+    name: |t| t.text("name"),
+    age: |t| t.int("age"), // TODO: Use `u8` not default `int` type???
+    bio: |t| t.text("bio").default("Cool"),
+    phone: |t| t.text("phone").optional(),
     // posts: Many<Post>,
-},
-// Right now the macro isn't very smart. The following will all be derived from the above.
-{
-    // Strip PK, change to `Option` if has `@default`
-    insert: {
-        name: String,
-        age: u8,
-        bio: Option<String>,
-        phone: Option<String>,
-    },
 });
 
 table!(Post, posts, {
-    id: u64,
-    title: String,
-    owner_id: u64,
-},
-// Right now the macro isn't very smart. The following will all be derived from the above.
-{
-    // Strip PK, change to `Option` if has `@default`
-    insert: {
-        title: String,
-        owner_id: u64, // TODO: Enforce foreign key within type system
-    },
+    id: |t| t.serial("id"),
+    title: |t| t.text("title"),
+    owner_id: |t| t.int("owner_id"), // TODO: Enforce foreign keys within type system
 });
 
 table!(Comment, comments, {
-    id: u64,
-    title: String,
-    author_id: u64,
-},
-// Right now the macro isn't very smart. The following will all be derived from the above.
-{
-    // Strip PK, change to `Option` if has `@default`
-    insert: {
-        title: String,
-        author_id: u64, // TODO: Enforce foreign key within type system
-    },
+    id: |t| t.serial("id"),
+    title: |t| t.text("title"),
+    author_id: |t| t.int("author_id"),
 });
 
 pub async fn init() -> Database {

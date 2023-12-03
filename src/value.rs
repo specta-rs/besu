@@ -6,6 +6,7 @@ pub enum SqlValue {
     Float(f64),
     Integer(i64),
     String(String),
+    Default, // TODO: I don't thing I like this
     Null,
 }
 

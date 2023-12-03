@@ -14,13 +14,14 @@ async fn insert_struct_syntax() {
     {
         let query = db.insert().value(
             users::insert {
+                id: None,
                 name: "Oscar Beaumont".into(),
                 age: 21,
                 bio: Some("Rust, rust, rust".into()),
                 phone: None,
             }
             // Set optional fields or update other fields
-            .bio(Some("My new bio".into())),
+            .bio("My new bio"),
         );
         assert_sql(
             query.to_sql(),
@@ -38,6 +39,7 @@ async fn insert_struct_syntax() {
 
     {
         let mut user = users::insert {
+            id: None,
             name: "Oscar Beaumont".into(),
             age: 21,
             bio: Some("Rust, rust, rust".into()),
@@ -45,7 +47,7 @@ async fn insert_struct_syntax() {
         };
 
         // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
-        user.edit().bio(Some("My new bio".into())).age(21);
+        user.edit().bio("My new bio").age(21u64);
 
         let query = db.insert().value(user);
         assert_sql(
@@ -68,10 +70,9 @@ async fn insert_function_syntax() {
     let db = schema::init().await;
 
     {
-        let query = db.insert().value(
-            User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None)
-                .bio(Some("My new bio".into())),
-        );
+        let query = db
+            .insert()
+            .value(users::insert("Oscar Beaumont", 21u64).bio("My new bio"));
         assert_sql(
             query.to_sql(),
             "INSERT INTO users(name, age, bio, phone) VALUES (?, ?, ?, ?)",
@@ -86,10 +87,10 @@ async fn insert_function_syntax() {
     }
 
     {
-        let mut user = User::insert("Oscar Beaumont", 21, Some("Rust, rust, rust".into()), None);
+        let mut user = users::insert("Oscar Beaumont", 21u64);
 
         // Use `edit()` to update fields (`&mut self` instead of `self`). You can chain updates!
-        user.edit().bio(Some("My new bio".into())).age(21);
+        user.edit().bio("My new bio").age(21u64);
 
         let query = db.insert().value(user);
         assert_sql(
@@ -117,12 +118,14 @@ async fn insert_many() {
 
     let query = db.insert().values([
         users::insert {
+            id: None,
             name: "Oscar Beaumont".into(),
             age: 21,
             bio: Some("Rust, rust, rust".into()),
             phone: None,
         },
         users::insert {
+            id: None,
             name: "Oscar Beaumont".into(),
             age: 21,
             bio: Some("Rust, rust, rust".into()),

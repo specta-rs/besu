@@ -113,6 +113,7 @@ impl Database {
                         SqlValue::Boolean(v) => query.bind(v),
                         SqlValue::Binary(binary) => query.bind(binary),
                         SqlValue::Float(v) => query.bind(v),
+                        SqlValue::Default => todo!("Not supported by SQLite"),
                         SqlValue::Null => query.bind(None as Option<String>), // TODO: Is the `String` bit fine?
                     };
                 }
@@ -180,7 +181,7 @@ impl Database {
             sql.push_str(col_name);
             sql.push_str(" ");
             // TODO: Do this via a trait cause this is bad.
-            sql.push_str(match *ty {
+            sql.push_str(match ty.replace(" ", "").as_str() {
                 "u8" | "i32" | "u64" => match i {
                     0 => "INTEGER PRIMARY KEY AUTOINCREMENT", // TODO: Auto incrementing ID should be configured by the user not implied.
                     _ => "INTEGER NOT NULL",
