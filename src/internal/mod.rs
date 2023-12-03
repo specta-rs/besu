@@ -3,10 +3,13 @@ mod either;
 mod equals;
 mod intersperse;
 
-pub(crate) use contains::Contains;
+pub use contains::Contains;
 pub(crate) use either::Either;
 pub(crate) use equals::TyEq;
 pub(crate) use intersperse::IntersperseIter;
+
+#[cfg(feature = "serde")]
+pub use serde::{Deserialize, Serialize};
 
 pub mod construct {
     use crate::{

@@ -19,6 +19,7 @@ pub(crate) use where_condition::{Condition, ErasedWhereCondition};
 /// ```rust
 /// // TODO
 /// ```
+// TODO: How can custom SQLValue's be escaped into this
 pub fn sql<S: Into<Cow<'static, str>>, M>(sql: S) -> WhereCondition<M> {
     WhereCondition::new(ErasedWhereCondition::Raw(sql.into()))
 }
@@ -44,14 +45,76 @@ where
 }
 
 // TODO: Enforce only integer types
-// pub fn gt<A, B>(column: ) -> WhereCondition<A, B> {
-//     todo!();
-// }
+pub fn gt<P, P2, A: ColumnValue, B: ColumnValue, M>(a: A, b: B) -> WhereCondition<M>
+where
+    (M,): Contains<P, A::Model<M>>,
+    (M,): Contains<P2, B::Model<M>>,
+    // This could technically be `B: ColumValue<Type = A::Type>` but the errors are *much* better this way
+    (A::Type, B::Type): TyEq,
+{
+    WhereCondition::new(ErasedWhereCondition::Condition {
+        a: a.into_condition(),
+        operator: ">",
+        b: b.into_condition(),
+    })
+}
+
+pub fn gte<P, P2, A: ColumnValue, B: ColumnValue, M>(a: A, b: B) -> WhereCondition<M>
+where
+    (M,): Contains<P, A::Model<M>>,
+    (M,): Contains<P2, B::Model<M>>,
+    // This could technically be `B: ColumValue<Type = A::Type>` but the errors are *much* better this way
+    (A::Type, B::Type): TyEq,
+{
+    WhereCondition::new(ErasedWhereCondition::Condition {
+        a: a.into_condition(),
+        operator: ">=",
+        b: b.into_condition(),
+    })
+}
 
 // TODO: Enforce only integer types
-// pub fn lt<M, T>(column: Column<M, T>, value: T) -> WhereCondition<M> {
-//     todo!();
-// }
+pub fn lt<P, P2, A: ColumnValue, B: ColumnValue, M>(a: A, b: B) -> WhereCondition<M>
+where
+    (M,): Contains<P, A::Model<M>>,
+    (M,): Contains<P2, B::Model<M>>,
+    // This could technically be `B: ColumValue<Type = A::Type>` but the errors are *much* better this way
+    (A::Type, B::Type): TyEq,
+{
+    WhereCondition::new(ErasedWhereCondition::Condition {
+        a: a.into_condition(),
+        operator: "<",
+        b: b.into_condition(),
+    })
+}
+
+pub fn lte<P, P2, A: ColumnValue, B: ColumnValue, M>(a: A, b: B) -> WhereCondition<M>
+where
+    (M,): Contains<P, A::Model<M>>,
+    (M,): Contains<P2, B::Model<M>>,
+    // This could technically be `B: ColumValue<Type = A::Type>` but the errors are *much* better this way
+    (A::Type, B::Type): TyEq,
+{
+    WhereCondition::new(ErasedWhereCondition::Condition {
+        a: a.into_condition(),
+        operator: "<=",
+        b: b.into_condition(),
+    })
+}
+
+pub fn like<P, P2, A: ColumnValue, B: ColumnValue, M>(a: A, b: B) -> WhereCondition<M>
+where
+    (M,): Contains<P, A::Model<M>>,
+    (M,): Contains<P2, B::Model<M>>,
+    // This could technically be `B: ColumValue<Type = A::Type>` but the errors are *much* better this way
+    (A::Type, B::Type): TyEq,
+{
+    WhereCondition::new(ErasedWhereCondition::Condition {
+        a: a.into_condition(),
+        operator: "LIKE",
+        b: b.into_condition(),
+    })
+}
 
 // pub fn _in<M, T>(column: Column<M, T>, value: Vec<T>) -> WhereCondition<M> {
 //     todo!();

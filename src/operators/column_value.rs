@@ -2,18 +2,25 @@ use crate::{schema::Column, SqlValue};
 
 use super::where_condition::Condition;
 
-pub trait ColumnValue: SealedColumnValue {}
-
-pub(crate) trait SealedColumnValue {
+pub trait ColumnValue {
+    // TODO: This being a GAT makes it hard to constrain in userspace code. I know removing it is hard but it *should* be done.
     type Model<M>;
     type Type;
 
     fn into_condition(self) -> Condition;
 }
 
-impl<T: SealedColumnValue> ColumnValue for T {}
+// TODO: This is a conflicting impl
+// impl<T: ColumnValue> ColumnValue for &T {
+//     type Model<M> = T::Model<M>;
+//     type Type = T::Type;
 
-impl SealedColumnValue for i32 {
+//     fn into_condition(self) -> Condition {
+//         T::into_condition(*self)
+//     }
+// }
+
+impl ColumnValue for i32 {
     type Model<M> = M;
     type Type = Self;
 
@@ -23,7 +30,7 @@ impl SealedColumnValue for i32 {
     }
 }
 
-impl SealedColumnValue for u32 {
+impl ColumnValue for u32 {
     type Model<M> = M;
     type Type = Self;
 
@@ -33,7 +40,7 @@ impl SealedColumnValue for u32 {
     }
 }
 
-impl SealedColumnValue for i64 {
+impl ColumnValue for i64 {
     type Model<M> = M;
     type Type = Self;
 
@@ -42,7 +49,7 @@ impl SealedColumnValue for i64 {
     }
 }
 
-impl SealedColumnValue for u64 {
+impl ColumnValue for u64 {
     type Model<M> = M;
     type Type = Self;
 
@@ -52,7 +59,7 @@ impl SealedColumnValue for u64 {
     }
 }
 
-impl SealedColumnValue for f32 {
+impl ColumnValue for f32 {
     type Model<M> = M;
     type Type = Self;
 
@@ -62,7 +69,7 @@ impl SealedColumnValue for f32 {
     }
 }
 
-impl SealedColumnValue for f64 {
+impl ColumnValue for f64 {
     type Model<M> = M;
     type Type = Self;
 
@@ -71,7 +78,7 @@ impl SealedColumnValue for f64 {
     }
 }
 
-impl SealedColumnValue for String {
+impl ColumnValue for String {
     type Model<M> = M;
     type Type = Self;
 
@@ -80,7 +87,7 @@ impl SealedColumnValue for String {
     }
 }
 
-impl SealedColumnValue for bool {
+impl ColumnValue for bool {
     type Model<M> = M;
     type Type = Self;
 
@@ -89,7 +96,7 @@ impl SealedColumnValue for bool {
     }
 }
 
-impl SealedColumnValue for Vec<u8> {
+impl ColumnValue for Vec<u8> {
     type Model<M> = M;
     type Type = Self;
 
@@ -99,7 +106,7 @@ impl SealedColumnValue for Vec<u8> {
 }
 
 #[cfg(feature = "uuid")]
-impl SealedColumnValue for uuid::Uuid {
+impl ColumnValue for uuid::Uuid {
     type Model<M> = M;
     type Type = Self;
 
@@ -108,7 +115,7 @@ impl SealedColumnValue for uuid::Uuid {
     }
 }
 
-impl<C: Column> SealedColumnValue for C {
+impl<C: Column> ColumnValue for C {
     type Model<MM> = C::Model;
     type Type = C::Type;
 

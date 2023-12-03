@@ -13,6 +13,7 @@ mod value;
 pub use database::Database;
 pub use error::Error;
 pub use from_value::FromValue;
+pub use internal::Contains;
 pub use value::SqlValue;
 
 pub type RightJoin<T, U> = (T, Option<U>);
