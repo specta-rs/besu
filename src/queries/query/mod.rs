@@ -132,15 +132,14 @@ impl<M: FromValue + Send + 'static> IntoFuture for SelectQuery<M> {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let (sql, values) = self.to_sql()?;
-            let values = self
+
+            Ok(self
                 .db
                 .execute(sql, values)
                 .await?
                 .rows
-                .expect("no return value. Skill issue!");
-
-            Ok(values
                 .into_iter()
+                .flatten()
                 .map(|v| M::from_value(v).unwrap())
                 .collect())
         })

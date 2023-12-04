@@ -200,7 +200,7 @@ impl Database {
                 "Option<String>" => "TEXT",
                 "Vec<u8>" => "BLOB NOT NULL",
                 "Option<Vec<u8>>" => "BLOB",
-                "Uuid" => "BLOB",
+                "uuid::Uuid" | "Uuid" => "BLOB",
                 v => todo!("Missing type: {v}"),
             });
 

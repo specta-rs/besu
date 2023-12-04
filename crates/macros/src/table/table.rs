@@ -246,8 +246,12 @@ impl Table {
         let field_values = self.fields.iter().map(|f| {
             let ident = &f.ident;
 
-            if f.schema.default.is_some() {
-                quote!(self.#ident.map(|v| v.into()).unwrap_or(#CRATE_NAME::SqlValue::Default))
+            if let Some(default) = &f.schema.default {
+                // TODO: If the database supports `DEFAULT`
+                // quote!(self.#ident.map(|v| v.into()).unwrap_or(#CRATE_NAME::SqlValue::Default))
+
+                // Workaround for SQLite not supporting `DEFAULT`
+                quote!(self.#ident.map(|v| v.into()).unwrap_or_else(|| #default))
             } else {
                 quote!(self.#ident.into())
             }
