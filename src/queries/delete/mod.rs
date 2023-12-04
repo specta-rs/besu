@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
 };
 
-use crate::{operators::WhereCondition, schema::Table, Database, Error, SqlValue};
+use crate::{operators::WhereCondition, schema::Table, Database, Error, ExecutedQuery, SqlValue};
 
 mod builder;
 
@@ -37,13 +37,13 @@ impl<M> DeleteQuery<M> {
 }
 
 impl<M: Send + 'static> IntoFuture for DeleteQuery<M> {
-    type Output = Result<(), Error>;
+    type Output = Result<ExecutedQuery, Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let (sql, values) = self.to_sql()?;
-            self.db.execute(sql, values).await.map(|_| ())
+            self.db.execute(sql, values).await
         })
     }
 }

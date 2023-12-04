@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{Database, Error, SqlValue};
+use crate::{Database, Error, ExecutedQuery, SqlValue};
 
 pub use value::InsertValue;
 
@@ -40,7 +40,7 @@ pub struct InsertQueryFuture {
     // TODO: Construct this into a string at the start instead cause less allocs and simplier
     values: Vec<Vec<SqlValue>>,
     db: Database,
-    future: Option<Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>>,
+    future: Option<Pin<Box<dyn Future<Output = Result<ExecutedQuery, Error>> + Send>>>,
 }
 
 impl InsertQueryFuture {
@@ -76,12 +76,16 @@ impl InsertQueryFuture {
 }
 
 impl Future for InsertQueryFuture {
-    type Output = Result<(), Error>;
+    type Output = Result<ExecutedQuery, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Shortcut if there are no values to insert. This will skip the `Error::ErrValuesEmpty`.
         if self.values.is_empty() {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(ExecutedQuery {
+                rows: None,
+                rows_affected: 0,
+                last_insert_id: 0,
+            }));
         }
 
         loop {
@@ -92,7 +96,7 @@ impl Future for InsertQueryFuture {
                     let db = self.db.clone();
                     self.future = Some(Box::pin(async move {
                         let (sql, values) = result?;
-                        db.execute(sql, values).await.map(|_| ())
+                        db.execute(sql, values).await
                     }));
                 }
             }

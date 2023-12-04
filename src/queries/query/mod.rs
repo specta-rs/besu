@@ -136,6 +136,7 @@ impl<M: FromValue + Send + 'static> IntoFuture for SelectQuery<M> {
                 .db
                 .execute(sql, values)
                 .await?
+                .rows
                 .expect("no return value. Skill issue!");
 
             Ok(values
@@ -160,6 +161,7 @@ impl<T: FromValue + Send + 'static, U: FromValue + 'static> IntoFuture
                 .db
                 .execute(sql, values)
                 .await?
+                .rows
                 .expect("no return value. Skill issue!");
 
             let mut result = Vec::with_capacity(values.len());

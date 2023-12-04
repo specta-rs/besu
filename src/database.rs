@@ -1,12 +1,12 @@
 use std::{borrow::Cow, fmt, path::Path};
 
 use futures::stream::StreamExt;
-use sqlx::{Either, Executor, FromRow, Row, Statement, ValueRef};
+use sqlx::{Either, Executor, Row, Statement, ValueRef};
 
 use crate::{
     queries::{DeleteQuery, InsertQuery, SelectQuery, UpdateQuery},
     schema::Table,
-    Error, SqlValue,
+    Error, ExecutedQuery, SqlValue,
 };
 
 // Sqlx's `Any` connector provides basically no options so we do this. This will also future proof for non-sqlx connectors.
@@ -95,7 +95,7 @@ impl Database {
         sql: impl Into<Cow<'static, str>>,
         // TODO: Allow slice
         values: Vec<SqlValue>,
-    ) -> Result<Option<Vec<Vec<SqlValue>>>, Error> {
+    ) -> Result<ExecutedQuery, Error> {
         let sql = sql.into();
         (self.logger)(&sql);
         match &self.conn {
@@ -129,12 +129,17 @@ impl Database {
                     >>()
                     .await;
                 let mut result: Option<Vec<_>> = None;
+                let mut rows_affected = 0;
+                let mut last_insert_id = 0;
                 for row in rows {
                     let row = row.map_err(|err| Error::Todo(err.to_string()))?;
 
                     // TODO: Handle more than one result.
                     match row {
-                        Either::Left(_) => {}
+                        Either::Left(result) => {
+                            rows_affected = result.rows_affected();
+                            last_insert_id = result.last_insert_rowid();
+                        }
                         Either::Right(row) => {
                             let results = result.get_or_insert_with(Default::default);
 
@@ -159,7 +164,11 @@ impl Database {
                     }
                 }
 
-                return Ok(result);
+                return Ok(ExecutedQuery {
+                    rows: result,
+                    rows_affected,
+                    last_insert_id,
+                });
             }
         }
     }

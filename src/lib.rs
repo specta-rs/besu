@@ -3,6 +3,7 @@
 
 mod database;
 mod error;
+mod executed_query;
 mod from_value;
 mod insert;
 pub mod operators;
@@ -13,6 +14,7 @@ mod value;
 pub use besu_macros::table;
 pub use database::Database;
 pub use error::Error;
+pub use executed_query::ExecutedQuery;
 pub use from_value::FromValue;
 pub use internal::Contains;
 pub use value::SqlValue;
