@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
-use besu::{Database, MySql, Table};
+use besu::{Database, Table};
+use besu_mysql::Sqlx;
 
 // TODO: DB Migrations? - primary keys, default column values
 

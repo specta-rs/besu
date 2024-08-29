@@ -1,8 +1,6 @@
 use std::{borrow::Cow, fmt};
 
-use crate::{Driver, Select, SqlValue, Model};
-
-use super::Dialect;
+use besu::{Dialect, Driver, Model, Select, SqlValue};
 
 pub struct MySql;
 

@@ -6,4 +6,5 @@ publish = false
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-besu = { version = "0.0.1", features = ["tokio", "sqlite"] }
+besu = { workspace = true }
+besu-mysql = { workspace = true, features = ["tokio"] }
