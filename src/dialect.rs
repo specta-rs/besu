@@ -1,12 +1,6 @@
-mod mysql;
-mod sqlite;
-
 use std::borrow::Cow;
 
-pub use mysql::MySql;
-pub use sqlite::SQLite;
-
-use crate::{Driver, Select, SqlValue, Model};
+use crate::{Driver, Model, Select, SqlValue};
 
 pub trait Dialect {
     fn name() -> &'static str;

@@ -3,19 +3,19 @@ use std::{fmt, path::Path};
 use futures::StreamExt;
 use sqlx::{Either, Executor, Pool, Row, Statement, ValueRef};
 
-use crate::{ExecutedQuery, SqlValue};
+use besu::{Driver, ExecutedQuery, SqlValue};
 
-use super::Driver;
+use crate::SQLite;
 
-pub struct SqlxSqlite(Pool<sqlx::Sqlite>);
+pub struct Sqlx(Pool<sqlx::Sqlite>);
 
-impl fmt::Debug for SqlxSqlite {
+impl fmt::Debug for Sqlx {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("SqlxSqlite").finish() // TODO: Include connection path???
     }
 }
 
-impl SqlxSqlite {
+impl Sqlx {
     pub async fn new(path: impl AsRef<Path>) -> Result<Self, sqlx::Error> {
         let path = path.as_ref();
         let mut pool = sqlx::sqlite::SqlitePoolOptions::new();
@@ -41,11 +41,11 @@ impl SqlxSqlite {
     }
 }
 
-impl Driver for SqlxSqlite {
+impl Driver for Sqlx {
     const NAME: &'static str = "sqlx_sqlite";
 
     type Error = sqlx::Error;
-    type Dialect = crate::dialect::SQLite;
+    type Dialect = SQLite;
 
     async fn execute(&self, sql: &str, values: &[SqlValue]) -> Result<ExecutedQuery, Self::Error> {
         // TOOD: Should *we* cache this statement?

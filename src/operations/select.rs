@@ -37,10 +37,6 @@ impl<D: Driver, T: Model> IntoFuture for Select<D, T> {
         let (sql, values) = D::Dialect::select(self);
 
         Box::pin(async move {
-            // let result = ;
-
-            // let (sql, values) = self.to_sql()?;
-
             Ok(driver
                 .execute(&sql, &values)
                 .await?

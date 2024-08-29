@@ -18,7 +18,7 @@ specta = ["besu-macros/specta"]
 uuid = ["dep:uuid"]
 
 [dependencies]
-besu-macros = { version = "0.0.1" }
+besu-macros = { workspace = true }
 futures = { version = "0.3.29", default-features = false }
 sqlx = { version = "0.7.2", default-features = false }
 
@@ -35,6 +35,8 @@ serde = { version = "^1", features = ["derive"], default-features = false }
 [workspace]
 members = ["./crates/*", "./examples/*"]
 
-[patch.crates-io]
+[workspace.dependencies]
 besu = { path = "." }
 besu-macros = { path = "./crates/macros" }
+besu-sqlite = { path = "./crates/sqlite" }
+besu-mysql = { path = "./crates/mysql" }

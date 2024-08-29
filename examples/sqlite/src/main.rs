@@ -1,4 +1,5 @@
-use besu::{Database, Driver, SqlxSqlite, Table};
+use besu::{Database, Driver, Table};
+use besu_sqlite::Sqlx;
 
 #[derive(Debug, Table)]
 pub struct User {
@@ -18,7 +19,7 @@ pub struct Post {
 
 #[tokio::main]
 async fn main() {
-    let db = Database::new(SqlxSqlite::new(":memory:").await.unwrap());
+    let db = Database::new(Sqlx::new(":memory:").await.unwrap());
 
     // TODO: Rename the table to lower-case
     db.get_inner().execute("CREATE TABLE User (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, bio TEXT, phone TEXT)", &[]).await.unwrap();

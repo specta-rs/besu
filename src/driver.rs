@@ -1,8 +1,4 @@
-mod sqlx;
-
 use std::{error, future::Future};
-
-pub use sqlx::SqlxSqlite;
 
 use crate::{Dialect, ExecutedQuery, SqlValue};
 

@@ -1,8 +1,6 @@
 use std::{borrow::Cow, fmt};
 
-use crate::{Driver, Model, Select, SqlValue};
-
-use super::Dialect;
+use besu::{Dialect, Driver, Model, Select, SqlValue};
 
 pub struct SQLite;
 

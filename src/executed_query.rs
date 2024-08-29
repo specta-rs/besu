@@ -1,11 +1,12 @@
 use crate::SqlValue;
 
+// TODO: This should probs come from the driver????
 #[derive(Debug, Clone)]
 pub struct ExecutedQuery {
     // `Option` should be thought of as an empty `Vec` and is an internal optimization.
-    pub(crate) rows: Option<Vec<Vec<SqlValue>>>,
-    pub(crate) rows_affected: u64,
-    pub(crate) last_insert_id: i64,
+    pub rows: Option<Vec<Vec<SqlValue>>>,
+    pub rows_affected: u64,
+    pub last_insert_id: i64,
     // statement: String
     // time: u64,
 }
