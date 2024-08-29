@@ -1,4 +1,7 @@
 // TODO: This macro should ensure the correct number of args are supplied like `format!`
+/// A macro for constructing an SQL query with escaped arguments.
+///
+/// TODO: Example usage
 #[macro_export]
 macro_rules! sql {
     ($query:literal $(, $arg:expr )* $(,)?) => {

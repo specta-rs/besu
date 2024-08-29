@@ -1,4 +1,17 @@
-//! Besu: Typesafe query builder for Rust
+//! A typesafe, async, and database-agnostic query builder for Rust.
+//!
+//! <section class="warning">
+//!
+//! Besu is in early development and is **not ready for public use!**
+//!
+//! </section>
+//!
+//! ## Drivers/Dialects
+//!
+//! - [besu-mysql](https://docs.rs/besu-mysql) for [MySQL](https://www.mysql.com) support.
+//! - [besu-sqlite](https://docs.rs/besu-sqlite) for [SQLite](https://www.sqlite.org) support.
+//! - [besu-postgres](https://docs.rs/besu-postgres) for [PostgreSQL](https://www.postgresql.org) support.
+//!
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod arguments;
@@ -7,7 +20,6 @@ mod database;
 mod decode;
 mod dialect;
 mod driver;
-mod model;
 mod operations;
 mod sql;
 mod table;
@@ -21,6 +33,5 @@ pub use database::Database;
 pub use decode::{DecodeRow, DecodeValue};
 pub use dialect::Dialect;
 pub use driver::Driver;
-pub use model::Model;
 pub use operations::*;
 pub use table::Table;

@@ -2,6 +2,7 @@ use std::{any::type_name, fmt};
 
 use crate::{Arguments, Delete, Driver, Execute, Insert, Select, Table, Update};
 
+/// The database instance.
 #[derive(Clone)]
 pub struct Database<D: Driver>(D);
 
