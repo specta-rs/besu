@@ -1,4 +1,4 @@
-use besu::{Database, Table};
+use besu::{sql, Database, Table};
 use besu_sqlite::Sqlx;
 
 #[derive(Debug, Table)]
@@ -22,24 +22,22 @@ async fn main() {
     let db = Database::new(Sqlx::new(":memory:").await.unwrap());
 
     // TODO: Rename the table name to lower-case
-    db.execute(
-        "CREATE TABLE User (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, bio TEXT, phone TEXT)",
-        &[],
-    )
+    db.execute(sql!(
+        r#"CREATE TABLE "User" (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, bio TEXT, phone TEXT);"#
+    ))
     .await
     .unwrap();
 
     for i in 0..10 {
-        db.execute(
-            "INSERT INTO User (id, name, age, bio, phone) VALUES (?, ?, ?, ?, ?)",
-            &[
-                i.into(),
-                "Alice".into(),
-                (20 + i).into(),
-                "I am Alice".into(),
-                "1234567890".into(),
-            ],
-        )
+        db.execute(sql!(
+            r#"INSERT INTO "User" (id, name, age, bio, phone) VALUES ($1, $2, $3, $4, $5);"#,
+            i,
+            // TODO: Being force to do `.to_string` is annoying. `sqlx` lacking an impl for `&str` is cringe!
+            "Alice".to_string(),
+            20 + i,
+            "I am Alice".to_string(),
+            "1234567890".to_string()
+        ))
         .await
         .unwrap();
     }

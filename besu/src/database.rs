@@ -1,6 +1,6 @@
 use std::{any::type_name, fmt};
 
-use crate::{Delete, Driver, Insert, Select, Table, Update};
+use crate::{Arguments, Delete, Driver, Execute, Insert, Select, Table, Update};
 
 #[derive(Clone)]
 pub struct Database<D: Driver>(D);
@@ -49,27 +49,21 @@ impl<D: Driver> Database<D> {
         Delete::new(self.0.clone())
     }
 
-    // TODO: Can we use a `sql!` macro for escaping like Brendan does for PCR?
-    //  - This could also have something replacing `execute_unsafe`?
-    //  - and could deal with `Into::into` for each argument?
-
-    /// Execute a raw SQL query.
-    pub async fn execute(
+    /// Construct a new [`Execute`] operation.
+    pub fn execute<'a, T: Arguments<'a, D>>(
         &self,
-        sql: &'static str,
-        values: &[D::Argument<'_>],
-    ) -> Result<D::Output, D::Error> {
-        self.0.execute(sql, values).await
+        (sql, arguments): (&'static str, T),
+    ) -> Execute<'a, D> {
+        Execute::new(self.0.clone(), sql, arguments.into_driver_arguments())
     }
 
-    /// Execute a raw SQL query.
+    /// Construct a new [`Execute`] operation.
     ///
     /// This method takes a non-static string so it is potentially prone to SQL injection so take care!
-    pub async fn execute_unsafe(
+    pub fn execute_unsafe<'a, T: Arguments<'a, D>>(
         &self,
-        sql: &str,
-        values: &[D::Argument<'_>],
-    ) -> Result<D::Output, D::Error> {
-        self.0.execute(sql, values).await
+        (sql, arguments): (&'a str, T),
+    ) -> Execute<'a, D> {
+        Execute::new(self.0.clone(), sql, arguments.into_driver_arguments())
     }
 }

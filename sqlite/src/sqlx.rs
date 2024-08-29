@@ -5,9 +5,9 @@ use sqlx::{
     Arguments, Executor, Pool, Row,
 };
 
-use besu::{DecodeValue, Driver};
+use besu::{DecodeValue, Driver, EncodeArgument};
 
-use crate::{encode::CompatSqliteArgument, SQLite, SqliteArgument};
+use crate::SQLite;
 
 #[derive(Debug, Clone)]
 pub struct Sqlx(Pool<sqlx::Sqlite>);
@@ -47,11 +47,11 @@ impl Sqlx {
 impl Driver for Sqlx {
     type Error = sqlx::Error;
     type Dialect = SQLite;
-    type Argument<'a> = SqliteArgument<'a>;
     type Row = SqliteRow;
     type Value<'a> = SqliteValueRef<'a>;
     type Output = SqliteQueryResult;
 
+    type Arguments<'a> = EncodeImpl<'a>;
     type ValueDecoder = DecodeImpl;
 
     fn row_len(row: &Self::Row) -> usize {
@@ -64,37 +64,17 @@ impl Driver for Sqlx {
     async fn query(
         &self,
         sql: &str,
-        values: &[Self::Argument<'_>],
+        args: Self::Arguments<'_>,
     ) -> Result<Vec<Self::Row>, Self::Error> {
-        // TODO: This is effectively a `values.clone()` because sqlx doesn't expose the Vec inside of `SqliteArguments`/
-        // TODO: We also kinda have to reallocate because `&[T]` yields `&T` and `SqliteArgument: !Clone`.
-
-        // It would be nice if this could optionally take a `Vec` from the user so we can avoid reallocation
-        let mut args = SqliteArguments::default();
-        args.reserve(values.len(), 0);
-        for value in values.into_iter() {
-            args.add(CompatSqliteArgument(value)).unwrap(); // TODO: Error handling
-        }
-
-        self.0.fetch_all((sql, Some(args))).await
+        self.0.fetch_all((sql, Some(args.0))).await
     }
 
     async fn execute(
         &self,
         sql: &str,
-        values: &[Self::Argument<'_>],
+        args: Self::Arguments<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // TODO: This is effectively a `values.clone()` because sqlx doesn't expose the Vec inside of `SqliteArguments`/
-        // TODO: We also kinda have to reallocate because `&[T]` yields `&T` and `SqliteArgument: !Clone`.
-
-        // It would be nice if this could optionally take a `Vec` from the user so we can avoid reallocation
-        let mut args = SqliteArguments::default();
-        args.reserve(values.len(), 0);
-        for value in values.into_iter() {
-            args.add(CompatSqliteArgument(value)).unwrap(); // TODO: Error handling
-        }
-
-        Ok(self.0.execute((sql, Some(args))).await?)
+        Ok(self.0.execute((sql, Some(args.0))).await?)
     }
 }
 
@@ -103,5 +83,19 @@ pub struct DecodeImpl;
 impl<T: for<'q> sqlx::Decode<'q, sqlx::Sqlite>> DecodeValue<Sqlx, T> for DecodeImpl {
     fn decode<'q>(value: SqliteValueRef<'q>) -> T {
         <T as sqlx::Decode<'q, sqlx::Sqlite>>::decode(value).unwrap() // TODO: Error handling
+    }
+}
+
+#[derive(Default)]
+pub struct EncodeImpl<'a>(SqliteArguments<'a>);
+
+impl<'a, T: for<'q> sqlx::Encode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>> EncodeArgument<'a, T>
+    for EncodeImpl<'a>
+{
+    fn encode(&mut self, value: T)
+    where
+        T: 'a,
+    {
+        self.0.add(value).unwrap(); // TODO: Error handling
     }
 }

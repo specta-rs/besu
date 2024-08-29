@@ -1,0 +1,21 @@
+[package]
+name = "besu-postgres"
+version = "0.0.1"
+edition = "2021"
+
+# /bin/sh RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+sqlx = ["dep:sqlx"]
+tokio = ["sqlx?/runtime-tokio"]
+
+[lints]
+workspace = true
+
+[dependencies]
+besu = { workspace = true }
+sqlx = { version = "0.8", default-features = false, optional = true, features = ["postgres"] }

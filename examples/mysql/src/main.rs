@@ -1,9 +1,5 @@
-use std::marker::PhantomData;
-
-use besu::{Database, Table};
+use besu::{sql, Database, Table};
 use besu_mysql::Sqlx;
-
-// TODO: DB Migrations? - primary keys, default column values
 
 #[derive(Debug, Table)]
 pub struct User {
@@ -21,43 +17,37 @@ pub struct Post {
     pub author_id: i32,
 }
 
-// selection!(UserBase, {
-//     id: User.id,
-//     name: User.name,
-//     age: User.age,
-// });
-
-// selection!(UserWithPosts, {
-//     id: Post.id,
-//     title: Post.name
-//     authorId: Post.author_id,
-//     authorName: User.name,
-// });
-
 #[tokio::main]
 async fn main() {
-    // let mysql = MySql::new().await
-    // let db = Database::new().await.unwrap();
+    let db = Database::new(
+        Sqlx::new("mysql://root:@localhost:3306/besu_dev")
+            .await
+            .unwrap(),
+    );
 
-    // "mysql://root:@localhost:3306/mattrax"
+    db.execute(sql!("DROP TABLE IF EXISTS User;"))
+        .await
+        .unwrap();
 
-    // TODO: Run migrations
+    // TODO: Rename the table name to lower-case
+    db.execute(sql!(
+        "CREATE TABLE User (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, bio TEXT, phone TEXT);"
+    ))
+    .await
+    .unwrap();
 
-    // select(User).from(User);
-    // select(UserWithPosts).from(User);
+    for i in 0..10 {
+        db.execute(sql!(
+            "INSERT INTO User (id, name, age, bio, phone) VALUES (?, ?, ?, ?, ?)",
+            i,
+            "Alice",
+            20 + i,
+            "I am Alice",
+            "1234567890"
+        ))
+        .await
+        .unwrap();
+    }
 
-    // select(User);
-    // select_from(UserWithPosts, User);
-}
-
-fn select<T>(t: T) -> SelectQuery<T> {
-    todo!();
-}
-
-pub struct SelectQuery<T> {
-    phantom: PhantomData<T>,
-}
-
-impl<T> SelectQuery<T> {
-    pub fn from<M>(self, t: M) {}
+    println!("{:#?}", db.select(User).await.unwrap());
 }

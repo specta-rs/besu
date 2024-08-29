@@ -1,2 +1,0 @@
-[env]
-DATABASE_URL = "sqlite::memory:" # Used for `tests/sqlx_interop.rs`
