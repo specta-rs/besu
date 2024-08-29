@@ -50,8 +50,26 @@ impl<D: Driver> Database<D> {
     }
 
     // TODO: Can we use a `sql!` macro for escaping like Brendan does for PCR?
+    //  - This could also have something replacing `execute_unsafe`?
+    //  - and could deal with `Into::into` for each argument?
+
     /// Execute a raw SQL query.
-    pub async fn execute(&self, sql: &str, values: &[()]) -> Result<D::Output, D::Error> {
+    pub async fn execute(
+        &self,
+        sql: &'static str,
+        values: &[D::Argument<'_>],
+    ) -> Result<D::Output, D::Error> {
+        self.0.execute(sql, values).await
+    }
+
+    /// Execute a raw SQL query.
+    ///
+    /// This method takes a non-static string so it is potentially prone to SQL injection so take care!
+    pub async fn execute_unsafe(
+        &self,
+        sql: &str,
+        values: &[D::Argument<'_>],
+    ) -> Result<D::Output, D::Error> {
         self.0.execute(sql, values).await
     }
 }

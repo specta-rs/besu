@@ -4,20 +4,20 @@ use std::{
     pin::Pin,
 };
 
-use crate::{Bruh, Column, Dialect, Driver, Model, Table};
+use crate::{DecodeRow, Dialect, Driver, Table};
 
 pub struct SelectOperation<V> {
     pub table: &'static str,
     pub where_equals: Vec<(&'static str, V)>,
 }
 
-pub struct Select<D: Driver, T> {
+pub struct Select<'a, D: Driver, T> {
     driver: D,
-    op: SelectOperation<()>, // TODO: D::Value>,
+    op: SelectOperation<D::Argument<'a>>,
     phantom: PhantomData<T>,
 }
 
-impl<D: Driver, T: Table> Select<D, T> {
+impl<'a, D: Driver, T: Table> Select<'a, D, T> {
     pub(crate) fn new(driver: D) -> Self {
         Self {
             driver,
@@ -45,19 +45,17 @@ impl<D: Driver, T: Table> Select<D, T> {
     // }
 }
 
-impl<D: Driver, T: Table> IntoFuture for Select<D, T>
+impl<'a, D: Driver, T: Table> IntoFuture for Select<'a, D, T>
 where
     // TODO: Should we constrain earlier for better errors????
-    T::Model: Bruh<D>,
+    T::Model: DecodeRow<D>,
 {
     type Output = Result<Vec<T::Model>, D::Error>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
         let driver = self.driver.clone();
         let (sql, values) = D::Dialect::select(&self.op);
-
-        println!("sql: {}", sql); // TODO
 
         Box::pin(async move {
             Ok(driver

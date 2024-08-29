@@ -1,8 +1,7 @@
-use besu::{Bruh, Database, Table};
+use besu::{Database, Table};
 use besu_sqlite::Sqlx;
 
 #[derive(Debug, Table)]
-// #[table(insert = NewUser)]
 pub struct User {
     pub id: i32,
     pub name: String,
@@ -29,26 +28,16 @@ async fn main() {
     )
     .await
     .unwrap();
-    // TODO: insert many???
+
     for i in 0..10 {
-        // TODO: Make this work without `SqliteValue` -> Fix `execute` method!!!
         db.execute(
-            // TODO: We love SQL injection!!!
-            &format!(
-                "INSERT INTO User (id, name, age, bio, phone) VALUES ({}, '{}', {}, '{}', '{}')",
-                i,
-                "Alice",
-                20 + i,
-                "I am Alice",
-                "1234567890"
-            ),
-            // "INSERT INTO User (id, name, age, bio, phone) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO User (id, name, age, bio, phone) VALUES (?, ?, ?, ?, ?)",
             &[
-                // i.into(),
-                // "Alice".into(),
-                // (20 + i).into(),
-                // "I am Alice".into(),
-                // "1234567890".into(),
+                i.into(),
+                "Alice".into(),
+                (20 + i).into(),
+                "I am Alice".into(),
+                "1234567890".into(),
             ],
         )
         .await

@@ -1,9 +1,11 @@
 //! besu-mysql: SQLite dialect and driver for Besu
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod decode;
 mod dialect;
-mod executed_query;
+mod encode;
 mod sqlx;
 
 pub use dialect::SQLite;
+pub use encode::SqliteArgument;
 pub use sqlx::Sqlx;
