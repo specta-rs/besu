@@ -10,7 +10,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-sqlx = ["dep:sqlx", "dep:futures"]
+sqlx = ["dep:sqlx"]
 tokio = ["sqlx?/runtime-tokio"]
 
 [lints]
@@ -19,5 +19,4 @@ workspace = true
 [dependencies]
 besu = { workspace = true }
 
-futures = { version = "0.3", default-features = false, optional = true }
 sqlx = { version = "0.8", default-features = false, optional = true, features = ["sqlite"] }

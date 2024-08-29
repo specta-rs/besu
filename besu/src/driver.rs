@@ -8,6 +8,7 @@ pub trait Driver: Clone + 'static {
     type Dialect: Dialect;
 
     type Row;
+    type Argument<'a>;
     type Value<'a>;
     type Output;
 
@@ -17,16 +18,12 @@ pub trait Driver: Clone + 'static {
     fn query(
         &self,
         sql: &str,
-        values: &[()], // TODO: Self::Value
+        values: &[Self::Argument<'_>],
     ) -> impl Future<Output = Result<Vec<Self::Row>, Self::Error>>;
 
     fn execute(
         &self,
         sql: &str,
-        values: &[()], // TODO: Self::Value
+        values: &[Self::Argument<'_>],
     ) -> impl Future<Output = Result<Self::Output, Self::Error>>;
-}
-
-pub trait TODO<D: Driver> {
-    fn todo(row: D::Row) -> Self;
 }

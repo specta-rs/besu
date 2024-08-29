@@ -32,7 +32,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
         model_structs,
         model_struct_fields_decls,
         model_struct_fields_impls,
-        from_value_impl,
+        mut from_value_impl,
         field_types,
     ): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, HashSet<_>) = multiunzip(fields.iter().map(|f| {
         let ident = &f.ident;
@@ -54,15 +54,16 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             quote!(#ident: {
                 let v = D::get_value(&row, i);
                 if i != 0 { i -= 1 };
-                <#ty as #CRATE_NAME::Bruh2<D>>::decode(v)
+                <#ty as #CRATE_NAME::DecodeValue<D>>::decode(v)
             }),
             ty.to_token_stream().to_string(),
         )
     }));
+    from_value_impl.reverse();
 
     let field_types = field_types.iter().map(|s| {
         let ty: TokenStream = s.parse().unwrap();
-        quote!(#ty: #CRATE_NAME::Bruh2<D>)
+        quote!(#ty: #CRATE_NAME::DecodeValue<D>)
     });
 
     // TODO: Emit something that doesn't have clippy warnings
@@ -72,7 +73,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             impl #CRATE_NAME::Model for super::#struct_ident {}
 
             #[automatically_derived]
-            impl<D: #CRATE_NAME::Driver> #CRATE_NAME::Bruh<D> for super::#struct_ident
+            impl<D: #CRATE_NAME::Driver> #CRATE_NAME::DecodeRow<D> for super::#struct_ident
             where
                 #( #field_types ),*
             {
