@@ -8,10 +8,10 @@ pub trait Driver: Clone + 'static {
     type Dialect: Dialect;
 
     type Row;
-    type Argument<'a>;
     type Value<'a>;
     type Output;
 
+    type Arguments<'a>: Default;
     type ValueDecoder;
 
     fn row_len(row: &Self::Row) -> usize;
@@ -20,12 +20,12 @@ pub trait Driver: Clone + 'static {
     fn query(
         &self,
         sql: &str,
-        values: &[Self::Argument<'_>],
+        args: Self::Arguments<'_>,
     ) -> impl Future<Output = Result<Vec<Self::Row>, Self::Error>>;
 
     fn execute(
         &self,
         sql: &str,
-        values: &[Self::Argument<'_>],
+        args: Self::Arguments<'_>,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>>;
 }

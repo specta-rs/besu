@@ -6,6 +6,7 @@ use std::{
 
 use crate::{Dialect, Driver, Table};
 
+#[non_exhaustive]
 pub struct UpdateOperation {
     pub table: &'static str,
 }
@@ -25,29 +26,19 @@ impl<D: Driver, T: Table> Update<D, T> {
         }
     }
 
-    // pub fn to_sql(&self) -> (String, Vec<SqlValue>) {
-    //     D::Dialect::update(self)
-    // }
+    /// Convert the operation to a raw SQL and values.
+    pub fn to_sql(&self) -> (String, D::Arguments<'_>) {
+        D::Dialect::update(&self.op)
+    }
 }
 
 impl<D: Driver, T: Table> IntoFuture for Update<D, T> {
-    type Output = Result<Vec<T::Model>, D::Error>;
+    type Output = Result<D::Output, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
         let driver = self.driver.clone();
-        let (sql, values) = D::Dialect::update::<()>(&self.op);
-
-        Box::pin(async move {
-            // Ok(driver
-            //     .execute(&sql, &values)
-            //     .await?
-            //     .rows
-            //     .into_iter()
-            //     .flatten()
-            //     .map(|v| T::Model::from_value(v).unwrap())
-            //     .collect())
-            todo!();
-        })
+        let (sql, arguments) = D::Dialect::update(&self.op);
+        Box::pin(async move { driver.execute(&sql, arguments).await })
     }
 }

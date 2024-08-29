@@ -6,25 +6,22 @@ use std::{
 
 use crate::{DecodeRow, Dialect, Driver, Table};
 
-pub struct SelectOperation<V> {
+#[non_exhaustive]
+pub struct SelectOperation {
     pub table: &'static str,
-    pub where_equals: Vec<(&'static str, V)>,
 }
 
-pub struct Select<'a, D: Driver, T> {
+pub struct Select<D: Driver, T> {
     driver: D,
-    op: SelectOperation<D::Argument<'a>>,
+    op: SelectOperation,
     phantom: PhantomData<T>,
 }
 
-impl<'a, D: Driver, T: Table> Select<'a, D, T> {
+impl<D: Driver, T: Table> Select<D, T> {
     pub(crate) fn new(driver: D) -> Self {
         Self {
             driver,
-            op: SelectOperation {
-                table: T::NAME,
-                where_equals: vec![],
-            },
+            op: SelectOperation { table: T::NAME },
             phantom: PhantomData,
         }
     }
@@ -40,26 +37,27 @@ impl<'a, D: Driver, T: Table> Select<'a, D, T> {
 
     // TODO: limit, offset, cursor, joins
 
-    // pub fn to_sql(&self) -> (String, Vec<D::Value>) {
-    //     D::Dialect::select(&self.op)
-    // }
+    /// Convert the operation to a raw SQL and values.
+    pub fn to_sql(&self) -> (String, D::Arguments<'_>) {
+        D::Dialect::select(&self.op)
+    }
 }
 
-impl<'a, D: Driver, T: Table> IntoFuture for Select<'a, D, T>
+impl<D: Driver, T: Table> IntoFuture for Select<D, T>
 where
     // TODO: Should we constrain earlier for better errors????
     T::Model: DecodeRow<D>,
 {
     type Output = Result<Vec<T::Model>, D::Error>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
         let driver = self.driver.clone();
-        let (sql, values) = D::Dialect::select(&self.op);
+        let (sql, arguments) = D::Dialect::select(&self.op);
 
         Box::pin(async move {
             Ok(driver
-                .query(&sql, &values)
+                .query(&sql, arguments)
                 .await?
                 .into_iter()
                 .map(|r| T::Model::decode(r))

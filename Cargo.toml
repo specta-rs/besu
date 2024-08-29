@@ -1,21 +1,22 @@
 [workspace]
 resolver = "2"
-members = ["./besu", "./mysql", "./sqlite", "./macros", "./examples/*"]
+members = ["./besu", "./mysql", "./sqlite", "./postgres", "./macros", "./examples/*"]
 
 [workspace.dependencies]
 besu = { path = "./besu" }
 besu-macros = { path = "./macros" }
 besu-sqlite = { path = "./sqlite" }
 besu-mysql = { path = "./mysql" }
+besu-postgres = { path = "./postgres" }
 
 [workspace.lints.rust]
 unsafe_code = { level = "forbid", priority = -1 }
-# missing_docs = { level = "warn", priority = -1 } # TODO: Enable this
+missing_docs = { level = "warn", priority = -2 }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-unwrap_used = { level = "warn", priority = -1 }
-panic = { level = "warn", priority = -1 }
-todo = { level = "warn", priority = -1 }
-panic_in_result_fn = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -2 }
+unwrap_used = { level = "warn", priority = -3 }
+panic = { level = "warn", priority = -4 }
+todo = { level = "warn", priority = -5 }
+panic_in_result_fn = { level = "warn", priority = -6 }

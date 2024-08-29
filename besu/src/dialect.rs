@@ -8,14 +8,14 @@ pub trait Dialect {
     fn positional_param(idx: usize) -> Cow<'static, str>;
 
     /// Generate the SQL query for a `SELECT` operation.
-    fn select<V>(op: &SelectOperation<V>) -> (String, Vec<V>);
+    fn select<V: Default>(op: &SelectOperation) -> (String, V);
 
     /// Generate the SQL query for a `INSERT` operation.
-    fn insert<V>(op: &InsertOperation) -> (String, Vec<V>);
+    fn insert<V>(op: &InsertOperation) -> (String, V);
 
     /// Generate the SQL query for a `UPDATE` operation.
-    fn update<V>(op: &UpdateOperation) -> (String, Vec<V>);
+    fn update<V>(op: &UpdateOperation) -> (String, V);
 
     /// Generate the SQL query for a `DELETE` operation.
-    fn delete<V>(op: &DeleteOperation) -> (String, Vec<V>);
+    fn delete<V>(op: &DeleteOperation) -> (String, V);
 }
