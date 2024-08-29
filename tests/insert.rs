@@ -11,6 +11,13 @@ mod schema;
 async fn insert_struct_syntax() {
     let db = schema::init().await;
 
+    // TODO: Can we get a good LSP on this???
+    // db.insert().value(users!({
+    //     name: "Oscar Beaumont",
+    //     age: 32,
+    //     // bio: Some("Rust, rust, rust"),
+    // });
+
     {
         let query = db.insert().value(
             users::insert {

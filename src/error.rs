@@ -1,3 +1,5 @@
+//! TODO: Remove this cause the driver has an error type
+
 // TODO: Convert this to an `enum` and allow matching of common error types.
 
 use std::{borrow::Cow, fmt};

@@ -32,7 +32,6 @@ example-sqlite = { path = "./examples/sqlite" }
 specta = { version = "=2.0.0-rc.6", default-features = false }
 serde = { version = "^1", features = ["derive"], default-features = false }
 
-
 [workspace]
 members = ["./crates/*", "./examples/*"]
 
