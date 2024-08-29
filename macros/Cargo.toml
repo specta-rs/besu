@@ -8,8 +8,9 @@ proc-macro = true
 
 [features]
 default = []
-serde = []
-specta = []
+
+[lints]
+workspace = true
 
 [dependencies]
 itertools = "0.13.0"

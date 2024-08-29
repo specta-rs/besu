@@ -1,0 +1,32 @@
+[package]
+name = "besu"
+version = "0.0.1"
+edition = "2021"
+
+# /bin/sh RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+
+uuid = ["dep:uuid"]
+
+[lints]
+workspace = true
+
+[dependencies]
+besu-macros = { workspace = true }
+# futures = { version = "0.3.29", default-features = false }
+# sqlx = { version = "0.7.2", default-features = false }
+
+uuid = { version = "1.6.1", optional = true, default-features = false }
+
+# [dev-dependencies]
+# tokio = { version = "1.34.0", features = ["full"] }
+# sqlx = { version = "0.7.2", features = ["macros"] }
+# example-sqlite = { path = "./examples/sqlite" }
+
+# specta = { version = "=2.0.0-rc.6", default-features = false }
+# serde = { version = "^1", features = ["derive"], default-features = false }

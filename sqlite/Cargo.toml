@@ -1,5 +1,5 @@
 [package]
-name = "besu-mysql"
+name = "besu-sqlite"
 version = "0.0.1"
 edition = "2021"
 
@@ -12,8 +12,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 tokio = ["sqlx/runtime-tokio"]
 
+[lints]
+workspace = true
+
 [dependencies]
-besu = { version = "0.0.1", path = "../.." }
+besu = { workspace = true }
 
 futures = { version = "0.3.29", default-features = false }
-sqlx = { version = "0.7.2", default-features = false, features = ["mysql"] }
+sqlx = { version = "0.7.2", default-features = false, features = ["sqlite"] }

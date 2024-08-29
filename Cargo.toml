@@ -1,42 +1,21 @@
-[package]
-name = "besu"
-version = "0.0.1"
-edition = "2021"
-
-# /bin/sh RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features
-[package.metadata."docs.rs"]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
-[features]
-default = ["tokio", "sqlite"]  # TODO: Disable as default
-tokio = ["sqlx/runtime-tokio"]
-sqlite = ["sqlx/sqlite"]
-
-serde = ["besu-macros/serde"]
-specta = ["besu-macros/specta"]
-uuid = ["dep:uuid"]
-
-[dependencies]
-besu-macros = { workspace = true }
-futures = { version = "0.3.29", default-features = false }
-sqlx = { version = "0.7.2", default-features = false }
-
-uuid = { version = "1.6.1", optional = true, default-features = false }
-
-[dev-dependencies]
-tokio = { version = "1.34.0", features = ["full"] }
-sqlx = { version = "0.7.2", features = ["macros"] }
-example-sqlite = { path = "./examples/sqlite" }
-
-specta = { version = "=2.0.0-rc.6", default-features = false }
-serde = { version = "^1", features = ["derive"], default-features = false }
-
 [workspace]
-members = ["./crates/*", "./examples/*"]
+resolver = "2"
+members = ["./besu", "./mysql", "./sqlite", "./macros", "./examples/*"]
 
 [workspace.dependencies]
-besu = { path = "." }
-besu-macros = { path = "./crates/macros" }
-besu-sqlite = { path = "./crates/sqlite" }
-besu-mysql = { path = "./crates/mysql" }
+besu = { path = "./besu" }
+besu-macros = { path = "./macros" }
+besu-sqlite = { path = "./sqlite" }
+besu-mysql = { path = "./mysql" }
+
+[workspace.lints.rust]
+unsafe_code = { level = "forbid", priority = -1 }
+# missing_docs = { level = "warn", priority = -1 } # TODO: Enable this
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = { level = "warn", priority = -1 }
+panic = { level = "warn", priority = -1 }
+todo = { level = "warn", priority = -1 }
+panic_in_result_fn = { level = "warn", priority = -1 }
