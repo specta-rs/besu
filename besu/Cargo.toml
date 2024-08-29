@@ -11,12 +11,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = []
 
-macros = ["dep:besu-macros"]
+derive = ["dep:besu-macros"]
 uuid = ["dep:uuid"]
 
 [lints]
 workspace = true
 
 [dependencies]
-besu-macros = { workspace = true, optional = true}
+besu-macros = { workspace = true, optional = true }
 uuid = { version = "1", optional = true, default-features = false }

@@ -12,6 +12,8 @@ mod model;
 mod operations;
 mod value;
 
+#[cfg(feature = "derive")]
+#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use besu_macros::Table;
 pub use database::Database;
 pub use dialect::Dialect;
