@@ -1,25 +1,28 @@
-use std::{borrow::Cow, fmt};
+use std::borrow::Cow;
 
-use besu::{Dialect, Driver, Model, Select, SqlValue};
+use besu::{Dialect, SelectOperation};
 
+#[derive(Debug)]
 pub struct MySql;
 
-impl fmt::Debug for MySql {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MySQL")
-    }
-}
-
 impl Dialect for MySql {
-    fn name() -> &'static str {
-        "MySQL"
-    }
-
     fn positional_param(idx: usize) -> Cow<'static, str> {
         todo!()
     }
 
-    fn select<D: Driver, T: Model>(select: Select<D, T>) -> (String, Vec<SqlValue>) {
+    fn select<V>(op: &SelectOperation) -> (String, Vec<V>) {
+        todo!()
+    }
+
+    fn insert<V>(op: &besu::InsertOperation) -> (String, Vec<V>) {
+        todo!()
+    }
+
+    fn update<V>(op: &besu::UpdateOperation) -> (String, Vec<V>) {
+        todo!()
+    }
+
+    fn delete<V>(op: &besu::DeleteOperation) -> (String, Vec<V>) {
         todo!()
     }
 }

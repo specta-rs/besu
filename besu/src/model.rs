@@ -1,8 +1,3 @@
-use crate::FromValue;
-
-// TODO: Break out
-pub trait Model: 'static {
-    const NAME: &'static str;
-
-    type Model: FromValue;
+pub trait Model {
+    // fn from_row<D: Driver>(row: D::Row) -> Self;
 }
