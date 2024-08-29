@@ -12,6 +12,8 @@ pub trait Driver: Clone + 'static {
     type Value<'a>;
     type Output;
 
+    type ValueDecoder;
+
     fn row_len(row: &Self::Row) -> usize;
     fn get_value<'a>(row: &'a Self::Row, index: usize) -> Self::Value<'a>;
 

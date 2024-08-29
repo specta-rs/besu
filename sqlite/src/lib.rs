@@ -1,7 +1,6 @@
 //! besu-mysql: SQLite dialect and driver for Besu
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod decode;
 mod dialect;
 mod encode;
 mod sqlx;
