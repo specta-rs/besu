@@ -1,6 +1,6 @@
 use std::{clone, fmt, sync::Arc};
 
-use crate::{Dialect, Driver, Select, Model};
+use crate::{Dialect, Driver, Model, Select};
 
 pub struct Database<D: Driver>(Arc<D>); // TODO: `Arc` or leave it to driver or 'a on queries???
 
@@ -29,11 +29,6 @@ impl<D: Driver> Database<D> {
     pub fn get_inner(&self) -> &D {
         &self.0
     }
-
-    // /// Take the [`Driver`] out of the database instance.
-    // pub fn into_inner(self) -> D {
-    //     self.0
-    // }
 
     pub fn select<T: Model>(&self, table: T) -> Select<D, T> {
         Select::new(self.0.clone())

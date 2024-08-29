@@ -1,4 +1,5 @@
 //! Besu: Typesafe query builder for Rust
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod database;
 mod dialect;

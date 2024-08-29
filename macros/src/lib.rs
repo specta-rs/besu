@@ -1,3 +1,6 @@
+//! Besu Macros - The macros used by the Besu library.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, DeriveInput};
