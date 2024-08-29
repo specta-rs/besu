@@ -6,11 +6,14 @@ use std::{
 
 use crate::{Dialect, Driver, Table};
 
+/// Represents an SQL `DELETE` operation.
 #[non_exhaustive]
 pub struct DeleteOperation {
+    /// The name of the table being deleted.
     pub table: &'static str,
 }
 
+/// Builder for an SQL `DELETE` operation.
 pub struct Delete<D: Driver, T> {
     driver: D,
     op: DeleteOperation,

@@ -1,13 +1,22 @@
+use std::error;
+
 use crate::Driver;
 
+/// A trait for encoding arguments into a driver-specific format.
 pub trait EncodeArgument<'a, T> {
-    fn encode(&mut self, value: T)
+    /// Encode the given value into the driver-specific format.
+    fn encode(&mut self, value: T) -> Result<(), Box<dyn error::Error + Send + Sync + 'static>>
     where
         T: 'a;
 }
 
+// TODO: We should probs seal this?
+/// A trait for decoding a generic set of SQL arguments into a driver-specific format.
 pub trait Arguments<'a, D: Driver> {
-    fn into_driver_arguments(self) -> D::Arguments<'a>;
+    /// Convert the arguments into the driver-specific format.
+    fn into_driver_arguments(
+        self,
+    ) -> Result<D::Arguments<'a>, Box<dyn error::Error + Send + Sync + 'static>>;
 }
 
 macro_rules! impl_tuple {
@@ -17,11 +26,12 @@ macro_rules! impl_tuple {
         where
             $(D::Arguments<'a>: EncodeArgument<'a, $i>),*
         {
-            fn into_driver_arguments(self) -> D::Arguments<'a> {
+            fn into_driver_arguments(self) -> Result<D::Arguments<'a>, Box<dyn error::Error + Send + Sync + 'static>> {
                 let ( $( $i, )* ) = self;
                 let mut args = D::Arguments::default();
-                $(<D::Arguments<'a> as EncodeArgument<'a, $i>>::encode(&mut args, $i);)*
-                args
+                // TODO: Error handling
+                $(<D::Arguments<'a> as EncodeArgument<'a, $i>>::encode(&mut args, $i)?;)*
+                Ok(args)
             }
         }
     };

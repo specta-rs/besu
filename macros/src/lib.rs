@@ -1,4 +1,8 @@
-//! Besu Macros - The macros used by the Besu library.
+//! Macros for [Besu](https://docs.rs/besu).
+//!
+//! By default we recommend enabling the `derive` feature on `besu` due to it being easier to keep the versions in sync, however you may want to use this crate directly for faster compile time.
+//!
+
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use proc_macro::TokenStream;

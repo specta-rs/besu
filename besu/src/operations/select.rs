@@ -6,11 +6,14 @@ use std::{
 
 use crate::{DecodeRow, Dialect, Driver, Table};
 
+/// Represents an SQL `SELECT` operation.
 #[non_exhaustive]
 pub struct SelectOperation {
+    /// The name of the table being selected.
     pub table: &'static str,
 }
 
+/// Builder for an SQL `SELECT` operation.
 pub struct Select<D: Driver, T> {
     driver: D,
     op: SelectOperation,
@@ -56,12 +59,13 @@ where
         let (sql, arguments) = D::Dialect::select(&self.op);
 
         Box::pin(async move {
-            Ok(driver
+            driver
                 .query(&sql, arguments)
                 .await?
                 .into_iter()
                 .map(|r| T::Model::decode(r))
-                .collect())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(D::error_decoding_value)
         })
     }
 }

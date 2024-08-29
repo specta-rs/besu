@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use sqlx::{
+    error::BoxDynError,
     postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgQueryResult, PgRow, PgValueRef},
     Arguments, Executor, Pool, Row,
 };
@@ -9,6 +10,7 @@ use besu::{DecodeValue, Driver, EncodeArgument};
 
 use crate::Postgres;
 
+/// Postgres driver implementation based on [`sqlx`].
 #[derive(Debug, Clone)]
 pub struct Sqlx(Pool<sqlx::Postgres>);
 
@@ -42,8 +44,21 @@ impl Driver for Sqlx {
     fn row_len(row: &Self::Row) -> usize {
         row.len()
     }
-    fn get_value<'a>(row: &'a Self::Row, index: usize) -> Self::Value<'a> {
-        row.try_get_raw(index).unwrap() // TODO: Error handling
+
+    fn get_value(row: &Self::Row, index: usize) -> Result<Self::Value<'_>, Self::Error> {
+        row.try_get_raw(index)
+    }
+
+    fn error_encoding_arguments(
+        err: Box<dyn std::error::Error + Send + Sync + 'static>,
+    ) -> Self::Error {
+        sqlx::Error::Encode(err)
+    }
+
+    fn error_decoding_value(
+        err: Box<dyn std::error::Error + Send + Sync + 'static>,
+    ) -> Self::Error {
+        sqlx::Error::Decode(err)
     }
 
     async fn query(
@@ -59,15 +74,15 @@ impl Driver for Sqlx {
         sql: &str,
         args: Self::Arguments<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        Ok(self.0.execute((sql, Some(args.0))).await?)
+        self.0.execute((sql, Some(args.0))).await
     }
 }
 
 pub struct DecodeImpl;
 
 impl<T: for<'q> sqlx::Decode<'q, sqlx::Postgres>> DecodeValue<Sqlx, T> for DecodeImpl {
-    fn decode<'q>(value: PgValueRef<'q>) -> T {
-        <T as sqlx::Decode<'q, sqlx::Postgres>>::decode(value).unwrap() // TODO: Error handling
+    fn decode<'q>(value: PgValueRef<'q>) -> Result<T, BoxDynError> {
+        <T as sqlx::Decode<'q, sqlx::Postgres>>::decode(value)
     }
 }
 
@@ -77,10 +92,10 @@ pub struct EncodeImpl<'a>(PgArguments, PhantomData<&'a ()>);
 impl<'a, T: for<'q> sqlx::Encode<'q, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>
     EncodeArgument<'a, T> for EncodeImpl<'a>
 {
-    fn encode(&mut self, value: T)
+    fn encode(&mut self, value: T) -> Result<(), BoxDynError>
     where
         T: 'a,
     {
-        self.0.add(value).unwrap(); // TODO: Error handling
+        self.0.add(value)
     }
 }

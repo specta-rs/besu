@@ -6,11 +6,14 @@ use std::{
 
 use crate::{Dialect, Driver, Table};
 
+/// Represents an SQL `INSERT` operation.
 #[non_exhaustive]
 pub struct InsertOperation {
+    /// The name of the table being inserted.
     pub table: &'static str,
 }
 
+/// Builder for an SQL `INSERT` operation.
 pub struct Insert<D: Driver, T> {
     driver: D,
     op: InsertOperation,

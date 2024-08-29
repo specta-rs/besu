@@ -20,3 +20,6 @@ unwrap_used = { level = "warn", priority = -3 }
 panic = { level = "warn", priority = -4 }
 todo = { level = "warn", priority = -5 }
 panic_in_result_fn = { level = "warn", priority = -6 }
+
+# Problems in downstream dependencies
+multiple_crate_versions = { level = "allow", priority = 1 }

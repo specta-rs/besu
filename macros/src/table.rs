@@ -52,9 +52,9 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             quote!(pub #ident: #ident),
             quote!(#ident),
             quote!(#ident: {
-                let v = D::get_value(&row, i);
+                let v = D::get_value(&row, i)?;
                 if i != 0 { i -= 1 };
-                <D::ValueDecoder as #CRATE_NAME::DecodeValue<D, #ty>>::decode(v)
+                <D::ValueDecoder as #CRATE_NAME::DecodeValue<D, #ty>>::decode(v)?
             }),
             ty.to_token_stream().to_string(),
         )
@@ -62,27 +62,30 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
     from_value_impl.reverse();
 
     let field_types = field_types.iter().map(|s| {
-        let ty: TokenStream = s.parse().unwrap();
+        let ty: TokenStream = s
+            .parse()
+            .expect("token stream -> string -> token stream failed!");
         quote!(<D as #CRATE_NAME::Driver>::ValueDecoder: #CRATE_NAME::DecodeValue<D, #ty>)
     });
 
     // TODO: Emit something that doesn't have clippy warnings
     Ok(quote! {
+        #[allow(non_upper_case_globals, non_camel_case_types, none_snake_case)]
         mod #mod_name {
-            #[automatically_derived]
-            impl #CRATE_NAME::Model for super::#struct_ident {}
-
             #[automatically_derived]
             impl<D: #CRATE_NAME::Driver> #CRATE_NAME::DecodeRow<D> for super::#struct_ident
             where
                 #( #field_types ),*
             {
-                fn decode(row: D::Row) -> Self {
+                fn decode(row: D::Row) -> ::std::result::Result<Self, ::std::boxed::Box<dyn ::std::error::Error + Send + Sync + 'static>>
+                where
+                    Self: ::std::marker::Sized
+                {
                     let mut i = D::row_len(&row);
                     if i != 0 { i -= 1 };
-                    Self {
+                    Ok(Self {
                         #( #from_value_impl ),*
-                    }
+                    })
                 }
             }
 
@@ -104,7 +107,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             };
         }
 
+        #[allow(non_upper_case_globals, non_camel_case_types, none_snake_case)]
         pub use #mod_name::#struct_ident;
-
     })
 }

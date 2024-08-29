@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use besu::{DeleteOperation, Dialect, InsertOperation, SelectOperation, UpdateOperation};
 
+/// SQLite dialect implementation.
 #[derive(Debug)]
 pub struct SQLite;
 
@@ -12,7 +13,7 @@ impl Dialect for SQLite {
 
     fn select<V: Default>(op: &SelectOperation) -> (String, V) {
         // TODO: Don't use `*`, list all columns!
-        let mut q = format!(r#"SELECT * FROM "{}""#, op.table);
+        let q = format!(r#"SELECT * FROM "{}""#, op.table);
 
         // for (i, (col, val)) in op.where_equals.iter().enumerate() {
         //     if i == 0 {
@@ -28,15 +29,18 @@ impl Dialect for SQLite {
         (q, Default::default())
     }
 
-    fn insert<V>(op: &InsertOperation) -> (String, V) {
+    #[allow(clippy::todo)]
+    fn insert<V>(_op: &InsertOperation) -> (String, V) {
         todo!()
     }
 
-    fn update<V>(op: &UpdateOperation) -> (String, V) {
+    #[allow(clippy::todo)]
+    fn update<V>(_op: &UpdateOperation) -> (String, V) {
         todo!()
     }
 
-    fn delete<V>(op: &DeleteOperation) -> (String, V) {
+    #[allow(clippy::todo)]
+    fn delete<V>(_op: &DeleteOperation) -> (String, V) {
         todo!()
     }
 }

@@ -1,18 +1,23 @@
 use std::{
+    error,
     future::{Future, IntoFuture},
     pin::Pin,
 };
 
 use crate::Driver;
 
+type Arguments<'a, D> =
+    Result<<D as Driver>::Arguments<'a>, Box<dyn error::Error + Send + Sync + 'static>>;
+
+/// Builder for an raw SQL query.
 pub struct Execute<'a, D: Driver> {
     driver: D,
     sql: &'a str,
-    arguments: D::Arguments<'a>,
+    arguments: Arguments<'a, D>,
 }
 
 impl<'a, D: Driver> Execute<'a, D> {
-    pub(crate) fn new(driver: D, sql: &'a str, arguments: D::Arguments<'a>) -> Self {
+    pub(crate) fn new(driver: D, sql: &'a str, arguments: Arguments<'a, D>) -> Self {
         Self {
             driver,
             sql,
@@ -30,6 +35,13 @@ impl<'a, D: Driver> IntoFuture for Execute<'a, D> {
 
     fn into_future(self) -> Self::IntoFuture {
         let driver = self.driver.clone();
-        Box::pin(async move { driver.execute(&self.sql, self.arguments).await })
+        Box::pin(async move {
+            driver
+                .execute(
+                    self.sql,
+                    self.arguments.map_err(D::error_encoding_arguments)?,
+                )
+                .await
+        })
     }
 }
