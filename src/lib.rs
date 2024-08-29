@@ -1,28 +1,24 @@
 //! Besu: Typesafe query builder for Rust
-// TODO: No panics, enforce docs, etc lints
 
 mod database;
+mod dialect;
+mod driver;
 mod error;
 mod executed_query;
+mod field;
 mod from_value;
-mod insert;
-pub mod operators;
-pub mod queries;
-pub mod schema;
+mod model;
+mod operations;
 mod value;
 
-pub use besu_macros::table;
+pub use besu_macros::Table;
 pub use database::Database;
+pub use dialect::{Dialect, MySql, SQLite};
+pub use driver::{Driver, SqlxSqlite};
 pub use error::Error;
 pub use executed_query::ExecutedQuery;
+pub use field::Field;
 pub use from_value::FromValue;
-pub use internal::Contains;
+pub use model::Model;
+pub use operations::*;
 pub use value::SqlValue;
-
-pub type RightJoin<T, U> = (T, Option<U>);
-pub type LeftJoin<T, U> = (Option<T>, U);
-pub type InnerJoin<T, U> = (T, U);
-pub type FullJoin<T, U> = (Option<T>, Option<U>);
-
-#[doc(hidden)]
-pub mod internal;

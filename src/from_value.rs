@@ -1,14 +1,14 @@
 use crate::{Error, SqlValue};
 
 pub trait FromValue {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error>
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error>
     where
         Self: Sized;
 }
 
 impl<T: FromValue> FromValue for Option<T> {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
-        if let Some(value) = value.into_iter().next() {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
             if let SqlValue::Null = value {
                 Ok(None)
             } else {
@@ -21,8 +21,8 @@ impl<T: FromValue> FromValue for Option<T> {
 }
 
 impl FromValue for String {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
-        if let Some(value) = value.into_iter().next() {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
             if let SqlValue::String(s) = value {
                 Ok(s)
             } else {
@@ -35,8 +35,8 @@ impl FromValue for String {
 }
 
 impl FromValue for u8 {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
-        if let Some(value) = value.into_iter().next() {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
             if let SqlValue::Integer(i) = value {
                 Ok(i as u8)
             } else {
@@ -48,9 +48,23 @@ impl FromValue for u8 {
     }
 }
 
+impl FromValue for i32 {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
+            if let SqlValue::Integer(i) = value {
+                Ok(i as i32)
+            } else {
+                todo!();
+            }
+        } else {
+            todo!();
+        }
+    }
+}
+
 impl FromValue for u64 {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
-        if let Some(value) = value.into_iter().next() {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
             if let SqlValue::Integer(i) = value {
                 Ok(i as u64)
             } else {
@@ -63,8 +77,8 @@ impl FromValue for u64 {
 }
 
 impl FromValue for Option<Vec<u8>> {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
-        if let Some(value) = value.into_iter().next() {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
             if let SqlValue::Binary(b) = value {
                 Ok(Some(b))
             } else {
@@ -78,8 +92,8 @@ impl FromValue for Option<Vec<u8>> {
 
 #[cfg(feature = "uuid")]
 impl FromValue for uuid::Uuid {
-    fn from_value(value: Vec<SqlValue>) -> Result<Self, Error> {
-        if let Some(value) = value.into_iter().next() {
+    fn from_value(values: Vec<SqlValue>) -> Result<Self, Error> {
+        if let Some(value) = values.into_iter().next() {
             if let SqlValue::Binary(b) = value {
                 Ok(uuid::Uuid::from_bytes_le(b.try_into().unwrap()))
             } else {
@@ -90,3 +104,5 @@ impl FromValue for uuid::Uuid {
         }
     }
 }
+
+// TODO: All standard Rust types!!!

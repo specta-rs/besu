@@ -1,12 +1,18 @@
 use proc_macro::TokenStream;
+use quote::{format_ident, quote};
+use syn::{parse_macro_input, DeriveInput};
 use util::ConstIdent;
 
 mod table;
 mod util;
 
-static CRATE_NAME: ConstIdent = ConstIdent::new("besu");
+pub(crate) static CRATE_NAME: ConstIdent = ConstIdent::new("besu");
 
-#[proc_macro]
-pub fn table(tokens: TokenStream) -> TokenStream {
-    table::table(tokens)
+/// TODO
+#[proc_macro_derive(Table)]
+pub fn table(input: TokenStream) -> TokenStream {
+    match table::table(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error().into(),
+    }
 }

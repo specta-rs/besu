@@ -12,6 +12,7 @@ serde = []
 specta = []
 
 [dependencies]
+itertools = "0.13.0"
 proc-macro2 = "1.0.69"
 quote = "1.0.33"
 syn = "2.0.39"
