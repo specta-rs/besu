@@ -54,7 +54,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             quote!(#ident: {
                 let v = D::get_value(&row, i);
                 if i != 0 { i -= 1 };
-                <#ty as #CRATE_NAME::DecodeValue<D>>::decode(v)
+                <D::ValueDecoder as #CRATE_NAME::DecodeValue<D, #ty>>::decode(v)
             }),
             ty.to_token_stream().to_string(),
         )
@@ -63,7 +63,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
 
     let field_types = field_types.iter().map(|s| {
         let ty: TokenStream = s.parse().unwrap();
-        quote!(#ty: #CRATE_NAME::DecodeValue<D>)
+        quote!(<D as #CRATE_NAME::Driver>::ValueDecoder: #CRATE_NAME::DecodeValue<D, #ty>)
     });
 
     // TODO: Emit something that doesn't have clippy warnings

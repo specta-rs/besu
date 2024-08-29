@@ -5,7 +5,7 @@ use sqlx::{
     Arguments, Executor, Pool, Row,
 };
 
-use besu::Driver;
+use besu::{DecodeValue, Driver};
 
 use crate::{encode::CompatSqliteArgument, SQLite, SqliteArgument};
 
@@ -44,8 +44,6 @@ impl Sqlx {
     }
 }
 
-struct SqlxValue;
-
 impl Driver for Sqlx {
     type Error = sqlx::Error;
     type Dialect = SQLite;
@@ -53,6 +51,8 @@ impl Driver for Sqlx {
     type Row = SqliteRow;
     type Value<'a> = SqliteValueRef<'a>;
     type Output = SqliteQueryResult;
+
+    type ValueDecoder = DecodeImpl;
 
     fn row_len(row: &Self::Row) -> usize {
         row.len()
@@ -95,5 +95,13 @@ impl Driver for Sqlx {
         }
 
         Ok(self.0.execute((sql, Some(args))).await?)
+    }
+}
+
+pub struct DecodeImpl;
+
+impl<T: for<'q> sqlx::Decode<'q, sqlx::Sqlite>> DecodeValue<Sqlx, T> for DecodeImpl {
+    fn decode<'q>(value: SqliteValueRef<'q>) -> T {
+        <T as sqlx::Decode<'q, sqlx::Sqlite>>::decode(value).unwrap() // TODO: Error handling
     }
 }
