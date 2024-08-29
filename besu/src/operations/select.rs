@@ -2,48 +2,69 @@ use std::{
     future::{Future, IntoFuture},
     marker::PhantomData,
     pin::Pin,
-    sync::Arc,
 };
 
-use crate::{from_value::FromValue, Dialect, Driver, Model, SqlValue};
+use crate::{Bruh, Column, Dialect, Driver, Model, Table};
 
-pub struct Select<D: Driver, T: Model> {
-    driver: Arc<D>,
+pub struct SelectOperation<V> {
+    pub table: &'static str,
+    pub where_equals: Vec<(&'static str, V)>,
+}
+
+pub struct Select<D: Driver, T> {
+    driver: D,
+    op: SelectOperation<()>, // TODO: D::Value>,
     phantom: PhantomData<T>,
 }
 
-impl<D: Driver, T: Model> Select<D, T> {
-    pub(crate) fn new(driver: Arc<D>) -> Self {
+impl<D: Driver, T: Table> Select<D, T> {
+    pub(crate) fn new(driver: D) -> Self {
         Self {
             driver,
+            op: SelectOperation {
+                table: T::NAME,
+                where_equals: vec![],
+            },
             phantom: PhantomData,
         }
     }
 
-    // TODO: where, limit, joins
+    // TODO: Allow using any operator. This is just equals for now + allow column or SQL expression and any order.
+    // pub fn _where<C: Column<T>>(mut self, col: C, value: C::Type) -> Self
+    // where
+    //     C::Type: Into<D::Value>,
+    // {
+    //     self.op.where_equals.push((C::NAME, value.into()));
+    //     self
+    // }
 
-    // TODO: Take `&self`???
-    pub fn to_sql(self) -> (String, Vec<SqlValue>) {
-        D::Dialect::select(self)
-    }
+    // TODO: limit, offset, cursor, joins
+
+    // pub fn to_sql(&self) -> (String, Vec<D::Value>) {
+    //     D::Dialect::select(&self.op)
+    // }
 }
 
-impl<D: Driver, T: Model> IntoFuture for Select<D, T> {
+impl<D: Driver, T: Table> IntoFuture for Select<D, T>
+where
+    // TODO: Should we constrain earlier for better errors????
+    T::Model: Bruh<D>,
+{
     type Output = Result<Vec<T::Model>, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
         let driver = self.driver.clone();
-        let (sql, values) = D::Dialect::select(self);
+        let (sql, values) = D::Dialect::select(&self.op);
+
+        println!("sql: {}", sql); // TODO
 
         Box::pin(async move {
             Ok(driver
-                .execute(&sql, &values)
+                .query(&sql, &values)
                 .await?
-                .rows
                 .into_iter()
-                .flatten()
-                .map(|v| T::Model::from_value(v).unwrap())
+                .map(|r| T::Model::decode(r))
                 .collect())
         })
     }

@@ -1,24 +1,15 @@
-use std::{fmt, path::Path};
-
 use futures::StreamExt;
-use sqlx::{
-    mysql::{MySqlValue, MySqlValueRef},
-    Either, Executor, Pool, Row, Statement, ValueRef,
-};
+use sqlx::{mysql::MySqlValueRef, Either, Executor, Pool, Row, Statement, ValueRef};
 
-use besu::{Driver, ExecutedQuery, SqlValue};
+use besu::{Driver, SqlValue};
 
-use crate::MySql;
+use crate::{executed_query::ExecutedQuery, MySql};
 
+#[derive(Debug, Clone)]
 pub struct Sqlx(Pool<sqlx::MySql>);
 
-impl fmt::Debug for Sqlx {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SqlxSqlite").finish() // TODO: Include connection path???
-    }
-}
-
 impl Sqlx {
+    /// Construct a new [`Sqlx`] driver from a URI.
     pub async fn new(uri: impl AsRef<str>) -> Result<Self, sqlx::Error> {
         let uri = uri.as_ref();
         // TODO: Expose these params so the user can override them???
@@ -30,15 +21,20 @@ impl Sqlx {
             .await
             .map(Self)
     }
+
+    /// Get a reference to the inner [`Pool`] of the driver.
+    pub fn inner(&self) -> &Pool<sqlx::MySql> {
+        &self.0
+    }
 }
 
 impl Driver for Sqlx {
-    const NAME: &'static str = "sqlx_mysql";
-
     type Error = sqlx::Error;
     type Dialect = MySql;
+    type Value = sqlx::sqlite::SqliteValue;
+    type Output = ExecutedQuery;
 
-    async fn execute(&self, sql: &str, values: &[SqlValue]) -> Result<ExecutedQuery, Self::Error> {
+    async fn execute(&self, sql: &str, values: &[SqlValue]) -> Result<Self::Output, Self::Error> {
         // TOOD: Should *we* cache this statement?
         // TODO: Should we use `prepare_with`?
         let statement = self.0.prepare(&sql).await.unwrap();
@@ -107,7 +103,7 @@ impl Driver for Sqlx {
         Ok(ExecutedQuery {
             rows: result,
             rows_affected,
-            last_insert_id: last_insert_id as i64, // TODO: This cast is probs bad
+            last_insert_id,
         })
     }
 }

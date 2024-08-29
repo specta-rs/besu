@@ -2,6 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod dialect;
+mod executed_query;
 mod sqlx;
 
 pub use dialect::SQLite;
