@@ -23,4 +23,4 @@ workspace = true
 itertools = "0.13.0"
 proc-macro2 = "1"
 quote = "1"
-syn = "2"
+syn = "2" # TODO: Restrict features

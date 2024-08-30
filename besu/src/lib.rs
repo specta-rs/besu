@@ -20,8 +20,9 @@ mod database;
 mod decode;
 mod dialect;
 mod driver;
+mod macros;
 mod operations;
-mod sql;
+mod operator;
 mod table;
 
 pub use arguments::{Arguments, EncodeArgument};

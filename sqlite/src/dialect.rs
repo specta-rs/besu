@@ -30,7 +30,7 @@ impl Dialect for SQLite {
     }
 
     #[allow(clippy::todo)]
-    fn insert<V>(_op: &InsertOperation) -> (String, V) {
+    fn insert<V: Default, T>(_op: &InsertOperation<T>) -> (String, V) {
         todo!()
     }
 

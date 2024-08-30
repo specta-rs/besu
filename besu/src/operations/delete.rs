@@ -20,11 +20,11 @@ pub struct Delete<D: Driver, T> {
     phantom: PhantomData<T>,
 }
 
-impl<D: Driver, T: Table> Delete<D, T> {
-    pub(crate) fn new(driver: D) -> Self {
+impl<D: Driver, T> Delete<D, T> {
+    pub(crate) fn new(driver: D, table: &'static str) -> Self {
         Self {
             driver,
-            op: DeleteOperation { table: T::NAME },
+            op: DeleteOperation { table },
             phantom: PhantomData,
         }
     }
@@ -35,7 +35,7 @@ impl<D: Driver, T: Table> Delete<D, T> {
     }
 }
 
-impl<D: Driver, T: Table> IntoFuture for Delete<D, T> {
+impl<D: Driver, T> IntoFuture for Delete<D, T> {
     type Output = Result<D::Output, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 

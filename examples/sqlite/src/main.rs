@@ -1,8 +1,10 @@
-use besu::{sql, Database, Table};
+use besu::{select, sql, Database, Table};
 use besu_sqlite::Sqlx;
 
 #[derive(Debug, Table)]
+// #[table(name = "bruh", schema = "schema_name")]
 pub struct User {
+    #[column(primary_key)]
     pub id: i32,
     pub name: String,
     pub age: i32,
@@ -17,6 +19,8 @@ pub struct Post {
     pub author_id: i32,
 }
 
+select!(UserSelection, { id: User.id, user_name: User.name, post_title: Post.title }); // , bruh: User.bruh
+
 #[tokio::main]
 async fn main() {
     let db = Database::new(Sqlx::new(":memory:").await.unwrap());
@@ -27,6 +31,18 @@ async fn main() {
     ))
     .await
     .unwrap();
+
+    // db.insert(User)
+    //     .values(
+    //         (0..10)
+    //             .map(|i| {
+    //                 User.create("Alice".into(), 20 + i, "I am Alice".into())
+    //                     .phone(Some("1234567890".into()))
+    //             })
+    //             .collect(),
+    //     )
+    //     .await
+    //     .unwrap();
 
     for i in 0..10 {
         db.execute(sql!(
@@ -43,6 +59,7 @@ async fn main() {
     }
 
     println!("{:#?}", db.select(User).await.unwrap());
+    println!("{:#?}", db.select(UserSelection(User)).await.unwrap());
 
     // println!("{:#?}", db.select(User)._where(User.id, 5).await.unwrap());
 }

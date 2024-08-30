@@ -4,13 +4,15 @@ use std::{
     pin::Pin,
 };
 
-use crate::{DecodeRow, Dialect, Driver, Table};
+use crate::{DecodeRow, Dialect, Driver};
 
 /// Represents an SQL `SELECT` operation.
 #[non_exhaustive]
 pub struct SelectOperation {
     /// The name of the table being selected.
     pub table: &'static str,
+    /// The columns to select.
+    pub columns: Vec<&'static str>, // TODO: Don't use a `Vec` use a static slice??
 }
 
 /// Builder for an SQL `SELECT` operation.
@@ -20,11 +22,14 @@ pub struct Select<D: Driver, T> {
     phantom: PhantomData<T>,
 }
 
-impl<D: Driver, T: Table> Select<D, T> {
-    pub(crate) fn new(driver: D) -> Self {
+impl<D: Driver, T> Select<D, T> {
+    pub(crate) fn new(driver: D, table: &'static str) -> Self {
         Self {
             driver,
-            op: SelectOperation { table: T::NAME },
+            op: SelectOperation {
+                table,
+                columns: Vec::new(),
+            },
             phantom: PhantomData,
         }
     }
@@ -40,18 +45,30 @@ impl<D: Driver, T: Table> Select<D, T> {
 
     // TODO: limit, offset, cursor, joins
 
+    // pub fn left_join<Right: Model, F: Field<Right>>(
+    //     &self,
+    //     field: F,
+    //     value: F::Type,
+    // ) -> LeftJoin<M, Right> {
+    //     todo!();
+    // }
+
+    // pub type RightJoin<T, U> = (T, Option<U>);
+    // pub type LeftJoin<T, U> = (Option<T>, U);
+    // pub type InnerJoin<T, U> = (T, U);
+    // pub type FullJoin<T, U> = (Option<T>, Option<U>);
+
     /// Convert the operation to a raw SQL and values.
     pub fn to_sql(&self) -> (String, D::Arguments<'_>) {
         D::Dialect::select(&self.op)
     }
 }
 
-impl<D: Driver, T: Table> IntoFuture for Select<D, T>
+impl<D: Driver, T> IntoFuture for Select<D, T>
 where
-    // TODO: Should we constrain earlier for better errors????
-    T::Model: DecodeRow<D>,
+    T: DecodeRow<D>,
 {
-    type Output = Result<Vec<T::Model>, D::Error>;
+    type Output = Result<Vec<T>, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -63,7 +80,7 @@ where
                 .query(&sql, arguments)
                 .await?
                 .into_iter()
-                .map(|r| T::Model::decode(r))
+                .map(|r| T::decode(r))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(D::error_decoding_value)
         })

@@ -25,7 +25,7 @@ impl<'a, D: Driver> Execute<'a, D> {
         }
     }
 
-    // TODO: Allow fetching columns
+    // TODO: `execute` vs `query` vs `fetch_one`
     // TODO: Allow streaming
 }
 

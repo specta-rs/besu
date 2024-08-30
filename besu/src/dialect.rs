@@ -11,7 +11,7 @@ pub trait Dialect {
     fn select<V: Default>(op: &SelectOperation) -> (String, V);
 
     /// Generate the SQL query for a `INSERT` operation.
-    fn insert<V>(op: &InsertOperation) -> (String, V);
+    fn insert<V: Default, T>(op: &InsertOperation<T>) -> (String, V);
 
     /// Generate the SQL query for a `UPDATE` operation.
     fn update<V>(op: &UpdateOperation) -> (String, V);

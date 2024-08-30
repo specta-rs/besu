@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
 };
 
-use crate::{Dialect, Driver, Table};
+use crate::{Dialect, Driver};
 
 /// Represents an SQL `UPDATE` operation.
 #[non_exhaustive]
@@ -20,11 +20,11 @@ pub struct Update<D: Driver, T> {
     phantom: PhantomData<T>,
 }
 
-impl<D: Driver, T: Table> Update<D, T> {
-    pub(crate) fn new(driver: D) -> Self {
+impl<D: Driver, T> Update<D, T> {
+    pub(crate) fn new(driver: D, table: &'static str) -> Self {
         Self {
             driver,
-            op: UpdateOperation { table: T::NAME },
+            op: UpdateOperation { table },
             phantom: PhantomData,
         }
     }
@@ -35,7 +35,7 @@ impl<D: Driver, T: Table> Update<D, T> {
     }
 }
 
-impl<D: Driver, T: Table> IntoFuture for Update<D, T> {
+impl<D: Driver, T> IntoFuture for Update<D, T> {
     type Output = Result<D::Output, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
