@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["./besu", "./mysql", "./sqlite", "./postgres", "./macros", "./examples/*"]
+members = ["./besu", "./mysql", "./sqlite", "./postgres", "./macros", "./cli", "./examples/*"]
 
 [workspace.dependencies]
 besu = { path = "./besu", version = "0.0.1" }

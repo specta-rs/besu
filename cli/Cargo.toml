@@ -1,0 +1,16 @@
+[package]
+name = "besu-cli"
+description = "The Besu CLI for managing migrations, codegen and more"
+version = "0.0.1"
+authors = ["Oscar Beaumont <oscar@otbeaumont.me>"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/specta-rs/besu"
+keywords = ["async", "database", "query-builder", "typesafe", "cli"]
+categories = ["web-programming", "asynchronous"]
+
+[dependencies]
+tracing = { version = "0.1" }
+
+clap = { version = "4.5.16", features = ["derive"] }
+tracing-subscriber = "0.3.18"
