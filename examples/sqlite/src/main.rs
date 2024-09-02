@@ -19,7 +19,7 @@ pub struct Post {
     pub author_id: i32,
 }
 
-select!(UserSelection, { id: User.id, user_name: User.name, post_title: Post.title }); // , bruh: User.bruh
+// select!(UserSelection, { id: User.id, user_name: User.name, post_title: Post.title }); // , bruh: User.bruh
 
 #[tokio::main]
 async fn main() {
@@ -32,34 +32,22 @@ async fn main() {
     .await
     .unwrap();
 
-    // db.insert(User)
-    //     .values(
-    //         (0..10)
-    //             .map(|i| {
-    //                 User.create("Alice".into(), 20 + i, "I am Alice".into())
-    //                     .phone(Some("1234567890".into()))
-    //             })
-    //             .collect(),
-    //     )
-    //     .await
-    //     .unwrap();
-
-    for i in 0..10 {
-        db.execute(sql!(
-            r#"INSERT INTO "User" (id, name, age, bio, phone) VALUES ($1, $2, $3, $4, $5);"#,
-            i,
-            // TODO: Being force to do `.to_string` is annoying. `sqlx` lacking an impl for `&str` is cringe!
-            "Alice".to_string(),
-            20 + i,
-            "I am Alice".to_string(),
-            "1234567890".to_string()
-        ))
+    db.insert(User)
+        .values(
+            (0..10)
+                .map(|i| {
+                    User.create("Alice".into(), 20 + i, "I am Alice".into())
+                        .phone(Some("1234567890".into()))
+                        // TODO: Remove
+                        .id(i)
+                })
+                .collect(),
+        )
         .await
         .unwrap();
-    }
 
     println!("{:#?}", db.select(User).await.unwrap());
-    println!("{:#?}", db.select(UserSelection(User)).await.unwrap());
+    // println!("{:#?}", db.select(UserSelection(User)).await.unwrap());
 
     // println!("{:#?}", db.select(User)._where(User.id, 5).await.unwrap());
 }

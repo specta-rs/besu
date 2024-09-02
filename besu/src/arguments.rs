@@ -3,11 +3,12 @@ use std::error;
 use crate::Driver;
 
 /// A trait for encoding arguments into a driver-specific format.
-pub trait EncodeArgument<'a, T> {
+pub trait EncodeArgument<'a, T>: Driver {
     /// Encode the given value into the driver-specific format.
-    fn encode(&mut self, value: T) -> Result<(), Box<dyn error::Error + Send + Sync + 'static>>
-    where
-        T: 'a;
+    fn encode(
+        arguments: &mut Self::Arguments<'a>,
+        value: T,
+    ) -> Result<(), Box<dyn error::Error + Send + Sync + 'static>>;
 }
 
 // TODO: We should probs seal this?
@@ -24,13 +25,12 @@ macro_rules! impl_tuple {
         #[allow(non_snake_case, unused_mut)]
         impl<'a, D: Driver, $($i: 'a),*> Arguments<'a, D> for ($($i,)*)
         where
-            $(D::Arguments<'a>: EncodeArgument<'a, $i>),*
+            $(D: EncodeArgument<'a, $i>),*
         {
             fn into_driver_arguments(self) -> Result<D::Arguments<'a>, Box<dyn error::Error + Send + Sync + 'static>> {
                 let ( $( $i, )* ) = self;
                 let mut args = D::Arguments::default();
-                // TODO: Error handling
-                $(<D::Arguments<'a> as EncodeArgument<'a, $i>>::encode(&mut args, $i)?;)*
+                $(<D as EncodeArgument<$i>>::encode(&mut args, $i)?;)*
                 Ok(args)
             }
         }

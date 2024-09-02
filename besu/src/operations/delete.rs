@@ -4,9 +4,10 @@ use std::{
     pin::Pin,
 };
 
-use crate::{Dialect, Driver, Table};
+use crate::{Dialect, Driver};
 
 /// Represents an SQL `DELETE` operation.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct DeleteOperation {
     /// The name of the table being deleted.
@@ -14,6 +15,7 @@ pub struct DeleteOperation {
 }
 
 /// Builder for an SQL `DELETE` operation.
+#[derive(Debug)]
 pub struct Delete<D: Driver, T> {
     driver: D,
     op: DeleteOperation,

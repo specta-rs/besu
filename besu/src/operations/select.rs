@@ -7,6 +7,7 @@ use std::{
 use crate::{DecodeRow, Dialect, Driver};
 
 /// Represents an SQL `SELECT` operation.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct SelectOperation {
     /// The name of the table being selected.
@@ -16,6 +17,7 @@ pub struct SelectOperation {
 }
 
 /// Builder for an SQL `SELECT` operation.
+#[derive(Debug)]
 pub struct Select<D: Driver, T> {
     driver: D,
     op: SelectOperation,
@@ -59,21 +61,29 @@ impl<D: Driver, T> Select<D, T> {
     // pub type FullJoin<T, U> = (Option<T>, Option<U>);
 
     /// Convert the operation to a raw SQL and values.
-    pub fn to_sql(&self) -> (String, D::Arguments<'_>) {
-        D::Dialect::select(&self.op)
+    // TODO: `'static` bound????
+    pub fn to_sql(&self) -> (String, D::Arguments<'static>) {
+        let (sql, arguments_refs) = D::Dialect::select(&self.op);
+        let mut arguments = D::Arguments::default();
+        // for arg in arguments_refs {
+        //     self.values[arg.i].encode(&mut arguments, arg.c).unwrap(); // TODO: Error handling
+        // }
+        (sql, arguments)
     }
 }
 
-impl<D: Driver, T> IntoFuture for Select<D, T>
+impl<D, T> IntoFuture for Select<D, T>
 where
-    T: DecodeRow<D>,
+    D: Driver,
+    // TODO: `'static`???
+    T: DecodeRow<D> + 'static,
 {
     type Output = Result<Vec<T>, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
         let driver = self.driver.clone();
-        let (sql, arguments) = D::Dialect::select(&self.op);
+        let (sql, arguments) = self.to_sql();
 
         Box::pin(async move {
             driver

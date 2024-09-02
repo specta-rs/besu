@@ -1,6 +1,8 @@
 use std::{any::type_name, fmt};
 
-use crate::{Arguments, DecodeRow, Delete, Driver, Execute, Insert, Select, Table, Update};
+use crate::{
+    Arguments, DecodeRow, Delete, Driver, Execute, Insert, Insertable, Select, Table, Update,
+};
 
 /// The database instance.
 #[derive(Clone)]
@@ -35,8 +37,13 @@ impl<D: Driver> Database<D> {
     }
 
     /// Construct a new [`Insert`] operation for the given table.
-    pub fn insert<T: Table>(&self, table: T) -> Insert<D, T::Insert> {
-        Insert::new(self.0.clone(), table.name())
+    pub fn insert<T>(&self, table: T) -> Insert<D, T::Insert>
+    where
+        D: Driver,
+        T: Table,
+        T::Insert: Insertable<D>,
+    {
+        Insert::new(self.0.clone(), table.name(), T::Insert::columns())
     }
 
     /// Construct a new [`Update`] operation for the given table.

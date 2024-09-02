@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use besu::{DeleteOperation, Dialect, InsertOperation, SelectOperation, UpdateOperation};
+use besu::{
+    DeleteOperation, Dialect, InsertArgumentRef, InsertOperation, SelectOperation, UpdateOperation,
+};
 
 /// SQLite dialect implementation.
 #[derive(Debug)]
@@ -11,7 +13,7 @@ impl Dialect for SQLite {
         Cow::Borrowed("?")
     }
 
-    fn select<V: Default>(op: &SelectOperation) -> (String, V) {
+    fn select(op: &SelectOperation) -> (String, Vec<InsertArgumentRef<'_>>) {
         // TODO: Don't use `*`, list all columns!
         let q = format!(r#"SELECT * FROM "{}""#, op.table);
 
@@ -23,15 +25,47 @@ impl Dialect for SQLite {
         //     }
         //     q.push_str(col);
         //     q.push_str(" = ");
-        //     q.push_str(Self::positional_param(i).as_ref());
+        //     q.push_str("?");
         // }
 
         (q, Default::default())
     }
 
-    #[allow(clippy::todo)]
-    fn insert<V: Default, T>(_op: &InsertOperation<T>) -> (String, V) {
-        todo!()
+    fn insert<'a>(op: &InsertOperation<'a>) -> (String, Vec<InsertArgumentRef<'a>>) {
+        if op.values_len == 0 {
+            panic!("No shot"); // TODO
+        }
+
+        let mut q = format!(r#"INSERT INTO "{}" ("#, op.table);
+        for (i, col) in op.columns.iter().enumerate() {
+            if i != 0 {
+                q.push_str(", ");
+            }
+            q.push_str(col); // TODO: Escape values
+        }
+        q.push_str(") VALUES ");
+
+        let mut args = Vec::default();
+        for (i, columns) in op.values().enumerate() {
+            if i != 0 {
+                q.push_str(", ");
+            }
+            q.push_str("(");
+
+            for (i, (_, arg)) in columns.enumerate() {
+                if i != 0 {
+                    q.push_str(", ");
+                }
+
+                q.push_str("?");
+                args.push(arg);
+            }
+            q.push_str(")");
+        }
+
+        println!("{q:?}"); // TODO
+
+        (q, args)
     }
 
     #[allow(clippy::todo)]

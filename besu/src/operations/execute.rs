@@ -10,6 +10,7 @@ type Arguments<'a, D> =
     Result<<D as Driver>::Arguments<'a>, Box<dyn error::Error + Send + Sync + 'static>>;
 
 /// Builder for an raw SQL query.
+// #[derive(Debug)] // TODO
 pub struct Execute<'a, D: Driver> {
     driver: D,
     sql: &'a str,

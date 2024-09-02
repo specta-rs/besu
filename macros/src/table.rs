@@ -49,19 +49,24 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
         .map(|f| Ok((f, FieldAttr::parse_from(&f.attrs)?)))
         .collect::<Result<Vec<_>>>()?;
 
+    let field_types: HashSet<_> = fields
+        .iter()
+        .map(|(f, _)| f.ty.to_token_stream().to_string())
+        .collect();
+
     let (
         field_structs,
         field_names,
         model_struct_fields_decls,
         model_struct_fields_impls,
-        mut from_value_impl,
+        mut decode_row_impl,
+        insert_row_impl,
         insert_struct_fields_decls,
         required_fields_fn_args,
         required_fields_fn_impl,
         insert_from_model_struct_fields_impls,
         insert_struct_setter,
         macro_field_match,
-        field_types,
     ): (
         Vec<_>,
         Vec<_>,
@@ -74,9 +79,13 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
         Vec<_>,
         Vec<_>,
         Vec<_>,
-        HashSet<_>,
-    ) = multiunzip(fields.iter().map(|(f, field_attrs)| {
-        let ident = &f.ident;
+        Vec<_>,
+    ) = multiunzip(fields.iter().enumerate().map(|(i, (f, field_attrs))| {
+        // let ident = &f.ident;
+        let Some(ident) = &f.ident else {
+            todo!();
+        };
+
         let ty = &f.ty;
         let mut ty_str = f.ty.to_token_stream().to_string();
         remove_whitespace(&mut ty_str);
@@ -85,7 +94,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
         let sql_table_name = field_attrs
             .name
             .clone()
-            .unwrap_or_else(|| LitStr::new(&struct_ident.to_string(), struct_ident.span()));
+            .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
 
         // It would be nice if this could be runtime but I don't think it can be.
         let is_optional = field_attrs.primary_key || ty_str.starts_with("Option<"); // TODO: Or `std::option::Option`
@@ -100,6 +109,12 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             quote!(Some(model.#ident))
         } else {
             quote!(model.#ident)
+        };
+
+        let insert_decode_impl = if is_optional {
+            quote!(self.#ident.clone().expect("todo: optional")) // TODO: Dealing with this `Clone` bound
+        } else {
+            quote!(self.#ident.clone()) // TODO: Dealing with this `Clone` bound
         };
 
         (
@@ -121,6 +136,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
                 if i != 0 { i -= 1 };
                 <D::ValueDecoder as #CRATE_NAME::DecodeValue<D, #ty>>::decode(v)?
             }),
+            quote!(#i => <D as #CRATE_NAME::EncodeArgument<#ty>>::encode(arguments, #insert_decode_impl)),
             if is_optional {
                 quote!(pub #ident: Option<#ty>)
             } else {
@@ -143,17 +159,23 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
                 (@verify; #ident) => {};
                 (@field; #ident) => { #ty };
             },
-            ty.to_token_stream().to_string(),
         )
     }));
-    from_value_impl.reverse();
+    decode_row_impl.reverse();
     let required_fields_fn_args = required_fields_fn_args.into_iter().flatten();
 
-    let field_types = field_types.iter().map(|s| {
+    let decode_field_types = field_types.iter().map(|s| {
         let ty: TokenStream = s
             .parse()
             .expect("token stream -> string -> token stream failed!");
         quote!(<D as #CRATE_NAME::Driver>::ValueDecoder: #CRATE_NAME::DecodeValue<D, #ty>)
+    });
+
+    let insert_field_types = field_types.iter().map(|s| {
+        let ty: TokenStream = s
+            .parse()
+            .expect("token stream -> string -> token stream failed!");
+        quote!(D: for<'a> #CRATE_NAME::EncodeArgument<'a, #ty>)
     });
 
     // TODO: Emit something that doesn't have clippy warnings
@@ -163,7 +185,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
             #[automatically_derived]
             impl<D: #CRATE_NAME::Driver> #CRATE_NAME::DecodeRow<D> for super::#struct_ident
             where
-                #( #field_types ),*
+                #( #decode_field_types ),*
             {
                 fn decode(row: D::Row) -> ::std::result::Result<Self, ::std::boxed::Box<dyn ::std::error::Error + Send + Sync + 'static>>
                 where
@@ -172,7 +194,7 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
                     let mut i = D::row_len(&row);
                     if i != 0 { i -= 1 };
                     Ok(Self {
-                        #( #from_value_impl ),*
+                        #( #decode_row_impl ),*
                     })
                 }
             }
@@ -213,6 +235,9 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
 
             #[automatically_derived]
             impl #CRATE_NAME::Table for #model_struct_ident {
+                type Model = super::#struct_ident;
+                type Insert = #insert_struct_ident;
+
                 fn name(&self) -> &'static str {
                     #sql_table_name
                 }
@@ -224,14 +249,34 @@ pub fn table(input: DeriveInput) -> Result<TokenStream> {
                     ]
                 }
 
-                type Model = super::#struct_ident;
-                type Insert = #insert_struct_ident;
+
+            }
+
+            #[automatically_derived]
+            impl<D: #CRATE_NAME::Driver> #CRATE_NAME::Insertable<D> for #insert_struct_ident
+            where
+                #( #insert_field_types ),*
+            {
+                fn columns() -> &'static [&'static str] {
+                    use #CRATE_NAME::Column;
+                    &[
+                        #( <fields::#field_names as Column<_>>::NAME ),*
+                    ]
+                }
+
+                fn encode<'a>(&self, arguments: &mut D::Arguments<'a>, field: usize) -> ::std::result::Result<(), ::std::boxed::Box<dyn ::std::error::Error + Send + Sync + 'static>> {
+                    match field {
+                        #( #insert_row_impl, )*
+                        _ => todo!(), // TODO: Return error instead
+                    }
+                }
             }
 
             pub const #struct_ident: #model_struct_ident = #model_struct_ident {
                 #( #model_struct_fields_impls ),*
             };
         }
+
 
         #[allow(non_upper_case_globals, non_camel_case_types, none_snake_case)]
         pub use #mod_name::#struct_ident;

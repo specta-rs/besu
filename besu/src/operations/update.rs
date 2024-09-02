@@ -7,6 +7,7 @@ use std::{
 use crate::{Dialect, Driver};
 
 /// Represents an SQL `UPDATE` operation.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct UpdateOperation {
     /// The name of the table being updated.
@@ -14,6 +15,7 @@ pub struct UpdateOperation {
 }
 
 /// Builder for an SQL `UPDATE` operation.
+#[derive(Debug)]
 pub struct Update<D: Driver, T> {
     driver: D,
     op: UpdateOperation,

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{error, path::Path};
 
 use sqlx::{
     error::BoxDynError,
@@ -53,7 +53,7 @@ impl Driver for Sqlx {
     type Value<'a> = SqliteValueRef<'a>;
     type Output = SqliteQueryResult;
 
-    type Arguments<'a> = EncodeImpl<'a>;
+    type Arguments<'a> = SqliteArguments<'a>;
     type ValueDecoder = DecodeImpl;
 
     fn row_len(row: &Self::Row) -> usize {
@@ -81,7 +81,7 @@ impl Driver for Sqlx {
         sql: &str,
         args: Self::Arguments<'_>,
     ) -> Result<Vec<Self::Row>, Self::Error> {
-        self.0.fetch_all((sql, Some(args.0))).await
+        self.0.fetch_all((sql, Some(args))).await
     }
 
     async fn execute(
@@ -89,7 +89,7 @@ impl Driver for Sqlx {
         sql: &str,
         args: Self::Arguments<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        self.0.execute((sql, Some(args.0))).await
+        self.0.execute((sql, Some(args))).await
     }
 }
 
@@ -101,16 +101,13 @@ impl<T: for<'q> sqlx::Decode<'q, sqlx::Sqlite>> DecodeValue<Sqlx, T> for DecodeI
     }
 }
 
-#[derive(Default)]
-pub struct EncodeImpl<'a>(SqliteArguments<'a>);
-
-impl<'a, T: for<'q> sqlx::Encode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>> EncodeArgument<'a, T>
-    for EncodeImpl<'a>
+impl<'a, T: sqlx::Encode<'a, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite> + 'a> EncodeArgument<'a, T>
+    for Sqlx
 {
-    fn encode(&mut self, value: T) -> Result<(), BoxDynError>
-    where
-        T: 'a,
-    {
-        self.0.add(value)
+    fn encode(
+        arguments: &mut Self::Arguments<'a>,
+        value: T,
+    ) -> Result<(), Box<dyn error::Error + Send + Sync + 'static>> {
+        arguments.add(value)
     }
 }

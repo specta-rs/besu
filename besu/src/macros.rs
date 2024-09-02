@@ -84,7 +84,10 @@ macro_rules! select {
         }
 
         #[automatically_derived]
-        impl Table for Model {
+        impl $crate::Selection for Model {
+            type Model = $s;
+            type Insert = SelectionsCantBeUsedForInsertion;
+
             fn name(&self) -> &'static str {
                 self.____besu_table_name
             }
@@ -94,13 +97,10 @@ macro_rules! select {
                     // $( <fields::$k as $crate::Column<_>>::NAME ),*
                 ]
             }
-
-            type Model = $s;
-            type Insert = (); // TODO: We might wanna break this off
         }
 
         // TODO: Enforce `T` is contained in the selection???
-        pub fn $s<T: Table>(from: T) -> Model {
+        pub fn $s<T: $crate::Selection>(from: T) -> Model {
             Model {
                 ____besu_table_name: from.name(),
                 $( $k: fields::$k ),*
