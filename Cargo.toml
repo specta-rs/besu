@@ -1,13 +1,10 @@
 [workspace]
-resolver = "2"
-members = ["./besu", "./mysql", "./sqlite", "./postgres", "./macros", "./cli", "./examples/*"]
+resolver = "3"
+members = ["./besu", "./core", "./sqlite", "./cli", "./examples/*"]
 
 [workspace.dependencies]
 besu = { path = "./besu", version = "0.0.1" }
-besu-macros = { path = "./macros", version = "0.0.1" }
 besu-sqlite = { path = "./sqlite", version = "0.0.1" }
-besu-mysql = { path = "./mysql", version = "0.0.1" }
-besu-postgres = { path = "./postgres", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = { level = "forbid", priority = -1 }
@@ -20,11 +17,3 @@ unwrap_used = { level = "warn", priority = -3 }
 panic = { level = "warn", priority = -4 }
 todo = { level = "warn", priority = -5 }
 panic_in_result_fn = { level = "warn", priority = -6 }
-
-# Problems in downstream dependencies
-multiple_crate_versions = { level = "allow", priority = 1 }
-
-[workspace.metadata.release]
-push = false
-tag = false
-enable-all-features = true

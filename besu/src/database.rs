@@ -1,8 +1,6 @@
 use std::{any::type_name, fmt};
 
-use crate::{
-    Arguments, DecodeRow, Delete, Driver, Execute, Insert, Insertable, Select, Table, Update,
-};
+use crate::Driver;
 
 /// The database instance.
 #[derive(Clone)]
@@ -28,49 +26,50 @@ impl<D: Driver> Database<D> {
         &self.0
     }
 
-    /// Construct a new [`Select`] operation for the given table.
-    pub fn select<T: Table>(&self, table: T) -> Select<D, T::Model>
-    where
-        T::Model: DecodeRow<D>,
-    {
-        Select::new(self.0.clone(), table.name())
-    }
-
-    /// Construct a new [`Insert`] operation for the given table.
-    pub fn insert<T>(&self, table: T) -> Insert<D, T::Insert>
-    where
-        D: Driver,
-        T: Table,
-        T::Insert: Insertable<D>,
-    {
-        Insert::new(self.0.clone(), table.name(), T::Insert::columns())
-    }
-
-    /// Construct a new [`Update`] operation for the given table.
-    pub fn update<T: Table>(&self, table: T) -> Update<D, T> {
-        Update::new(self.0.clone(), table.name())
-    }
-
-    /// Construct a new [`Delete`] operation for the given table.
-    pub fn delete<T: Table>(&self, table: T) -> Delete<D, T> {
-        Delete::new(self.0.clone(), table.name())
-    }
-
-    /// Construct a new [`Execute`] operation.
-    pub fn execute<'a, T: Arguments<'a, D>>(
-        &self,
-        (sql, arguments): (&'static str, T),
-    ) -> Execute<'a, D> {
-        Execute::new(self.0.clone(), sql, arguments.into_driver_arguments())
-    }
-
-    /// Construct a new [`Execute`] operation.
-    ///
-    /// This method takes a non-static string so it is potentially prone to SQL injection so take care!
-    pub fn execute_unsafe<'a, T: Arguments<'a, D>>(
-        &self,
-        (sql, arguments): (&'a str, T),
-    ) -> Execute<'a, D> {
-        Execute::new(self.0.clone(), sql, arguments.into_driver_arguments())
-    }
+    // /// Construct a new [`Select`] operation for the given table.
+    // pub fn select<T: Table>(&self, table: T) -> Select<D, T::Model>
+    // where
+    //     T::Model: DecodeRow<D>,
+    // {
+    //     Select::new(self.0.clone(), table.name())
+    // }
 }
+
+// TODO: bring this stuff back
+// /// Construct a new [`Insert`] operation for the given table.
+// pub fn insert<T>(&self, table: T) -> Insert<D, T::Insert>
+// where
+//     D: Driver,
+//     T: Table,
+//     T::Insert: Insertable<D>,
+// {
+//     Insert::new(self.0.clone(), table.name(), T::Insert::columns())
+// }
+
+// /// Construct a new [`Update`] operation for the given table.
+// pub fn update<T: Table>(&self, table: T) -> Update<D, T> {
+//     Update::new(self.0.clone(), table.name())
+// }
+
+// /// Construct a new [`Delete`] operation for the given table.
+// pub fn delete<T: Table>(&self, table: T) -> Delete<D, T> {
+//     Delete::new(self.0.clone(), table.name())
+// }
+
+// /// Construct a new [`Execute`] operation.
+// pub fn execute<'a, T: Arguments<'a, D>>(
+//     &self,
+//     (sql, arguments): (&'static str, T),
+// ) -> Execute<'a, D> {
+//     Execute::new(self.0.clone(), sql, arguments.into_driver_arguments())
+// }
+
+// /// Construct a new [`Execute`] operation.
+// ///
+// /// This method takes a non-static string so it is potentially prone to SQL injection so take care!
+// pub fn execute_unsafe<'a, T: Arguments<'a, D>>(
+//     &self,
+//     (sql, arguments): (&'a str, T),
+// ) -> Execute<'a, D> {
+//     Execute::new(self.0.clone(), sql, arguments.into_driver_arguments())
+// }

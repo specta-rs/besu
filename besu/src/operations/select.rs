@@ -4,7 +4,9 @@ use std::{
     pin::Pin,
 };
 
-use crate::{DecodeRow, Dialect, Driver};
+use crate::Driver;
+
+mod r#macro;
 
 /// Represents an SQL `SELECT` operation.
 #[derive(Debug)]
@@ -60,39 +62,40 @@ impl<D: Driver, T> Select<D, T> {
     // pub type InnerJoin<T, U> = (T, U);
     // pub type FullJoin<T, U> = (Option<T>, Option<U>);
 
-    /// Convert the operation to a raw SQL and values.
+    // /// Convert the operation to a raw SQL and values.
     // TODO: `'static` bound????
-    pub fn to_sql(&self) -> (String, D::Arguments<'static>) {
-        let (sql, arguments_refs) = D::Dialect::select(&self.op);
-        let mut arguments = D::Arguments::default();
-        // for arg in arguments_refs {
-        //     self.values[arg.i].encode(&mut arguments, arg.c).unwrap(); // TODO: Error handling
-        // }
-        (sql, arguments)
-    }
+    // pub fn to_sql(&self) -> (String, D::Arguments<'static>) {
+    //     let (sql, arguments_refs) = D::Dialect::select(&self.op);
+    //     let mut arguments = D::Arguments::default();
+    //     // for arg in arguments_refs {
+    //     //     self.values[arg.i].encode(&mut arguments, arg.c).unwrap(); // TODO: Error handling
+    //     // }
+    //     (sql, arguments)
+    // }
 }
 
 impl<D, T> IntoFuture for Select<D, T>
 where
     D: Driver,
     // TODO: `'static`???
-    T: DecodeRow<D> + 'static,
+    // T: DecodeRow<D> + 'static,
 {
     type Output = Result<Vec<T>, D::Error>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output>>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let driver = self.driver.clone();
-        let (sql, arguments) = self.to_sql();
+        // let driver = self.driver.clone();
+        // let (sql, arguments) = self.to_sql();
 
-        Box::pin(async move {
-            driver
-                .query(&sql, arguments)
-                .await?
-                .into_iter()
-                .map(|r| T::decode(r))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(D::error_decoding_value)
-        })
+        // Box::pin(async move {
+        //     driver
+        //         .query(&sql, arguments)
+        //         .await?
+        //         .into_iter()
+        //         .map(|r| T::decode(r))
+        //         .collect::<Result<Vec<_>, _>>()
+        //         .map_err(D::error_decoding_value)
+        // })
+        todo!();
     }
 }

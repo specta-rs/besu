@@ -6,7 +6,7 @@ use sqlx::{
     Arguments, Executor, Pool, Row,
 };
 
-use besu::{DecodeValue, Driver, EncodeArgument};
+use besu::Driver;
 
 use crate::SQLite;
 
@@ -49,65 +49,65 @@ impl Sqlx {
 impl Driver for Sqlx {
     type Error = sqlx::Error;
     type Dialect = SQLite;
-    type Row = SqliteRow;
-    type Value<'a> = SqliteValueRef<'a>;
-    type Output = SqliteQueryResult;
+    //     type Row = SqliteRow;
+    //     type Value<'a> = SqliteValueRef<'a>;
+    //     type Output = SqliteQueryResult;
 
-    type Arguments<'a> = SqliteArguments<'a>;
-    type ValueDecoder = DecodeImpl;
+    //     type Arguments<'a> = SqliteArguments<'a>;
+    //     type ValueDecoder = DecodeImpl;
 
-    fn row_len(row: &Self::Row) -> usize {
-        row.len()
-    }
+    //     fn row_len(row: &Self::Row) -> usize {
+    //         row.len()
+    //     }
 
-    fn get_value(row: &Self::Row, index: usize) -> Result<Self::Value<'_>, Self::Error> {
-        row.try_get_raw(index)
-    }
+    //     fn get_value(row: &Self::Row, index: usize) -> Result<Self::Value<'_>, Self::Error> {
+    //         row.try_get_raw(index)
+    //     }
 
-    fn error_encoding_arguments(
-        err: Box<dyn std::error::Error + Send + Sync + 'static>,
-    ) -> Self::Error {
-        sqlx::Error::Encode(err)
-    }
+    //     fn error_encoding_arguments(
+    //         err: Box<dyn std::error::Error + Send + Sync + 'static>,
+    //     ) -> Self::Error {
+    //         sqlx::Error::Encode(err)
+    //     }
 
-    fn error_decoding_value(
-        err: Box<dyn std::error::Error + Send + Sync + 'static>,
-    ) -> Self::Error {
-        sqlx::Error::Decode(err)
-    }
+    //     fn error_decoding_value(
+    //         err: Box<dyn std::error::Error + Send + Sync + 'static>,
+    //     ) -> Self::Error {
+    //         sqlx::Error::Decode(err)
+    //     }
 
-    async fn query(
-        &self,
-        sql: &str,
-        args: Self::Arguments<'_>,
-    ) -> Result<Vec<Self::Row>, Self::Error> {
-        self.0.fetch_all((sql, Some(args))).await
-    }
+    //     async fn query(
+    //         &self,
+    //         sql: &str,
+    //         args: Self::Arguments<'_>,
+    //     ) -> Result<Vec<Self::Row>, Self::Error> {
+    //         self.0.fetch_all((sql, Some(args))).await
+    //     }
 
-    async fn execute(
-        &self,
-        sql: &str,
-        args: Self::Arguments<'_>,
-    ) -> Result<Self::Output, Self::Error> {
-        self.0.execute((sql, Some(args))).await
-    }
-}
+    //     async fn execute(
+    //         &self,
+    //         sql: &str,
+    //         args: Self::Arguments<'_>,
+    //     ) -> Result<Self::Output, Self::Error> {
+    //         self.0.execute((sql, Some(args))).await
+    //     }
+    // }
 
-pub struct DecodeImpl;
+    // pub struct DecodeImpl;
 
-impl<T: for<'q> sqlx::Decode<'q, sqlx::Sqlite>> DecodeValue<Sqlx, T> for DecodeImpl {
-    fn decode<'q>(value: SqliteValueRef<'q>) -> Result<T, BoxDynError> {
-        <T as sqlx::Decode<'q, sqlx::Sqlite>>::decode(value)
-    }
-}
+    // impl<T: for<'q> sqlx::Decode<'q, sqlx::Sqlite>> DecodeValue<Sqlx, T> for DecodeImpl {
+    //     fn decode<'q>(value: SqliteValueRef<'q>) -> Result<T, BoxDynError> {
+    //         <T as sqlx::Decode<'q, sqlx::Sqlite>>::decode(value)
+    //     }
+    // }
 
-impl<'a, T: sqlx::Encode<'a, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite> + 'a> EncodeArgument<'a, T>
-    for Sqlx
-{
-    fn encode(
-        arguments: &mut Self::Arguments<'a>,
-        value: T,
-    ) -> Result<(), Box<dyn error::Error + Send + Sync + 'static>> {
-        arguments.add(value)
-    }
+    // impl<'a, T: sqlx::Encode<'a, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite> + 'a> EncodeArgument<'a, T>
+    //     for Sqlx
+    // {
+    //     fn encode(
+    //         arguments: &mut Self::Arguments<'a>,
+    //         value: T,
+    //     ) -> Result<(), Box<dyn error::Error + Send + Sync + 'static>> {
+    //         arguments.add(value)
+    //     }
 }
