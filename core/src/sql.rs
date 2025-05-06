@@ -5,14 +5,25 @@ use crate::{Driver, Encode};
 // TODO: Thoughts on giving this a lifetime???
 
 // TODO: Make this an `enum` not a `struct`???
-enum Chunk<D: Driver> {
+// TODO: Make this private
+pub enum Chunk<D: Driver> {
     Raw(Cow<'static, str>),
     Param(D::Value),
 }
 
 pub struct Sql<D: Driver, T = ()> {
-    chunks: Vec<Chunk<D>>, // TODO: Cow-style thing for fully static queries???
+    // TODO: Make these fields private
+    pub chunks: Vec<Chunk<D>>, // TODO: Cow-style thing for fully static queries???
     phantom: PhantomData<T>,
+}
+
+impl<D: Driver, T> Default for Sql<D, T> {
+    fn default() -> Self {
+        Self {
+            chunks: Default::default(),
+            phantom: PhantomData,
+        }
+    }
 }
 
 // impl<D: Driver, T> fmt::Debug for Sql<D, T> {
@@ -70,19 +81,4 @@ impl<D: Driver, T> Sql<D, T> {
 
     // TODO: Can we make this work?
     // pub fn _if() {}
-
-    // TODO: Maybe rename this
-    pub fn to_query(self) -> (String, Vec<D::Value>) {
-        let mut query = String::new();
-        let mut arguments = vec![];
-
-        for chunk in self.chunks {
-            match chunk {
-                Chunk::Raw(v) => query.push_str(&v),
-                Chunk::Param(v) => arguments.push(v),
-            }
-        }
-
-        (query, arguments)
-    }
 }

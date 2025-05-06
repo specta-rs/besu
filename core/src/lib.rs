@@ -17,3 +17,6 @@ pub use dialect::Dialect;
 pub use driver::Driver;
 pub use encode::Encode;
 pub use sql::Sql;
+
+// Temp
+pub use sql::Chunk;

@@ -6,8 +6,8 @@ use crate::{Dialect, Encode};
 pub trait Driver: Sized {
     // /// Represents the error type the driver can return.
     // type Error: error::Error + Send + Sync + 'static;
-    // /// The dialect of the database.
-    // type Dialect: Dialect;
+    /// The dialect of the database.
+    type Dialect: Dialect;
 
     type Value; // Encode<Self>
 
