@@ -6,7 +6,7 @@
 //!
 //! </section>
 //!
-//! ## Drivers/Dialects
+//! ## Drivers
 //!
 //! - [besu-mysql](https://docs.rs/besu-mysql) for [MySQL](https://www.mysql.com) support.
 //! - [besu-sqlite](https://docs.rs/besu-sqlite) for [SQLite](https://www.sqlite.org) support.
@@ -14,25 +14,16 @@
 //!
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod arguments;
-mod column;
-mod database;
-mod decode;
-mod dialect;
+mod db;
 mod driver;
-mod macros;
-mod operations;
-mod operator;
-mod table;
+mod into_sql;
+mod join;
+mod mysql;
+mod sql;
 
-pub use arguments::{Arguments, EncodeArgument};
-#[cfg(feature = "derive")]
-#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use besu_macros::Table;
-pub use column::Column;
-pub use database::Database;
-pub use decode::{DecodeRow, DecodeValue};
-pub use dialect::{Dialect, InsertArgumentRef};
-pub use driver::Driver;
-pub use operations::*;
-pub use table::{Insertable, ModelNotSuitableForSelection, Table};
+pub use db::Db;
+pub use driver::{Argument, Driver};
+pub use into_sql::IntoSql;
+pub use join::Join;
+pub use mysql::MySql;
+pub use sql::{identifier, null, sql, unsafe_sql, value, Arguments, Never, Sql};

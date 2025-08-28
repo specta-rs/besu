@@ -17,11 +17,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-
-derive = ["dep:besu-macros"]
+derive = [] # TODO: "dep:besu-macros"]
 
 [lints]
 workspace = true
 
 [dependencies]
-besu-macros = { workspace = true, optional = true }
+# besu-macros = { workspace = true, optional = true }
+
+# TODO: Remove this
+sqlx = { version = "0.8.6", features = ["mysql", "runtime-tokio"] }
+tokio = { version = "1", features = ["full"] }
