@@ -66,20 +66,21 @@ impl Group {
         }
     }
 
+    // TODO: Fix return type. Can it be `Sql<Group>`
     pub fn into_sql(
         self,
     ) -> Sql<(
-        Never,
-        Never,
-        Never,
-        String,
-        Never,
-        String,
-        Never,
-        Never,
-        Never,
-        String,
-        Never,
+        Option<Never>,
+        Option<Never>,
+        Option<Never>,
+        Option<String>,
+        Option<Never>,
+        Option<String>,
+        Option<Never>,
+        Option<String>,
+        Option<Never>,
+        Option<String>,
+        Option<Never>,
     )> {
         (
             sql("INSERT INTO "),
@@ -89,7 +90,7 @@ impl Group {
             sql(", "),
             self.name,
             sql(", "),
-            null(),
+            value("Group::create".into()),
             sql(", "),
             self.tenant,
             sql(");"),

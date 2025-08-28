@@ -5,10 +5,10 @@ use crate::{into_sql, Argument, Driver, IntoSql, Join};
 /// a placeholder for when an sql value is not possible.
 ///
 /// TODO: Explain more
-pub struct Never(());
+pub enum Never {}
 
 pub struct Sql<T = Never> {
-    arguments: T,
+    arguments: Option<T>,
     parts: Parts,
 }
 
@@ -23,7 +23,7 @@ enum Part {
     Query(Cow<'static, str>),
 }
 
-pub struct Arguments<'a, D: Driver>(Option<D::Arguments<'a>>);
+pub struct Arguments<'a, D: Driver>(D::Arguments<'a>);
 
 impl<T> Sql<T> {
     // pub fn map<F, U>(self, f: F) -> Sql<U>
@@ -41,7 +41,7 @@ impl<T> Sql<T> {
     //     &self.arguments
     // }
 
-    pub fn into_value(self) -> T {
+    pub fn into_value(self) -> Option<T> {
         self.arguments
     }
 
@@ -50,11 +50,12 @@ impl<T> Sql<T> {
     where
         T: Argument<D>,
     {
-        let mut args: Option<<D as Driver>::Arguments<'_>> = None;
-        self.arguments.insert(&mut args);
-
         Sql {
-            arguments: Arguments(args),
+            arguments: self.arguments.and_then(|arg| {
+                let mut args: Option<<D as Driver>::Arguments<'_>> = None;
+                arg.insert(&mut args);
+                Some(Arguments(args?))
+            }),
             parts: self.parts,
         }
     }
@@ -78,11 +79,11 @@ impl<'a, D: Driver> Sql<Arguments<'a, D>> {
     }
 
     pub fn arguments(&self) -> Option<&D::Arguments<'a>> {
-        self.arguments.0.as_ref()
+        self.arguments.as_ref().map(|v| &v.0)
     }
 
     pub fn into_arguments(self) -> Option<D::Arguments<'a>> {
-        self.arguments.0
+        self.arguments.map(|v| v.0)
     }
 
     // pub fn to_owned(&self) -> Sql<'static, D, T> {
@@ -102,7 +103,7 @@ impl<D: Driver> Sql<Arguments<'static, D>> {
 
 pub fn value<T>(value: T) -> Sql<T> {
     Sql {
-        arguments: value,
+        arguments: Some(value),
         parts: Parts::Many(vec![Part::Param]),
         // parts: Parts::Few([Some(Part::Param(value)), None, None])
     }
@@ -114,7 +115,7 @@ pub fn sql(sql: &'static str) -> Sql<Never> {
 
 pub fn unsafe_sql(sql: impl Into<Cow<'static, str>>) -> Sql<Never> {
     Sql {
-        arguments: Never(()),
+        arguments: None,
         parts: Parts::Many(vec![Part::Query(sql.into())]),
         // parts: Parts::Few([Some(Part::Query(sql.into())), None, None]),
     }
@@ -122,7 +123,7 @@ pub fn unsafe_sql(sql: impl Into<Cow<'static, str>>) -> Sql<Never> {
 
 pub fn identifier(identifier: impl Into<Cow<'static, str>>) -> Sql<Never> {
     Sql {
-        arguments: Never(()),
+        arguments: None,
         parts: Parts::Many(vec![Part::Identifier(identifier.into())]),
         // parts: Parts::Few([Some(Part::Identifier(identifier.into())), None, None]),
     }
@@ -149,7 +150,20 @@ impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> Join
         Sql<T11>,
     )
 {
-    type Output = (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+    // TODO: Wrapping these in `Option` is cringe
+    type Output = (
+        Option<T1>,
+        Option<T2>,
+        Option<T3>,
+        Option<T4>,
+        Option<T5>,
+        Option<T6>,
+        Option<T7>,
+        Option<T8>,
+        Option<T9>,
+        Option<T10>,
+        Option<T11>,
+    );
 
     fn join(mut self) -> Sql<Self::Output> {
         let mut parts = Vec::default();
@@ -187,8 +201,29 @@ impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> Join
             Parts::Many(parts) => parts,
         });
 
+        // // TODO: The existence of a single never breaks this.
+        // fn map<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+        //     t: (
+        //         Option<T1>,
+        //         Option<T2>,
+        //         Option<T3>,
+        //         Option<T4>,
+        //         Option<T5>,
+        //         Option<T6>,
+        //         Option<T7>,
+        //         Option<T8>,
+        //         Option<T9>,
+        //         Option<T10>,
+        //         Option<T11>,
+        //     ),
+        // ) -> Option<(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11)> {
+        //     Some((
+        //         t.0?, t.1?, t.2?, t.3?, t.4?, t.5?, t.6?, t.7?, t.8?, t.9?, t.10?,
+        //     ))
+        // }
+
         Sql {
-            arguments: (
+            arguments: Some((
                 self.0.arguments,
                 self.1.arguments,
                 self.2.arguments,
@@ -200,7 +235,7 @@ impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> Join
                 self.8.arguments,
                 self.9.arguments,
                 self.10.arguments,
-            ),
+            )),
             parts: Parts::Many(parts),
         }
     }
@@ -209,7 +244,7 @@ impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> Join
 impl<T, U: From<T>> IntoSql<U, into_sql::FromSqlTToU> for Sql<T> {
     fn into_sql(self) -> Sql<U> {
         Sql {
-            arguments: self.arguments.into(),
+            arguments: self.arguments.map(|v| v.into()),
             parts: self.parts,
         }
     }
@@ -218,7 +253,8 @@ impl<T, U: From<T>> IntoSql<U, into_sql::FromSqlTToU> for Sql<T> {
 impl<T> IntoSql<T, into_sql::NeverIntoT> for Sql<Never> {
     fn into_sql(self) -> Sql<T> {
         Sql {
-            arguments: todo!(),
+            // We can't construct `T` so we need `Option<T>`
+            arguments: None,
             parts: self.parts,
         }
     }

@@ -32,7 +32,9 @@ pub trait Argument<D: Driver> {
 impl<D: Driver, T: Argument<D>> Argument<D> for Sql<T> {
     fn insert<'q>(self, args: &mut Option<<D as Driver>::Arguments<'q>>) {
         // TODO: Is this sane?
-        self.into_value().insert(args);
+        if let Some(value) = self.into_value() {
+            value.insert(args);
+        }
     }
 }
 
@@ -54,19 +56,55 @@ impl<
         T9: Argument<D>,
         T10: Argument<D>,
         T11: Argument<D>,
-    > Argument<D> for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11)
+    > Argument<D>
+    for (
+        // TODO: Wrapping in option probs breaks composability cause what if arg is option???
+        Option<T1>,
+        Option<T2>,
+        Option<T3>,
+        Option<T4>,
+        Option<T5>,
+        Option<T6>,
+        Option<T7>,
+        Option<T8>,
+        Option<T9>,
+        Option<T10>,
+        Option<T11>,
+    )
 {
     fn insert<'q>(self, args: &mut Option<<D as Driver>::Arguments<'q>>) {
-        self.0.insert(args);
-        self.1.insert(args);
-        self.2.insert(args);
-        self.3.insert(args);
-        self.4.insert(args);
-        self.5.insert(args);
-        self.6.insert(args);
-        self.7.insert(args);
-        self.8.insert(args);
-        self.9.insert(args);
-        self.10.insert(args);
+        if let Some(value) = self.0 {
+            value.insert(args);
+        }
+        if let Some(value) = self.1 {
+            value.insert(args);
+        }
+        if let Some(value) = self.2 {
+            value.insert(args);
+        }
+        if let Some(value) = self.3 {
+            value.insert(args);
+        }
+        if let Some(value) = self.4 {
+            value.insert(args);
+        }
+        if let Some(value) = self.5 {
+            value.insert(args);
+        }
+        if let Some(value) = self.6 {
+            value.insert(args);
+        }
+        if let Some(value) = self.7 {
+            value.insert(args);
+        }
+        if let Some(value) = self.8 {
+            value.insert(args);
+        }
+        if let Some(value) = self.9 {
+            value.insert(args);
+        }
+        if let Some(value) = self.10 {
+            value.insert(args);
+        }
     }
 }
