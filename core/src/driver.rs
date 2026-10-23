@@ -13,4 +13,6 @@ pub trait Driver: Sized {
 
     // TODO: Should this take in `Sql<D, ()>` instead or not???
     fn execute(&self, sql: String, arguments: Vec<Self::Value>);
+
+    // TODO: Getting values back from the DB and either returning the raw result for non-queries or mapping the values for queries.
 }

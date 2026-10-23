@@ -1,0 +1,22 @@
+`Select`, etc operations should have a lifetime to the DB instead of cloning + have `to_owned` function.
+
+
+
+
+
+
+Schema CLI
+ - Replace old schema system
+
+
+
+
+DecodeRow -> Selection
+Decode -> FromSql (or whatever it ends up as)
+
+
+`sql` macro with escape arguments
+
+
+Delay SQLX intialisation (like I do for Mattrax).
+Bring back `mysql` and `postrges` + examples

@@ -15,6 +15,24 @@ fn main() {
     let q = p1.append(p2).append(p3);
     db.exec(q);
 
+    let name = "Monty".to_string();
+    let p1 = Sql::raw("SELECT * FROM users WHERE name = ");
+    let p2 = Sql::param(name);
+    let p3 = Sql::raw(" ORDER BY id");
+    let q = p1.append(p2).append(p3);
+    db.exec(q);
+
+    // let name = "Monty".to_string();
+    // let q = Sql::join(
+    //     (
+    //         Sql::raw("SELECT * FROM users WHERE name = "),
+    //         Sql::param(name),
+    //         Sql::raw(" ORDER BY id"),
+    //     ),
+    //     Sql::default(),
+    // );
+    // db.exec(q);
+
     // TODO: Can we make this work???
     // let p2 = Sql::<Sqlx, _>::param(name);
     // let sql: Sql<Sqlx, _> = sql!("INSERT INTO {} {} {}", <Sql<Sqlx>>::raw(""), 42, ""); // TODO: What is SQL string vs literal string???

@@ -8,11 +8,13 @@
 //!
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod decode;
 mod dialect;
 mod driver;
 mod encode;
 mod sql;
 
+pub use decode::Decode;
 pub use dialect::Dialect;
 pub use driver::Driver;
 pub use encode::Encode;

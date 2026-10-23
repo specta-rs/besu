@@ -1,0 +1,117 @@
+Account for inserting with optional fields in dialect
+
+Allow cloning operations and make `to_sql` take owned so it doesn't need to `Clone` arguments
+
+Neater string joining -> Joining comma's should be able to be done non-alloc???
+
+Maybe make it `operations/{type}/query|types`??
+
+
+
+Lifetimes and the encode buffer?
+Clenaup traits
+Cleanup Multiunzip in Macros
+Error handling + CClippy run
+
+
+
+Where equals
+
+Where operations - eq, ne, gt, lt, gte, lte, is_null, etc
+Count - `count(t)` in select
+Dedicated count query -> Like new Drizzle
+
+
+
+User provided defaults - Using macro attribute
+
+Operations working (Eg. Where clauses)
+
+Update
+Delete
+
+Joins
+Filtering + pagination
+
+Make select work with joins and error if table appears in select but was not joined into the query.
+Selections should include table + field name.
+Update dialects to use selection
+
+Streaming (impl Stream for *Builder)
+Logging driver wrapper
+Consistent and correct usage of `SQLite`/`MySQL` for naming. Where do caps go???
+Fix table naming - use `heck` to normalise them
+Move to lowercase SQL
+Expose connection/pool parameters to user
+
+CLI:
+ - `db pull`
+ - `db push`
+ - `db migrate`
+ - `db gen`
+ - Version management sorted!!!
+
+Allow `sql!("SELECT {User.id}, {User.name} FROM {User})` and fill in the schema stuff correctly
+
+Basic database migrations (just generate them for now, then we can ship Refinery like thing, and then finally full db-push)
+    - https://www.sqlite.org/stricttables.html
+
+
+Bring back unit tests!!!
+    - Invalid SQL syntax error handling???
+    - Trybuild
+    - Multi-database testing in CI
+    -  Cargo semver check in CI
+
+Future:
+ - `Any` database adapter
+ - Can we be compatible with the `sqlx` macros for compile-time query validation?
+ - Make a pretty README like Specta/rspc
+ - Subqueries
+ - DB push/pull using CLI
+
+
+
+// TODO: Allow providing multiple models.
+pub async fn migrate<T: Table>(&self, _: fn() -> T) -> Result<(), Error> {
+    let table = T::def();
+    let mut sql = "CREATE TABLE IF NOT EXISTS ".to_string();
+    sql.push_str(table.name);
+    sql.push_str(" (");
+    for (i, col_name) in table.columns.iter().enumerate() {
+        let ty = table
+            .column_types
+            .get(i)
+            .expect("Column and column types length mismatch.");
+        if i != 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(col_name);
+        sql.push_str(" ");
+        // TODO: Do this via a trait cause this is bad.
+        sql.push_str(match ty.replace(" ", "").as_str() {
+            "u8" | "i32" | "u64" => match i {
+                0 => "INTEGER PRIMARY KEY AUTOINCREMENT", // TODO: Auto incrementing ID should be configured by the user not implied.
+                _ => "INTEGER NOT NULL",
+            },
+            "bool" => "BOOLEAN NOT NULL",
+            "String" => "TEXT NOT NULL",
+            "Option<String>" => "TEXT",
+            "Vec<u8>" => "BLOB NOT NULL",
+            "Option<Vec<u8>>" => "BLOB",
+            "uuid::Uuid" | "Uuid" => "BLOB",
+            v => todo!("Missing type: {v}"),
+        });
+
+        // TODO: Setup `SERIAL` incrementing ID
+    }
+    sql.push_str(");");
+
+    self.execute(sql, vec![]).await.map(|_| ())
+}
+
+
+https://laravel.com/docs/10.x/queries
+https://cj.rs/blog/sqlite-pragma-cheatsheet-for-performance-and-consistency/
+
+https://github.com/despawnerer/scooby

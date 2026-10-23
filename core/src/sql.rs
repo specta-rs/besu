@@ -32,14 +32,16 @@ impl<D: Driver, T> Default for Sql<D, T> {
 //     }
 // }
 
-impl<D: Driver, T> Sql<D, T> {
+impl<D: Driver> Sql<D, ()> {
     pub fn raw(sql: impl Into<Cow<'static, str>>) -> Self {
         Self {
             chunks: vec![Chunk::Raw(sql.into())],
             phantom: PhantomData,
         }
     }
+}
 
+impl<D: Driver, T> Sql<D, T> {
     pub fn param(value: T) -> Self
     where
         T: Encode<D>,
