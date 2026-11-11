@@ -87,7 +87,7 @@ fn numeric_statement() -> Sql<Postgres> {
 }
 
 fn encode(c: &mut Criterion) {
-    let mut group = c.benchmark_group("encode");
+    let mut group = c.benchmark_group("postgres_encode");
 
     let statement = representative_statement();
     group.bench_function("mixed", |b| {
@@ -149,7 +149,7 @@ fn query(c: &mut Criterion) {
             .unwrap();
     });
 
-    let mut group = c.benchmark_group("query");
+    let mut group = c.benchmark_group("postgres_query");
 
     group.bench_function("select_1000_rows", |b| {
         b.iter(|| {

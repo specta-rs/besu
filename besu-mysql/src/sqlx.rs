@@ -1,4 +1,5 @@
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
+use core::fmt::Write as _;
 use num_traits::ToPrimitive;
 use sqlx::{
     Arguments, MySql, MySqlPool, Row, Type, ValueRef,
@@ -66,9 +67,9 @@ where
 /// `sqlx` encodes a [`BigDecimal`] by formatting it to a `String` and then writing that as
 /// length-encoded text, so a `BigDecimal` built for one parameter allocates twice: once for
 /// the digit vector inside its `BigInt` and once for the string. Decimal text is what goes
-/// over the wire either way, so formatting straight into the argument buffer produces the
-/// same bytes with no allocation at all. The declared type stays `NEWDECIMAL`, so a cached
-/// prepared statement sees exactly the parameter type it saw before.
+/// over the wire either way, so formatting the value directly produces the same bytes with
+/// no allocation at all. The declared type stays `NEWDECIMAL`, so a cached prepared statement
+/// sees exactly the parameter type it saw before.
 #[derive(Clone, Copy)]
 struct Decimal {
     negative: bool,
@@ -110,27 +111,37 @@ impl sqlx::Encode<'_, MySql> for Decimal {
         // fits in 40 bytes. That is under 251, which means its length always fits in the
         // one-byte form of MySQL's length-encoded integer — the same encoding sqlx uses for
         // a `BigDecimal`.
-        let mut digits = [0u8; 40];
-        let mut start = digits.len();
-        let mut remaining = self.magnitude;
-        loop {
-            start -= 1;
-            digits[start] = b'0' + (remaining % 10) as u8;
-            remaining /= 10;
-            if remaining == 0 {
-                break;
-            }
-        }
+        let mut text = DecimalText {
+            bytes: [0; 40],
+            len: 0,
+        };
         if self.negative {
-            start -= 1;
-            digits[start] = b'-';
+            text.write_str("-")?;
         }
+        // `Display` for `u128` divides by `10^19` and then formats the halves, which is a
+        // good deal cheaper than peeling one digit off at a time.
+        write!(&mut text, "{}", self.magnitude)?;
 
-        let text = &digits[start..];
-        buf.push(text.len() as u8);
-        buf.extend_from_slice(text);
+        buf.push(text.len as u8);
+        buf.extend_from_slice(&text.bytes[..text.len]);
 
         Ok(sqlx::encode::IsNull::No)
+    }
+}
+
+/// A fixed-size buffer that [`write!`] can format into without allocating.
+struct DecimalText {
+    bytes: [u8; 40],
+    len: usize,
+}
+
+impl core::fmt::Write for DecimalText {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self.len + text.len();
+        let destination = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+        destination.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
     }
 }
 
@@ -184,7 +195,7 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
 /// Encode a statement's parameters exactly as the driver would, for the benchmarks.
 ///
 /// This is hidden from the documentation and is not part of the supported API. The `encode`
-/// benchmark has to time `arguments` with no database in the way, and that function is
+/// benchmark has to time [`arguments`] with no database in the way, and that function is
 /// private to this crate, so this is the one seam it gets.
 #[doc(hidden)]
 pub fn arguments_for_bench(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
@@ -492,7 +503,7 @@ fn parse_i128(digits: &str, negative: bool) -> Option<i128> {
     if negative {
         // `i128::MIN`'s magnitude is one past `i128::MAX`, so go through the unsigned
         // two's-complement value rather than negating arithmetically.
-        (magnitude <= i128::MAX as u128 + 1).then_some((magnitude as i128).wrapping_neg())
+        (magnitude <= i128::MAX as u128 + 1).then(|| (magnitude as i128).wrapping_neg())
     } else {
         i128::try_from(magnitude).ok()
     }
