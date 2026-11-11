@@ -1,4 +1,5 @@
 //! The migration runner, end to end against a real database.
+#![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
 use besu::schema::Migrator;

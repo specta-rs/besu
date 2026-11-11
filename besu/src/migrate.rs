@@ -224,7 +224,7 @@ impl<Dr: SchemaDriver> Database<Dr> {
         i64: besu_core::Decode<Dr>,
         String: besu_core::Decode<Dr>,
     {
-        let mut executor = &*self;
+        let mut executor = self;
         migrator
             .run(&mut executor)
             .await

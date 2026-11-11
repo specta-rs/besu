@@ -76,9 +76,9 @@ impl Sqlx {
     }
 }
 
-fn add<'q, T: 'q>(arguments: &mut SqliteArguments<'q>, value: T) -> Result<(), sqlx::Error>
+fn add<'q, T>(arguments: &mut SqliteArguments<'q>, value: T) -> Result<(), sqlx::Error>
 where
-    T: sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite>,
+    T: 'q + sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite>,
 {
     arguments.add(value).map_err(sqlx::Error::Encode)
 }

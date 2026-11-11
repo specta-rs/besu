@@ -1,3 +1,10 @@
+#![allow(
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_arguments
+)]
+
 use besu::prelude::*;
 use besu_sqlite::Sqlx;
 

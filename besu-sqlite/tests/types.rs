@@ -1,4 +1,6 @@
 //! Round-trip every supported column type through SQLite.
+#![allow(missing_docs, clippy::too_many_arguments)]
+#![allow(clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
 use besu_sqlite::Sqlx;
@@ -114,7 +116,6 @@ async fn every_type_round_trips() {
 
 #[tokio::test]
 async fn declared_types_are_reflected_in_the_schema() {
-    let db = besu::Database::new(Sqlx::memory().await.unwrap());
     let schema = besu::Database::<Sqlx>::schema([things.def()]);
     let table = schema.table("things").unwrap();
 

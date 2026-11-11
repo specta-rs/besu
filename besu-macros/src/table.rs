@@ -83,7 +83,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     let mut skipped = Vec::new();
     for field in fields {
         match Column::parse(field, &besu)? {
-            Parsed::Column(column) => columns.push(column),
+            Parsed::Column(column) => columns.push(*column),
             Parsed::Skipped(ident) => skipped.push(ident),
         }
     }
@@ -274,7 +274,7 @@ fn default_literal(expr: &Expr) -> Result<TokenStream> {
 }
 
 enum Parsed {
-    Column(Column),
+    Column(Box<Column>),
     Skipped(Ident),
 }
 
@@ -366,7 +366,7 @@ impl Column {
             None => None,
         };
 
-        Ok(Parsed::Column(Column {
+        Ok(Parsed::Column(Box::new(Column {
             ident,
             sql_name,
             full_ty: field.ty.clone(),
@@ -380,7 +380,7 @@ impl Column {
             index: attrs.index,
             default: attrs.default,
             reference,
-        }))
+        })))
     }
 }
 

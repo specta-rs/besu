@@ -35,12 +35,12 @@ impl<Dr: Driver> Database<Dr> {
 
     /// Start a `SELECT` over `table`.
     pub fn select<T: Table>(&self, _table: T) -> Select<'_, &Self, (T,), T::Model> {
-        Select::new(&*self, T::DEF)
+        Select::new(self, T::DEF)
     }
 
     /// Start an `INSERT` into `table`.
     pub fn insert<T: Table>(&self, _table: T) -> Insert<'_, &Self, (T,), T::Insert> {
-        Insert::new(&*self, T::DEF)
+        Insert::new(self, T::DEF)
     }
 
     /// Start an `UPDATE` on `table`.
@@ -48,7 +48,7 @@ impl<Dr: Driver> Database<Dr> {
     /// The returned builder cannot be awaited until a `WHERE` clause is added, or until you
     /// explicitly call `all_rows`.
     pub fn update<T: Table>(&self, _table: T) -> Update<'_, &Self, T, false> {
-        Update::new(&*self, T::DEF)
+        Update::new(self, T::DEF)
     }
 
     /// Start a `DELETE` on `table`.
@@ -56,7 +56,7 @@ impl<Dr: Driver> Database<Dr> {
     /// The returned builder cannot be awaited until a `WHERE` clause is added, or until you
     /// explicitly call `all_rows`.
     pub fn delete<T: Table>(&self, _table: T) -> Delete<'_, &Self, T, false> {
-        Delete::new(&*self, T::DEF)
+        Delete::new(self, T::DEF)
     }
 
     /// Run a raw, parameterised statement.
@@ -65,7 +65,7 @@ impl<Dr: Driver> Database<Dr> {
     /// same call works against every backend.
     pub fn execute(&self, fragment: Fragment) -> RawQuery<'_, &Self> {
         RawQuery {
-            exec: &*self,
+            exec: self,
             fragment,
             phantom: PhantomData,
         }
