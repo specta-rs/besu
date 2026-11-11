@@ -39,6 +39,13 @@ impl DeleteQuery {
         render_where(&mut out, &self.filter);
 
         if let Some(limit) = self.limit {
+            if !D::SUPPORTS_DELETE_LIMIT {
+                out.set_error(Error::unsupported(alloc::format!(
+                    "`{}` has no `DELETE ... LIMIT`; filter down to the rows instead",
+                    D::NAME
+                )));
+                return out;
+            }
             out.push_raw(" LIMIT ");
             out.bind(limit);
         }

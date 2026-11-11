@@ -72,6 +72,24 @@ pub(crate) struct SelectQuery {
     pub(crate) limit: Option<i64>,
     pub(crate) offset: Option<i64>,
     pub(crate) distinct: bool,
+    pub(crate) lock: Option<Lock>,
+}
+
+/// A `FOR UPDATE` / `FOR SHARE` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lock {
+    pub(crate) strength: LockStrength,
+    pub(crate) skip_locked: bool,
+    pub(crate) no_wait: bool,
+}
+
+/// The strength of a row lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockStrength {
+    /// `FOR UPDATE`: lock the rows for writing.
+    Update,
+    /// `FOR SHARE`: lock the rows against writes by others.
+    Share,
 }
 
 impl SelectQuery {
@@ -87,6 +105,7 @@ impl SelectQuery {
             limit: None,
             offset: None,
             distinct: false,
+            lock: None,
         }
     }
 
@@ -127,6 +146,18 @@ impl SelectQuery {
         push_table(&mut out, self.from);
 
         for join in &self.joins {
+            if join.kind == JoinKind::Full && !D::SUPPORTS_FULL_JOIN {
+                out.set_error(besu_core::Error::unsupported(alloc::format!(
+                    "`{}` has no `FULL OUTER JOIN`",
+                    D::NAME
+                )));
+            }
+            if (join.kind == JoinKind::Right) && !D::SUPPORTS_RIGHT_JOIN {
+                out.set_error(besu_core::Error::unsupported(alloc::format!(
+                    "`{}` has no `RIGHT JOIN`",
+                    D::NAME
+                )));
+            }
             out.push_raw(" ");
             out.push_raw(join.kind.as_sql());
             out.push_raw(" ");
@@ -178,6 +209,26 @@ impl SelectQuery {
         }
 
         self.render_limit(&mut out);
+
+        if let Some(lock) = &self.lock {
+            if !D::SUPPORTS_ROW_LOCKING {
+                out.set_error(besu_core::Error::unsupported(alloc::format!(
+                    "`{}` has no row locking; `FOR UPDATE` is not available",
+                    D::NAME
+                )));
+                return out;
+            }
+            out.push_raw(match lock.strength {
+                LockStrength::Update => " FOR UPDATE",
+                LockStrength::Share => " FOR SHARE",
+            });
+            if lock.skip_locked {
+                out.push_raw(" SKIP LOCKED");
+            }
+            if lock.no_wait {
+                out.push_raw(" NOWAIT");
+            }
+        }
 
         out
     }

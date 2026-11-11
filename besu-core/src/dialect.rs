@@ -81,6 +81,15 @@ pub trait Dialect: 'static + Sized {
     /// How the dialect spells an upsert.
     const UPSERT: UpsertStyle;
 
+    /// Whether `DELETE ... LIMIT n` is available. PostgreSQL has no such statement.
+    const SUPPORTS_DELETE_LIMIT: bool = true;
+
+    /// Whether `RIGHT JOIN` is available. SQLite only gained it in 3.39.
+    const SUPPORTS_RIGHT_JOIN: bool = true;
+
+    /// Whether `SELECT ... FOR UPDATE` is available. SQLite has no row locking.
+    const SUPPORTS_ROW_LOCKING: bool = true;
+
     /// Convert a generic value into the dialect's bound representation.
     fn bind(value: Value) -> Result<Self::Value, Error>;
 
