@@ -1,0 +1,236 @@
+# Architecture
+
+Besu is built as four independent layers rather than one crate with feature flags. The split
+is not decoration: each seam exists because something useful becomes possible when a
+particular dependency is absent.
+
+## The crate graph
+
+```mermaid
+flowchart TD
+    core["besu-core<br/>Dialect · Driver · Sql · Value · Decode"]
+    schema["besu-schema<br/>Schema IR · diff · DDL · Migrator"]
+    macros["besu-macros<br/>#[derive(Table)]"]
+    besu["besu<br/>builders · expression DSL · Database"]
+    sqlite["besu-sqlite<br/>SQLite dialect · driver · DDL"]
+    postgres["besu-postgres<br/>PostgreSQL dialect · driver · DDL"]
+    mysql["besu-mysql<br/>MySQL dialect · driver · DDL"]
+    cli["besu-cli<br/>pull · push · generate · migrate"]
+
+    schema --> core
+    besu --> core
+    besu --> schema
+    besu --> macros
+
+    sqlite --> core
+    sqlite --> schema
+    sqlite --> besu
+
+    postgres --> core
+    postgres --> schema
+    postgres --> besu
+
+    mysql --> core
+    mysql --> schema
+    mysql --> besu
+
+    cli --> besu
+    cli --> sqlite
+    cli --> postgres
+    cli --> mysql
+```
+
+Every arrow points from a crate to something it depends on. There are no cycles.
+
+- `besu-core` depends on nothing in the workspace. It has no query API, no database driver
+  and no proc macro. It can build and render SQL on its own.
+- `besu` depends on `besu-core` for the vocabulary, on `besu-schema` for migrations, and on
+  `besu-macros` for the derive. It does not depend on any database.
+- Each driver depends on `besu-core`, `besu-schema` and `besu`. The dependency on `besu` is
+  only for `SchemaDriver`; the execution path goes straight to `besu-core`.
+- `besu-cli` is the only place that knows about all three backends at once, because a CLI has
+  to dispatch on a URL at runtime.
+
+If you want to add a dependency from `besu-core` to anything else in the workspace, the
+abstraction is wrong. Say so in an issue rather than adding the edge.
+
+## Why the seams are where they are
+
+### Dialect versus driver
+
+A `Dialect` is a compile-time tag that knows how to spell SQL: placeholders, quoting, type
+names, capability flags. It can render a complete statement with no connection. A `Driver`
+only moves bytes to a server and rows back. Everything about *what* SQL to run lives in the
+dialect; everything about *how to reach the database* lives in the driver.
+
+That split is what makes the following possible:
+
+```rust
+let db = besu::dry::<besu_sqlite::SQLite>();
+let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
+```
+
+No pool, no connection string, no server — and the SQL is the real SQL, not an approximation
+produced by a second implementation.
+
+### `Executor` versus `Driver`
+
+A builder is generic over an `Executor`, not over a driver. `&Database<Dr>` and
+`&mut Transaction<'_, Dr>` both implement `Executor`. That is why the same `Select` value can
+run on a pool, inside a transaction, or against `DryDriver` without a second query API:
+
+```rust
+impl<Dr: Driver> Executor for &Database<Dr> { /* ... */ }
+impl<'a, Dr: TransactionDriver> Executor for &mut Transaction<'a, Dr> { /* ... */ }
+```
+
+The dialect is not a separate type parameter on `Executor`; it is a projection of the
+driver (`DialectOf<E>`), so an executor's dialect and driver can never disagree.
+
+### Schema as a separate crate
+
+The schema IR is shared by three producers (the derive, introspection, a JSON snapshot) and
+two consumers (`diff`, `Ddl`). Keeping it out of `besu` means the CLI can diff a snapshot
+against a live database without linking the query builders, and `besu` can expose `push`
+without depending on the CLI.
+
+### Macros generate metadata, not queries
+
+`#[derive(Table)]` emits a plain struct, a `const` handle, an insert struct and a
+`&'static TableDef`. It does not generate per-query code and it does not run at query time.
+The hot path contains no proc-macro output beyond ordinary structs and impls.
+
+## How a query becomes SQL
+
+Every builder is a plain data structure with a type parameter or two for checking. `Select`,
+for example, holds a `SelectQuery`:
+
+```rust
+pub(crate) struct SelectQuery {
+    pub(crate) from: &'static TableDef,
+    pub(crate) projection: Option<Vec<ExprKind>>,
+    pub(crate) joins: Vec<JoinClause>,
+    pub(crate) filter: Vec<ExprKind>,
+    pub(crate) group_by: Vec<ExprKind>,
+    pub(crate) having: Vec<ExprKind>,
+    pub(crate) order_by: Vec<OrderClause>,
+    pub(crate) limit: Option<i64>,
+    pub(crate) offset: Option<i64>,
+    pub(crate) distinct: bool,
+    pub(crate) lock: Option<Lock>,
+}
+```
+
+Each builder method pushes into one of those vectors and returns `Self`. Nothing is rendered
+until the end.
+
+```mermaid
+flowchart LR
+    A["builder<br/>Select / Insert / Update / Delete"] -->|"filter · pick · join · order_by"| A
+    A -->|"build::&lt;D&gt;()"| B["query data<br/>Vec&lt;ExprKind&gt; · OrderClause · joins"]
+    B -->|"ExprKind::render + Dialect"| C["Sql&lt;D&gt;<br/>text · bound args · first error"]
+    C -->|"finish()"| D["Executor<br/>&amp;Database or &amp;mut Transaction"]
+    D -->|"Driver::query / execute"| E["Vec&lt;Row&gt; or Output"]
+    E -->|"Decode::decode(row, &amp;mut offset)"| F["Vec&lt;R&gt;"]
+```
+
+Step by step, for a select:
+
+1. **Builder.** `db.select(users)` creates `Select` with `from = User::DEF` and an empty
+   `SelectQuery`. `.filter(users.age.gt(18))` converts the condition to an `ExprKind` and
+   pushes it. The type parameters `M` and `R` track the row set and the result type; they are
+   erased at runtime.
+2. **AST.** The filter is an `ExprKind::Binary { op: ">", left: Column { table: "users",
+   column: "age" }, right: Value(Int(18)) }`. `ExprKind` is a closed, dialect-independent
+   tree. There is no typed `Expr` left at this point: the types did their job at the call
+   site and are gone.
+3. **Render.** `SelectQuery::build::<D>()` walks the fields in SQL order and writes into a
+   `Sql<D>`. `push_raw` appends text, `push_ident` quotes an identifier through the dialect,
+   `bind` writes a placeholder and appends the value. `ExprKind::render` parenthesises every
+   binary node, which is why the output is `("users"."age" > $1)` rather than relying on
+   precedence.
+4. **Finish.** `Sql::finish()` returns the statement if no error was recorded, or the first
+   error if one was. Capability failures — `RETURNING` on MySQL, `FULL OUTER JOIN` on MySQL,
+   `FOR UPDATE` on SQLite — are recorded here, before the driver sees anything.
+5. **Execute.** `Executor::query` hands the rendered `Sql` to `Driver::query`, which binds
+   each `Value` with the driver's own argument type and runs it. `execute` is the same path
+   for statements that return no rows.
+6. **Decode.** For a query, `Decode::decode` walks the row with a `usize` offset. A model
+   consumes one column per field in declaration order; a tuple consumes one per element;
+   `Option<T>` peeks for `NULL` before deciding.
+
+The same pipeline serves a `RawQuery`: `sql!` produces a `Fragment`, `Fragment::render`
+rewrites `?` placeholders and produces the same `Sql<D>`, and the same executor runs it.
+
+## The error model
+
+`Sql<D>` carries `Option<Error>` and keeps only the **first** error recorded. Later failures
+are almost always a consequence of the first, and a single clear message beats a cascade. A
+builder therefore does not return `Result` from every method; it records and keeps going, and
+`finish()` is the single place that decides whether the statement is usable.
+
+This is why `to_sql()` returns a `Sql` whose `.error()` may be set even though the call itself
+returned `Ok`: inspection wants the partial text, execution wants the error. `Database`
+execution always calls `finish()`.
+
+## The allocation story
+
+The design goal is: one SQL string per query, one encode per parameter, no per-row maps.
+
+| Stage | Allocation |
+| --- | --- |
+| Table handle | None. A `const` struct of `Column`s, each a `&'static str`; `Copy` |
+| Column reference | None. Copying a `Column` copies a pointer and a length |
+| Expression node | One `Box` per binary/prefix/postfix node, one `Vec` per function/in-list |
+| Building | None per builder step; vectors grow as clauses are added |
+| Rendering | One `Sql`, whose text starts as a borrowed `&'static str` and becomes an owned `String` on the first append |
+| Identifier quoting | `Dialect::quote` returns a `String`; `push_table` currently allocates one per table name. `write_ident` is the allocation-free path |
+| Parameter binding | One `Value` clone per parameter (an owned `String` for text), stored once in `Sql::args` |
+| `sql!` | One `String` for the rendered text, one `Vec<Value>` for the arguments |
+| Execution | `Driver::query` collects `Vec<Row>`; results are buffered, not streamed |
+| Decoding | One `Vec<R>::with_capacity(rows.len())`; no lookup table, no per-column map |
+| Awaiting | One `Box<dyn Future + Send>` per `IntoFuture` call |
+| Driverless build | No database, no connection, no I/O |
+
+Two honest caveats:
+
+- The table handle is not literally zero-sized: each `Column` stores its name as a
+  `&'static str`, which is 16 bytes on a 64-bit target. A five-column handle is 80 bytes,
+  all `Copy`. It is small and free to pass around, not a ZST.
+- `push_table` uses `Dialect::quote`, which allocates. It is two short allocations per table
+  reference, and it is the obvious next thing to remove by writing through `write_ident`
+  directly into the `Sql` buffer.
+
+What is deliberately absent is just as important: there is no query cache, no lazy loading, no
+identity map, no N+1 machinery and no hidden second statement. A query is a value, and running
+it does exactly what its SQL says.
+
+## Threading and lifetimes
+
+Builders borrow the executor for `'a`: `Select<'a, &Database<Dr>, M, R>`. A query cannot
+outlive the database it will run on, and a transaction cannot outlive the borrow of the
+database. `IntoFuture` boxes a future with a `Send` bound when the executor is `Send`, which
+is what lets queries run on a multi-threaded runtime. `Driver` is `Send + Sync + 'static`, so
+a pool can be cloned into as many tasks as you like.
+
+## What each layer is allowed to know
+
+| Layer | Knows about | Must not know about |
+| --- | --- | --- |
+| `besu-core` | SQL text, values, dialects, drivers, decoding | Query builders, schema diffing, any database crate |
+| `besu` | Builders, expressions, `Database`, transactions | sqlx, a specific database, DDL |
+| `besu-schema` | The IR, diffing, DDL, migrations | Query builders, drivers |
+| `besu-sqlite` / `-postgres` / `-mysql` | One database's SQL and wire protocol | The other databases |
+| `besu-cli` | URL schemes, snapshots, files | Application query code |
+
+## Gotchas
+
+- **A dialect can be total and still be wrong.** `SUPPORTS_*` is a promise the dialect makes;
+  if it claims `RETURNING` on a database that lacks it, the failure moves to the server.
+- **`to_sql()` is not a dry run of execution.** It renders; it does not check the connection,
+  the schema or the parameter count against a server.
+- **The type parameters on a builder are not erased for the compiler.** `M` and `R` are
+  phantom, but they still participate in inference; a long join chain produces deeply nested
+  tuple types, and very long chains can hit trait-resolution limits.
+- **`Sql` is generic over the dialect, never the driver.** That is deliberate: it is the type
+  that lets a test suite assert on SQL with no database present.

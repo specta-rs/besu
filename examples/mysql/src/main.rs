@@ -35,32 +35,42 @@ pub struct Post {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = besu::Database::new(Sqlx::connect(
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "mysql://root:besu@localhost:53306/besu"),
-    )
-    .await?);
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "mysql://root:besu@localhost:53306/besu".to_string());
+    let db = besu::Database::new(Sqlx::connect(&url).await?);
 
-    // Create both tables. Running this again is a no-op, so it is safe to keep in `main`.
-    db.push([users.def(), posts.def()]).await?;
+    // Create both tables, or apply whatever has changed since the last run.
+    //
+    // This example owns its database, so it allows the destructive changes that happen when
+    // a column or table is removed. A real application should use `push`, which refuses
+    // those unless you call `push_destructive` explicitly.
+    db.push_destructive([users.def(), posts.def()]).await?;
 
-    // Inserts return the rows the database actually wrote, including generated columns.
-    let oscar = db
-        .insert(users)
+    // MySQL has no `RETURNING`, so read the row back by its unique column. Besu rejects a
+    // `returning` clause on MySQL with a clear error rather than silently ignoring it.
+    db.insert(users)
         .value(users.insert("oscar@example.com", "Oscar", 21))
-        .returning(users)
-        .await?
-        .remove(0);
-
-    let monty = db
-        .insert(users)
+        .await?;
+    db.insert(users)
         .value(
             users
                 .insert("monty@example.com", "Monty", 7)
                 .bio("Woof woof"),
         )
-        .returning(users)
+        .await?;
+
+    let oscar = db
+        .select(users)
+        .filter(users.email.eq("oscar@example.com"))
+        .first()
         .await?
-        .remove(0);
+        .expect("just inserted");
+    let monty = db
+        .select(users)
+        .filter(users.email.eq("monty@example.com"))
+        .first()
+        .await?
+        .expect("just inserted");
 
     db.insert(posts)
         .values([
@@ -90,8 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .group_by(users.name)
         .order_by(users.name.asc())
         .await?;
-    for (name, posts) in &rows {
-        println!("  {name}: {posts}");
+    for (name, count) in &rows {
+        println!("  {name}: {count}");
     }
 
     // A left join hands back an `Option` for the joined side, because a row may not exist.
@@ -130,11 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     tx.rollback().await?;
 
-    let posts_after_rollback: i64 = db
-        .select(posts)
-        .pick(count_all())
-        .await?
-        .remove(0);
+    let posts_after_rollback: i64 = db.select(posts).pick(count_all()).await?.remove(0);
     println!("-- {posts_after_rollback} post(s) after the rollback --");
 
     // Raw SQL still binds its parameters, and `?` is rewritten for the target dialect.
@@ -145,9 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("-- {} user(s) older than 10 --", filtered.len());
 
     // Deleting without a filter does not compile; this is the explicit opt-in.
-    db.delete(posts)
-        .filter(posts.published.eq(false))
-        .await?;
+    db.delete(posts).filter(posts.published.eq(false)).await?;
 
     Ok(())
 }

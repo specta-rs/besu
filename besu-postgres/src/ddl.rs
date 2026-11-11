@@ -30,7 +30,11 @@ impl Ddl for PostgresDdl {
     }
 
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
-        let mut sql = format!("{} {}", self.quote(&column.name), self.type_name(&column.ty));
+        let mut sql = format!(
+            "{} {}",
+            self.quote(&column.name),
+            self.type_name(&column.ty)
+        );
 
         // PostgreSQL's identity columns are the closest thing to a portable `AUTO_INCREMENT`
         // and, unlike `SERIAL`, do not add a hidden default.

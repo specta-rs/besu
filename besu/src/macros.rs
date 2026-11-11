@@ -167,7 +167,9 @@ macro_rules! sql {
     ($sql:literal $(, $arg:expr )* $(,)?) => {{
         const _: () = {
             let placeholders = $crate::__private::count_placeholders($sql);
-            let provided = 0usize $(+ { let _ = &$arg; 1usize })*;
+            // `stringify!` counts the arguments without evaluating them, so `sql!` works
+            // with runtime values, not just constants.
+            let provided = 0usize $(+ { let _ = stringify!($arg); 1usize })*;
             ::core::assert!(
                 placeholders == provided,
                 "besu::sql!: the SQL has a different number of `?` placeholders than arguments"

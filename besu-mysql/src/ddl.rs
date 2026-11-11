@@ -20,7 +20,9 @@ enum Uniqueness {
     Inline,
     /// The type needs an index prefix, so uniqueness becomes a separate key.
     Prefix(u32),
-    /// The type cannot be indexed at all (`JSON`), so uniqueness cannot be enforced here.
+    /// The type cannot be indexed at all (`JSON`), so a `UNIQUE` on it is written as
+    /// nothing. MySQL offers no way to enforce it and `Ddl` has no error channel, so such a
+    /// schema will keep reporting drift on every push.
     Unsupported,
 }
 
@@ -50,6 +52,10 @@ impl Ddl for MySqlDdl {
     fn name(&self) -> &'static str {
         "mysql"
     }
+
+    // MySQL needs a prefix length to index a `TEXT` or `BLOB` column, which `create_index`
+    // cannot know without the table, so the indexes are rendered inside `CREATE TABLE`.
+    const INLINE_INDEXES: bool = true;
 
     fn quote(&self, ident: &str) -> String {
         MySql::quote(ident)
@@ -129,6 +135,13 @@ impl Ddl for MySqlDdl {
         )
     }
 
+    /// `CREATE TABLE`.
+    ///
+    /// Secondary indexes are inlined as `KEY` clauses because `create_schema` only runs
+    /// `CREATE TABLE`, and only the table knows its column types — MySQL needs an explicit
+    /// key length to index a `TEXT` or `BLOB` column. The consequence is that an
+    /// `AddIndex` change on such a column (`CREATE INDEX`, which never sees the types) has
+    /// to be written by hand.
     fn create_table(&self, table: &Table) -> String {
         let mut sql = String::from("CREATE TABLE ");
         sql.push_str(&self.quote_table(&table.name));
@@ -167,6 +180,31 @@ impl Ddl for MySqlDdl {
                     sql.push_str(&format!("({prefix}))"));
                 }
             }
+        }
+
+        // Secondary indexes are inlined here because `create_schema` only runs
+        // `CREATE TABLE`, and MySQL has no `CREATE INDEX` clause inside `ALTER TABLE`.
+        for index in &table.indexes {
+            sql.push_str(", ");
+            if index.unique {
+                sql.push_str("UNIQUE ");
+            }
+            sql.push_str("KEY ");
+            sql.push_str(&self.quote(&index.name));
+            sql.push_str(" (");
+            for (i, name) in index.columns.iter().enumerate() {
+                if i != 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&self.quote(name));
+                // The key length of a `TEXT`/`BLOB` column is not known until its type is.
+                if let Some(column) = table.column(name) {
+                    if let Uniqueness::Prefix(prefix) = uniqueness(&column.ty) {
+                        sql.push_str(&format!("({prefix})"));
+                    }
+                }
+            }
+            sql.push(')');
         }
 
         for fk in &table.foreign_keys {

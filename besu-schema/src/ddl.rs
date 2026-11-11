@@ -114,6 +114,20 @@ pub trait Ddl {
         )
     }
 
+    /// Whether [`Ddl::create_table`] already includes the table's secondary indexes.
+    ///
+    /// MySQL needs this because its index syntax differs per column type (a `TEXT` index
+    /// needs a prefix length), so it renders them inside `CREATE TABLE`. Everything else
+    /// creates them afterwards.
+    const INLINE_INDEXES: bool = false;
+
+    /// Whether `CREATE INDEX` needs the table's column types.
+    ///
+    /// MySQL does, because it may need a prefix length. Dialects that override
+    /// [`Ddl::create_index`] and need the types can read them from there; this flag exists
+    /// so [`Ddl::create_schema`] does not have to know.
+    const CREATE_INDEX_NEEDS_TYPES: bool = false;
+
     /// Whether `ALTER TABLE ... ALTER COLUMN` is available at all.
     ///
     /// SQLite has no such statement: changing a column means rebuilding the table. When
@@ -201,9 +215,26 @@ pub trait Ddl {
     }
 
     /// Render one change as one or more statements.
+    ///
+    /// Override this only when a dialect needs different statements for a *subset* of
+    /// changes; call [`Ddl::default_change`] for everything else. Overriding it and calling
+    /// `self.change(..)` from inside recurses forever.
     fn change(&self, change: &Change) -> Vec<String> {
+        self.default_change(change)
+    }
+
+    /// The portable implementation of [`Ddl::change`].
+    fn default_change(&self, change: &Change) -> Vec<String> {
         match change {
-            Change::CreateTable(table) => vec![self.create_table(table)],
+            Change::CreateTable(table) => {
+                let mut statements = vec![self.create_table(table)];
+                if !Self::INLINE_INDEXES {
+                    for index in &table.indexes {
+                        statements.push(self.create_index(&table.name, index));
+                    }
+                }
+                statements
+            }
             Change::DropTable { name } => vec![self.drop_table(name)],
             Change::AddColumn { table, column } => vec![self.add_column(table, column)],
             Change::DropColumn { table, column } => vec![self.drop_column(table, column)],
@@ -220,11 +251,14 @@ pub trait Ddl {
     }
 
     /// Render a whole schema from scratch.
+    ///
+    /// Tables come first, in dependency order, and then their indexes, so a foreign key can
+    /// reference a table that has not been created yet.
     fn create_schema(&self, schema: &Schema) -> Vec<String> {
         schema
             .topological_order()
             .into_iter()
-            .map(|table| self.create_table(table))
+            .flat_map(|table| self.default_change(&Change::CreateTable(table.clone())))
             .collect()
     }
 

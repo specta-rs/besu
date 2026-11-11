@@ -362,9 +362,7 @@ fn parse_type(
         "numeric" | "decimal" => match (numeric_precision, numeric_scale) {
             // This is how `u64` is spelled, and there is no way to tell the two apart.
             (Some(20), Some(0)) => TypeDef::UInt(64),
-            (Some(precision), Some(scale)) => {
-                TypeDef::Decimal(narrow(precision), narrow(scale))
-            }
+            (Some(precision), Some(scale)) => TypeDef::Decimal(narrow(precision), narrow(scale)),
             (Some(precision), None) => TypeDef::Decimal(narrow(precision), 0),
             _ => TypeDef::Custom("numeric".into()),
         },

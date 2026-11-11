@@ -1,10 +1,25 @@
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use sqlx::{
-    Arguments, PgPool, Postgres as SqlxPostgres, Row,
-    postgres::{PgArgumentBuffer, PgArguments, PgQueryResult, PgRow},
+    Arguments, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
+    postgres::{
+        PgArgumentBuffer, PgArguments, PgQueryResult, PgRow, PgTypeInfo, PgValueFormat, PgValueRef,
+    },
 };
 
 use crate::Postgres;
+
+/// The OID of PostgreSQL's built-in `NUMERIC` type, which is stable across servers.
+const NUMERIC_OID: u32 = 1700;
+
+/// The OID of PostgreSQL's built-in `REAL` (`FLOAT4`) type.
+const FLOAT4_OID: u32 = 700;
+
+/// Whether a value's declared SQL type is the built-in type with this OID.
+fn type_is(value: &PgValueRef<'_>, oid: u32) -> bool {
+    value
+        .type_info()
+        .type_eq(&PgTypeInfo::with_oid(sqlx::postgres::types::Oid(oid)))
+}
 
 /// A [`besu_core::Driver`] for PostgreSQL, backed by [`sqlx`].
 ///
@@ -52,8 +67,8 @@ impl Sqlx {
 struct UntypedNull;
 
 impl sqlx::Type<SqlxPostgres> for UntypedNull {
-    fn type_info() -> sqlx::postgres::PgTypeInfo {
-        sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
     }
 }
 
@@ -63,6 +78,55 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedNull {
         _buffer: &mut PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         Ok(sqlx::encode::IsNull::Yes)
+    }
+}
+
+/// A `u64` bound as `NUMERIC`, which is how PostgreSQL spells integers above `i64::MAX`.
+///
+/// sqlx ships no `u64` support for PostgreSQL because the type system has no unsigned
+/// integers, so the handful of bytes of the `NUMERIC` wire format are written here.
+struct NumericU64(u64);
+
+impl sqlx::Type<SqlxPostgres> for NumericU64 {
+    fn type_info() -> PgTypeInfo {
+        // `NUMERIC` is a built-in type, so its OID is stable across servers.
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(NUMERIC_OID))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for NumericU64 {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        // A `NUMERIC` begins with `ndigits`, `weight`, the sign and the scale, followed by
+        // `ndigits` base-10000 digits. A `u64` needs at most five of them.
+        let mut digits = [0_i16; 5];
+        let mut count = 0;
+        let mut remaining = self.0;
+        while remaining != 0 {
+            digits[count] = i16::try_from(remaining % 10_000).unwrap_or(0);
+            remaining /= 10_000;
+            count += 1;
+        }
+
+        let ndigits = i16::try_from(count).unwrap_or(i16::MAX);
+        buffer.extend(&ndigits.to_be_bytes());
+        // `weight` is the exponent of the most significant digit, so it is one less than the
+        // number of digits. Zero has no digits and a weight of zero.
+        let weight = if count == 0 {
+            0
+        } else {
+            ndigits.saturating_sub(1)
+        };
+        buffer.extend(&weight.to_be_bytes());
+        buffer.extend(&0_i16.to_be_bytes()); // positive
+        buffer.extend(&0_i16.to_be_bytes()); // no fractional digits
+        for digit in digits[..count].iter().rev() {
+            buffer.extend(&digit.to_be_bytes());
+        }
+
+        Ok(sqlx::encode::IsNull::No)
     }
 }
 
@@ -80,18 +144,13 @@ fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Null => add(&mut arguments, None::<UntypedNull>)?,
             Value::Bool(v) => add(&mut arguments, *v)?,
             Value::Int(v) => add(&mut arguments, *v)?,
-            Value::UInt(v) => {
-                // TODO: `u64` values above `i64::MAX` are stored as `NUMERIC(20,0)`, but sqlx
-                // cannot encode or decode PostgreSQL's `NUMERIC` without a decimal feature
-                // enabled, so refuse them loudly rather than write a truncated value.
-                let v = i64::try_from(*v).map_err(|_| {
-                    <Sqlx as Driver>::error(Error::encode(
-                        v,
-                        "this driver cannot encode an unsigned integer above `i64::MAX` yet",
-                    ))
-                })?;
-                add(&mut arguments, v)?;
-            }
+            Value::UInt(v) => match i64::try_from(*v) {
+                // Everything that fits keeps PostgreSQL's native `BIGINT`, which is faster
+                // and matches the common case.
+                Ok(v) => add(&mut arguments, v)?,
+                // Above `i64::MAX` the value needs `NUMERIC`, exactly as DDL declares it.
+                Err(_) => add(&mut arguments, NumericU64(*v))?,
+            },
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -135,7 +194,7 @@ impl Driver for Sqlx {
 
     fn is_null(row: &Self::Row, index: usize) -> bool {
         row.try_get_raw(index)
-            .map(|value| sqlx::ValueRef::is_null(&value))
+            .map(|value| ValueRef::is_null(&value))
             .unwrap_or(true)
     }
 
@@ -274,9 +333,17 @@ impl_decode_integer!(i8, i16, i32, u8, u16, u32);
 impl Decode<Sqlx> for u64 {
     fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
         let index = *offset;
-        // TODO: values above `i64::MAX` live in a `NUMERIC(20,0)` column, which this driver
-        // cannot decode until sqlx is built with a decimal feature.
-        let value: i64 = decode_via_sqlx(row, offset)?;
+        *offset += 1;
+
+        let value = row.try_get_raw(index)?;
+        if type_is(&value, NUMERIC_OID) {
+            // `UInt(64)` is declared `NUMERIC(20,0)`, and sqlx has no `NUMERIC` decoder
+            // without a decimal feature, so read the wire format directly.
+            return decode_numeric(value, index);
+        }
+
+        // A `BIGINT` (or any narrower integer type) reads through `i64` and then range-checks.
+        let value: i64 = row.try_get_unchecked(index)?;
         u64::try_from(value).map_err(|_| {
             <Sqlx as Driver>::error(Error::decode(
                 index,
@@ -286,10 +353,77 @@ impl Decode<Sqlx> for u64 {
     }
 }
 
+/// Decode a non-negative integral `NUMERIC` into a `u64`.
+fn decode_numeric(value: PgValueRef<'_>, index: usize) -> Result<u64, sqlx::Error> {
+    let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+    match value.format() {
+        PgValueFormat::Text => value
+            .as_str()
+            .map_err(|err| malformed(&err.to_string()))?
+            .trim()
+            .parse()
+            .map_err(|_| malformed("the NUMERIC value is not an integer that fits in `u64`")),
+        PgValueFormat::Binary => {
+            let bytes = value
+                .as_bytes()
+                .map_err(|err| malformed(&err.to_string()))?;
+            decode_numeric_binary(bytes).map_err(malformed)
+        }
+    }
+}
+
+fn decode_numeric_binary(bytes: &[u8]) -> Result<u64, &'static str> {
+    let header = bytes.get(..8).ok_or("malformed NUMERIC value")?;
+    let ndigits = u16::from_be_bytes([header[0], header[1]]);
+    let weight = i16::from_be_bytes([header[2], header[3]]);
+    let sign = u16::from_be_bytes([header[4], header[5]]);
+    let scale = i16::from_be_bytes([header[6], header[7]]);
+
+    if sign != 0 {
+        return Err("a negative (or non-finite) NUMERIC cannot be decoded as `u64`");
+    }
+    if scale != 0 {
+        return Err("a NUMERIC with a fractional part cannot be decoded as `u64`");
+    }
+    if usize::from(ndigits) != (bytes.len() - 8) / 2 {
+        return Err("malformed NUMERIC value");
+    }
+
+    let mut value: u128 = 0;
+    for position in 0..usize::from(ndigits) {
+        let offset = 8 + position * 2;
+        let digit = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+        let exponent = i32::from(weight) - i32::try_from(position).unwrap_or(i32::MAX);
+        let exponent = u32::try_from(exponent).map_err(|_| "malformed NUMERIC value")?;
+        let factor = 10_000_u128
+            .checked_pow(exponent)
+            .ok_or("the NUMERIC value is too large for `u64`")?;
+        let term = u128::from(digit)
+            .checked_mul(factor)
+            .ok_or("the NUMERIC value is too large for `u64`")?;
+        value = value
+            .checked_add(term)
+            .ok_or("the NUMERIC value is too large for `u64`")?;
+    }
+
+    u64::try_from(value).map_err(|_| "the NUMERIC value is too large for `u64`")
+}
+
 impl Decode<Sqlx> for f32 {
     fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
-        let value: f64 = decode_via_sqlx(row, offset)?;
-        Ok(value as f32)
+        let index = *offset;
+        *offset += 1;
+
+        // `REAL` is four bytes and `DOUBLE PRECISION` is eight, and a `f32` can legitimately
+        // come back as either, so let the column type pick the decoder.
+        let value = row.try_get_raw(index)?;
+        if type_is(&value, FLOAT4_OID) {
+            row.try_get_unchecked(index)
+        } else {
+            let value: f64 = row.try_get_unchecked(index)?;
+            Ok(value as f32)
+        }
     }
 }
 

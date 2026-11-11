@@ -147,11 +147,7 @@ async fn projection_and_aggregates() {
     let counts: Vec<i64> = db.select(users).pick(count_all()).await.unwrap();
     assert_eq!(counts, [2]);
 
-    let ages: Vec<f64> = db
-        .select(users)
-        .pick(sum(users.age.as_expr().cast::<besu::Float8>()))
-        .await
-        .unwrap();
+    let ages: Vec<f64> = db.select(users).pick(sum(users.age)).await.unwrap();
     assert_eq!(ages, [50.0]);
 }
 
@@ -522,4 +518,27 @@ async fn left_join_projection_widens_to_option() {
             ("Lonely".to_string(), None),
         ]
     );
+}
+
+#[tokio::test]
+async fn raw_sql_accepts_runtime_values() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    // The compile-time arity check must not require its arguments to be constants.
+    let name = String::from("Alice");
+    let minimum_age = 18;
+    let rows: Vec<User> = db
+        .execute(sql!(
+            "SELECT * FROM users WHERE name = ? AND age > ?",
+            name,
+            minimum_age
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
 }

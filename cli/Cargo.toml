@@ -19,9 +19,9 @@ path = "src/main.rs"
 besu = { workspace = true, features = ["derive", "migrate"] }
 besu-core = { workspace = true }
 besu-schema = { workspace = true }
-besu-postgres = { workspace = true, features = ["sqlx"] }
-besu-mysql = { workspace = true, features = ["sqlx"] }
-besu-sqlite = { workspace = true, features = ["sqlx"] }
+besu-postgres = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+besu-mysql = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+besu-sqlite = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = { workspace = true }

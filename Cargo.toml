@@ -9,6 +9,7 @@ members = [
     "./besu-postgres",
     "./besu-mysql",
     "./cli",
+    "./examples/*",
 ]
 
 [workspace.package]
