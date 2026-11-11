@@ -48,9 +48,14 @@ impl Dialect for SQLite {
             TypeDef::UInt(_) => "INTEGER",
             TypeDef::Float4 | TypeDef::Float8 => "REAL",
             TypeDef::Text | TypeDef::Char(_) | TypeDef::VarChar(_) => "TEXT",
-            TypeDef::Bytes | TypeDef::Uuid => "BLOB",
-            TypeDef::Json | TypeDef::Jsonb => "TEXT",
-            TypeDef::Date | TypeDef::Time | TypeDef::Timestamp | TypeDef::TimestampTz => "TEXT",
+            TypeDef::Bytes => "BLOB",
+            // SQLite gives these NUMERIC affinity, so a value bound as text stays text while
+            // the declared name round-trips through `PRAGMA table_info`.
+            TypeDef::Uuid => "UUID",
+            TypeDef::Json | TypeDef::Jsonb => "JSON",
+            TypeDef::Date => "DATE",
+            TypeDef::Time => "TIME",
+            TypeDef::Timestamp | TypeDef::TimestampTz => "TIMESTAMP",
             TypeDef::Decimal(_, _) => "NUMERIC",
             TypeDef::Custom(ref name) => return name.clone(),
             _ => "TEXT",

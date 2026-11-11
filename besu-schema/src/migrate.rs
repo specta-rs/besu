@@ -122,9 +122,20 @@ impl Migrator {
     }
 
     /// The migrations, sorted by version.
-    pub fn migrations(&mut self) -> &[Migration] {
-        self.migrations.sort_by_key(|m| m.version);
-        &self.migrations
+    pub fn migrations(&self) -> Vec<&Migration> {
+        let mut migrations: Vec<&Migration> = self.migrations.iter().collect();
+        migrations.sort_by_key(|m| m.version);
+        migrations
+    }
+
+    /// Whether there are no migrations at all.
+    pub fn is_empty(&self) -> bool {
+        self.migrations.is_empty()
+    }
+
+    /// How many migrations there are.
+    pub fn len(&self) -> usize {
+        self.migrations.len()
     }
 
     /// Read `*.sql` files from a directory.
@@ -168,7 +179,6 @@ impl Migrator {
     where
         i64: Decode<E::Driver>,
         String: Decode<E::Driver>,
-        Option<String>: Decode<E::Driver>,
     {
         let driver_err = <E::Driver as Driver>::error;
 
@@ -321,4 +331,43 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     statements
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_statements_on_semicolons() {
+        let statements = split_statements("CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);");
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].starts_with("CREATE TABLE a"));
+    }
+
+    #[test]
+    fn ignores_semicolons_inside_strings() {
+        let statements = split_statements("INSERT INTO t VALUES ('a;b');");
+        assert_eq!(statements, ["INSERT INTO t VALUES ('a;b')"]);
+    }
+
+    #[test]
+    fn ignores_semicolons_inside_comments() {
+        let statements = split_statements("-- a; b\nSELECT 1;");
+        assert_eq!(statements, ["SELECT 1"]);
+    }
+
+    #[test]
+    fn keeps_a_trailing_statement_without_a_semicolon() {
+        let statements = split_statements("SELECT 1");
+        assert_eq!(statements, ["SELECT 1"]);
+    }
+
+    #[test]
+    fn checksum_is_stable_and_sensitive_to_content() {
+        let a = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        let b = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        let c = Migration::from_sql(1, "init", "CREATE TABLE a (id BIGINT)");
+        assert_eq!(a.checksum(), b.checksum());
+        assert_ne!(a.checksum(), c.checksum());
+    }
 }

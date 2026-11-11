@@ -26,7 +26,7 @@ impl Sqlx {
         let options = url
             .parse::<MySqlConnectOptions>()?
             .charset("utf8mb4")
-            .timezone("+00:00");
+            .timezone("+00:00".to_owned());
         Self::with_options(options).await
     }
 

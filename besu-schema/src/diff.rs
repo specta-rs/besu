@@ -158,6 +158,20 @@ impl core::fmt::Display for Change {
 /// a rename looks exactly like a drop plus an add, so Besu refuses to guess. Declare the
 /// rename explicitly with a migration if you want to keep the data.
 pub fn diff(current: &Schema, desired: &Schema) -> Vec<Change> {
+    diff_with(current, desired, &|ty| ty.clone())
+}
+
+/// Compute the changes needed to turn `current` into `desired`, folding types that the
+/// dialect cannot tell apart.
+///
+/// SQLite has a single integer type, so a schema declaring `i32` and a database reporting
+/// `INTEGER` must compare equal or `push` would never converge. Each dialect supplies its
+/// own normalisation through [`Ddl::normalise_type`](crate::Ddl::normalise_type).
+pub fn diff_with(
+    current: &Schema,
+    desired: &Schema,
+    normalise: &dyn Fn(&besu_core::TypeDef) -> besu_core::TypeDef,
+) -> Vec<Change> {
     let mut changes = Vec::new();
 
     // Create tables that are missing, in dependency order.
@@ -172,7 +186,7 @@ pub fn diff(current: &Schema, desired: &Schema) -> Vec<Change> {
         let Some(existing) = current.table(&table.name) else {
             continue;
         };
-        diff_table(existing, table, &mut changes);
+        diff_table(existing, table, normalise, &mut changes);
     }
 
     // Drop tables that are no longer wanted, children first.
@@ -201,7 +215,12 @@ pub fn diff(current: &Schema, desired: &Schema) -> Vec<Change> {
     changes
 }
 
-fn diff_table(current: &Table, desired: &Table, changes: &mut Vec<Change>) {
+fn diff_table(
+    current: &Table,
+    desired: &Table,
+    normalise: &dyn Fn(&besu_core::TypeDef) -> besu_core::TypeDef,
+    changes: &mut Vec<Change>,
+) {
     // Added columns.
     for column in &desired.columns {
         if current.column(&column.name).is_none() {
@@ -227,7 +246,7 @@ fn diff_table(current: &Table, desired: &Table, changes: &mut Vec<Change>) {
         let Some(existing) = current.column(&column.name) else {
             continue;
         };
-        if !existing.same_shape(column) {
+        if !existing.same_shape(column, normalise) {
             changes.push(Change::AlterColumn {
                 table: desired.name.clone(),
                 from: existing.clone(),
@@ -302,4 +321,92 @@ pub fn worst_safety(changes: &[Change]) -> Safety {
         .map(Change::safety)
         .max()
         .unwrap_or(Safety::Safe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diff, worst_safety};
+    use crate::{Column, Safety, Schema, Table};
+    use besu_core::TypeDef;
+
+    fn column(name: &str, ty: TypeDef) -> Column {
+        Column {
+            name: name.into(),
+            ty,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            comment: None,
+        }
+    }
+
+    fn table(name: &str, columns: Vec<Column>) -> Table {
+        Table {
+            name: name.into(),
+            schema: None,
+            columns,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            comment: None,
+        }
+    }
+
+    fn schema(tables: Vec<Table>) -> Schema {
+        Schema {
+            tables,
+            enums: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn creating_from_nothing_only_creates_tables() {
+        let desired = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        let changes = diff(&Schema::new(), &desired);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(worst_safety(&changes), Safety::Safe);
+    }
+
+    #[test]
+    fn identical_schemas_produce_no_changes() {
+        let a = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        let b = a.clone();
+        assert!(diff(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn adding_a_nullable_column_is_safe() {
+        let before = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        let mut nullable = column("bio", TypeDef::Text);
+        nullable.nullable = true;
+        let after = schema(vec![table(
+            "users",
+            vec![column("id", TypeDef::Int8), nullable],
+        )]);
+        let changes = diff(&before, &after);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(worst_safety(&changes), Safety::Safe);
+    }
+
+    #[test]
+    fn dropping_a_column_is_destructive() {
+        let before = schema(vec![table(
+            "users",
+            vec![column("id", TypeDef::Int8), column("bio", TypeDef::Text)],
+        )]);
+        let after = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        let changes = diff(&before, &after);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].safety(), Safety::Destructive);
+    }
+
+    #[test]
+    fn changing_a_column_type_is_risky() {
+        let before = schema(vec![table("users", vec![column("age", TypeDef::Int4)])]);
+        let after = schema(vec![table("users", vec![column("age", TypeDef::Int8)])]);
+        let changes = diff(&before, &after);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].safety(), Safety::Risky);
+    }
 }

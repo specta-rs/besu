@@ -185,7 +185,12 @@ fn parse_type(declared: &str) -> TypeDef {
         "TEXT" | "" => TypeDef::Text,
         "BLOB" => TypeDef::Bytes,
         "BOOLEAN" => TypeDef::Bool,
-        "NUMERIC" | "DECIMAL" => TypeDef::Text,
+        "UUID" => TypeDef::Uuid,
+        "JSON" => TypeDef::Json,
+        "DATE" => TypeDef::Date,
+        "TIME" => TypeDef::Time,
+        "TIMESTAMP" | "DATETIME" => TypeDef::Timestamp,
+        "NUMERIC" | "DECIMAL" => TypeDef::Decimal(0, 0),
         _ if upper.contains("INT") => TypeDef::Int8,
         _ if upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT") => {
             TypeDef::Text

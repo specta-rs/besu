@@ -229,8 +229,11 @@ impl Column {
     }
 
     /// Whether two columns describe the same thing, ignoring name.
-    pub(crate) fn same_shape(&self, other: &Self) -> bool {
-        normalise_type(&self.ty) == normalise_type(&other.ty)
+    ///
+    /// `normalise` folds types the dialect cannot tell apart, so a database that has a
+    /// single integer type does not diff forever against a schema that distinguishes them.
+    pub(crate) fn same_shape(&self, other: &Self, normalise: &dyn Fn(&TypeDef) -> TypeDef) -> bool {
+        normalise(&self.ty) == normalise(&other.ty)
             && self.nullable == other.nullable
             && self.auto_increment == other.auto_increment
             && self.primary_key == other.primary_key
@@ -278,20 +281,6 @@ pub type Default = Option<String>;
 
 fn default_to_sql(value: DefaultValue) -> String {
     value.render().into_owned()
-}
-
-/// Fold equivalent spellings of the same type together.
-///
-/// Databases disagree wildly here: SQLite calls everything `INTEGER`, MySQL reports `int(11)`
-/// for `INT`, and Postgres reports `character varying(255)` for `VARCHAR(255)`. Comparing
-/// canonical types avoids a diff that never converges.
-pub fn normalise_type(ty: &TypeDef) -> TypeDef {
-    match ty {
-        TypeDef::Char(_) | TypeDef::VarChar(_) => TypeDef::Text,
-        TypeDef::Int2 | TypeDef::Int4 | TypeDef::Int8 => TypeDef::Int8,
-        TypeDef::Json | TypeDef::Jsonb => TypeDef::Json,
-        other => other.clone(),
-    }
 }
 
 /// Fold equivalent spellings of the same default together.

@@ -26,6 +26,15 @@ pub trait Ddl {
     /// The native type name for a canonical type.
     fn type_name(&self, ty: &TypeDef) -> String;
 
+    /// Fold types the dialect cannot tell apart, so diffing converges.
+    ///
+    /// SQLite stores every integer as `INTEGER`; a schema declaring `i32` and a database
+    /// reporting the column back must compare equal. The default is the identity, which is
+    /// right for any dialect that keeps types faithfully.
+    fn normalise_type(&self, ty: &TypeDef) -> TypeDef {
+        ty.clone()
+    }
+
     /// The full definition of a column, as it appears in `CREATE TABLE`.
     ///
     /// `inline_pk` is true when the table has exactly one primary key column, which is when
