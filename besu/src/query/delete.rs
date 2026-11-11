@@ -71,7 +71,7 @@ impl DeleteQuery {
             }
         }
 
-        out
+        out.seal()
     }
 }
 
@@ -129,7 +129,7 @@ impl<'a, E: Executor, T, const SAFE: bool> Delete<'a, E, T, SAFE> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.clone().build(self.exec.table_prefix()).seal())
+        Ok(self.query.clone().build(self.exec.table_prefix()))
     }
 }
 

@@ -129,7 +129,10 @@ impl SelectQuery {
         let mut out = Sql::with_capacity(self.capacity_hint());
         out.set_table_prefix(prefix);
         self.render_into(&mut out);
-        out
+        // Sealed here rather than at the call site so that every path — `to_sql`, `all`,
+        // `stream`, a relation's second statement, a chunked batch — sends the same text the
+        // driver caches under.
+        out.seal()
     }
 
     /// Render this query into an existing statement.
