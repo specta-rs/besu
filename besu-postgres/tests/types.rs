@@ -10,7 +10,8 @@
 mod common;
 
 use besu::prelude::*;
-use besu_postgres::Sqlx;
+use besu::{Driver, Sql};
+use besu_postgres::{Postgres, Sqlx};
 
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "things")]
@@ -279,4 +280,72 @@ async fn declared_type_is_a_128_bit_unsigned_integer() {
     // `NUMERIC(39,0)` introspects back as the same width, so a second push is a no-op.
     let second = db.push([wide_numbers.def()]).await.unwrap();
     assert!(second.is_empty(), "got {:?}", second.changes);
+}
+
+#[tokio::test]
+async fn invalid_json_is_rejected_before_it_reaches_the_server() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let mut statement = Sql::<Postgres>::raw("SELECT $1::jsonb");
+    statement.push_arg(Value::Json(br#"{"a":"#.to_vec()));
+
+    // The driver validates the document in place rather than parsing it into a tree, and a
+    // malformed one still has to fail before the statement is sent.
+    let error = db.driver().query(&statement).await.unwrap_err();
+    assert!(
+        error.to_string().contains("cannot encode value `json`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn round_numbers_round_trip() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([numbers.def(), wide_numbers.def()]).await.unwrap();
+
+    // A power of ten leaves a gap between a `NUMERIC`'s weight and its stored digits — 10^8
+    // is one digit with weight 2 — which a hand-written decoder gets wrong if it assumes the
+    // digits are contiguous.
+    for (id, value) in [1_u64, 10, 10_u64.pow(4), 10_u64.pow(8), 10_u64.pow(19)]
+        .into_iter()
+        .enumerate()
+    {
+        db.insert(numbers)
+            .value(numbers.insert(id as i64, value))
+            .await
+            .unwrap();
+
+        let stored: Vec<Number> = db
+            .select(numbers)
+            .filter(numbers.id.eq(id as i64))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].value, value);
+    }
+
+    for (id, value) in [
+        10_u128.pow(4),
+        10_u128.pow(8),
+        10_u128.pow(20),
+        10_u128.pow(38),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let signed = -(value as i128);
+        db.insert(wide_numbers)
+            .value(wide_numbers.insert(id as i64, value, signed))
+            .await
+            .unwrap();
+
+        let stored: Vec<WideNumber> = db
+            .select(wide_numbers)
+            .filter(wide_numbers.id.eq(id as i64))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].value, value);
+        assert_eq!(stored[0].signed, signed);
+    }
 }
