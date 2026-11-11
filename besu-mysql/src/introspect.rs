@@ -12,7 +12,7 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
         .execute(besu::sql!(
             "SELECT TABLE_NAME FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' \
-             AND TABLE_NAME NOT LIKE '\\_besu\\_%' ESCAPE '\\' \
+             AND LEFT(TABLE_NAME, 6) <> '_besu_' \
              ORDER BY TABLE_NAME"
         ))
         .all::<(String,)>()
