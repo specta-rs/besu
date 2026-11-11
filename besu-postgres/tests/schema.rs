@@ -1,13 +1,14 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
-//! Schema fidelity: native types, enum types, composite `UNIQUE` constraints and
-//! schema-qualified tables, all exercised against a real PostgreSQL server.
+//! Schema fidelity: native types, enum types, composite `UNIQUE` constraints,
+//! schema-qualified tables, check constraints, views and the index shapes the IR cannot
+//! express, all exercised against a real PostgreSQL server.
 
 mod common;
 
 use besu::TypeDef;
 use besu::prelude::*;
-use besu::schema::{Change, Column, Enum, Safety, Schema, Table as TableIr, Unique};
+use besu::schema::{Change, Check, Column, Enum, Safety, Schema, Table as TableIr, Unique};
 use besu_postgres::Sqlx;
 
 /// A `NOT NULL` column with no constraint of its own.
@@ -33,12 +34,17 @@ fn table(name: &str, columns: Vec<Column>) -> TableIr {
         indexes: Vec::new(),
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
+        checks: Vec::new(),
         comment: None,
     }
 }
 
 fn schema(tables: Vec<TableIr>, enums: Vec<Enum>) -> Schema {
-    let mut schema = Schema { tables, enums };
+    let mut schema = Schema {
+        tables,
+        enums,
+        views: Vec::new(),
+    };
     schema.sort();
     schema
 }
@@ -360,4 +366,263 @@ async fn the_same_table_name_in_two_schemas() {
     db.execute(sql!("DROP SCHEMA \"besu_schema_test\" CASCADE"))
         .await
         .unwrap();
+}
+
+/// A partial index is modelled, an expression index is not. Pushing a schema that matches
+/// what is really there must not try to drop either: the expression index is invisible to
+/// the IR, and the partial one is compared with its predicate.
+#[tokio::test]
+async fn partial_and_expression_indexes_are_not_dropped() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    db.execute(sql!(
+        "CREATE TABLE events (\
+             id BIGINT PRIMARY KEY, \
+             kind TEXT NOT NULL, \
+             payload TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    // Only the error rows are indexed, so the index is smaller than a plain one on `kind`.
+    db.execute(sql!(
+        "CREATE INDEX events_kind_idx ON events (kind) WHERE kind = 'error'"
+    ))
+    .await
+    .unwrap();
+    // An index on an expression has no column list to report.
+    db.execute(sql!(
+        "CREATE INDEX events_lower_payload_idx ON events (lower(payload))"
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    let events = introspected.table("events").unwrap();
+    assert_eq!(
+        events.indexes.len(),
+        1,
+        "the expression index must not be reported: {:?}",
+        events.indexes
+    );
+    let partial = &events.indexes[0];
+    assert_eq!(partial.name, "events_kind_idx");
+    assert_eq!(partial.columns, ["kind"]);
+    assert!(!partial.unique);
+    let predicate = partial
+        .predicate
+        .as_deref()
+        .expect("a partial index must carry its predicate");
+    assert!(predicate.contains("error"), "got {predicate}");
+
+    // The declared schema says exactly what the database has, so there is nothing to do.
+    let desired = schema(
+        vec![{
+            let mut events = table(
+                "events",
+                vec![
+                    {
+                        let mut id = column("id", TypeDef::Int8);
+                        id.primary_key = true;
+                        id
+                    },
+                    column("kind", TypeDef::Text),
+                    column("payload", TypeDef::Text),
+                ],
+            );
+            events.indexes.push(partial.clone());
+            events
+        }],
+        Vec::new(),
+    );
+
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+    assert!(
+        !pushed
+            .statements
+            .iter()
+            .any(|sql| sql.contains("DROP INDEX")),
+        "got {:?}",
+        pushed.statements
+    );
+
+    // Pushing the introspected schema itself is also a no-op, views and all.
+    assert!(db.push_schema(&introspected).await.unwrap().is_empty());
+}
+
+/// An exclusion constraint is not modelled. PostgreSQL's `information_schema` does not list
+/// it among the constraints, so its backing index has to be recognised by the catalogue or
+/// it looks like an ordinary index and `push` tries to drop it.
+#[tokio::test]
+async fn an_exclusion_constraint_is_not_reported_as_an_index() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    db.execute(sql!(
+        "CREATE TABLE bookings (\
+             room BIGINT NOT NULL, \
+             during TSRANGE NOT NULL, \
+             EXCLUDE USING gist (during WITH &&))"
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    let bookings = introspected.table("bookings").unwrap();
+    assert!(
+        bookings.indexes.is_empty(),
+        "the exclusion constraint's index must not be reported: {:?}",
+        bookings.indexes
+    );
+    assert!(bookings.uniques.is_empty());
+
+    // Nothing in the IR describes the exclusion constraint, so a push of what introspection
+    // saw leaves it alone.
+    let pushed = db.push_schema(&introspected).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+    assert!(
+        !pushed
+            .statements
+            .iter()
+            .any(|sql| sql.contains("DROP INDEX")),
+        "got {:?}",
+        pushed.statements
+    );
+}
+
+/// `CHECK` constraints are introspected, add and drop with `ALTER TABLE`, and converge even
+/// though PostgreSQL stores them with an extra pair of parentheses.
+#[tokio::test]
+async fn check_constraints_round_trip() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    db.execute(sql!(
+        "CREATE TABLE accounts (\
+             id BIGINT PRIMARY KEY, \
+             balance BIGINT NOT NULL, \
+             CONSTRAINT accounts_balance_check CHECK (balance >= 0))"
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(
+        introspected.table("accounts").unwrap().checks,
+        [Check {
+            name: "accounts_balance_check".into(),
+            expression: "balance >= 0".into(),
+        }]
+    );
+
+    let accounts = |checks: Vec<Check>| {
+        schema(
+            vec![{
+                let mut accounts = table(
+                    "accounts",
+                    vec![
+                        {
+                            let mut id = column("id", TypeDef::Int8);
+                            id.primary_key = true;
+                            id
+                        },
+                        column("balance", TypeDef::Int8),
+                    ],
+                );
+                accounts.checks = checks;
+                accounts
+            }],
+            Vec::new(),
+        )
+    };
+    let check = Check {
+        name: "accounts_balance_check".into(),
+        expression: "balance >= 0".into(),
+    };
+    let with = accounts(vec![check.clone()]);
+    let without = accounts(Vec::new());
+
+    // The declared spelling has one pair of parentheses fewer and still matches.
+    assert!(db.push_schema(&with).await.unwrap().is_empty());
+
+    // Dropping the constraint loses a guarantee, so it is destructive and refused.
+    let refused = db.push_schema(&without).await.unwrap_err().to_string();
+    assert!(
+        refused.contains("drop check accounts_balance_check"),
+        "got {refused}"
+    );
+    let dropped = db.push_schema_destructive(&without).await.unwrap();
+    assert_eq!(
+        dropped.statements,
+        [r#"ALTER TABLE "accounts" DROP CONSTRAINT "accounts_balance_check""#]
+    );
+    assert!(
+        db.introspect()
+            .await
+            .unwrap()
+            .table("accounts")
+            .unwrap()
+            .checks
+            .is_empty()
+    );
+
+    // Adding it back is one statement, and then the schema converges again.
+    let added = db.push_schema(&with).await.unwrap();
+    assert_eq!(
+        added.statements,
+        [r#"ALTER TABLE "accounts" ADD CONSTRAINT "accounts_balance_check" CHECK (balance >= 0)"#]
+    );
+    assert_eq!(added.changes[0].safety(), Safety::Risky);
+    assert!(db.push_schema(&with).await.unwrap().is_empty());
+}
+
+/// A view is reported by introspection so `besu pull` writes it down, but it is never a
+/// table and the differ never creates or drops one.
+#[tokio::test]
+async fn a_view_is_reported_but_never_touched() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    db.execute(sql!("CREATE TABLE users (id BIGINT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    db.execute(sql!("CREATE VIEW user_ids AS SELECT id FROM users"))
+        .await
+        .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    assert!(
+        introspected.table("user_ids").is_none(),
+        "a view must not be reported as a table"
+    );
+    assert_eq!(introspected.views.len(), 1);
+    assert_eq!(introspected.views[0].name, "user_ids");
+    assert!(
+        introspected.views[0].definition.contains("users"),
+        "got {:?}",
+        introspected.views[0].definition
+    );
+
+    let desired = schema(
+        vec![table(
+            "users",
+            vec![{
+                let mut id = column("id", TypeDef::Int8);
+                id.primary_key = true;
+                id
+            }],
+        )],
+        Vec::new(),
+    );
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+    assert!(
+        !pushed
+            .statements
+            .iter()
+            .any(|sql| sql.to_uppercase().contains("VIEW")),
+        "got {:?}",
+        pushed.statements
+    );
 }

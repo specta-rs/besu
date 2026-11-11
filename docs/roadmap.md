@@ -8,11 +8,9 @@ would actually require. The order is a judgement about impact versus cost, not a
 | 1 | [Eager loading / relations](#eager-loading--relations) | The biggest functional gap versus an ORM | Large |
 | 2 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
 | 3 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
-| 4 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
-| 5 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
-| 6 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
-| 7 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
-| 8 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
+| 4 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 5 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
+| 6 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
 
 ## Eager loading / relations
 
@@ -83,40 +81,6 @@ What it would take:
 
 Until then, pick the driver at compile time or copy the CLI's enum pattern.
 
-## Full text search
-
-Tracked as [#57](https://github.com/specta-rs/besu/issues/57).
-
-There is no typed `MATCH`, `tsquery` or `to_tsvector`. PostgreSQL users can write
-`filter(raw("search_vector @@ to_tsquery('rust')"))`; SQLite users can query an FTS5 table with
-`sql!`, but the schema layer does not create virtual tables.
-
-What it would take:
-
-- A `matches(column, query)` expression with per-dialect rendering: PostgreSQL
-  `@@ to_tsquery`, MySQL `MATCH ... AGAINST`, SQLite `MATCH` against an FTS5 table.
-- A `TypeDef` for `tsvector` and a way to declare an FTS index or virtual table in `TableDef`
-  so `push` can create it.
-- Language configuration (PostgreSQL's `regconfig`) as a parameter, not a hard-coded string.
-- Ranking (`ts_rank`) and highlighting are separate functions.
-
-## u128 support
-
-Tracked as [#59](https://github.com/specta-rs/besu/issues/59).
-
-`Value` has `Int(i64)`, `UInt(u64)` and no 128-bit variant; `TypeDef::UInt(u8)` describes a
-width but the derive has no `u128` mapping, and `i128` is absent entirely.
-
-What it would take:
-
-- A `Value::UInt128` / `Value::Int128` (or a decimal string variant) and encode/decode impls
-  in every driver.
-- Dialect type names: PostgreSQL `NUMERIC(39,0)`, MySQL `DECIMAL(39,0)`, SQLite has no native
-  type that holds it losslessly and would need text plus a range check.
-- A `SqlType` and derive mapping for `u128` / `i128`.
-- Care with `MAX_PARAMS` and bulk inserts is unaffected, but arithmetic on these values would
-  still happen in the database, not in Rust.
-
 ## wasm support
 
 The builder half is done: `besu-core` and `besu` compile for `wasm32-unknown-unknown`, so a
@@ -183,8 +147,6 @@ This is deliberately last: it is useful, but it is not on the path to a dependab
 
 These are not large enough for their own section, but they are real. Each is a tracking issue.
 
-- **[#66](https://github.com/specta-rs/besu/issues/66) — partial and expression indexes,
-  check constraints, views.** `TableDef` models plain indexes and foreign keys.
 - **[#67](https://github.com/specta-rs/besu/issues/67) — savepoints and nested
   transactions.** One level only.
 - **[#68](https://github.com/specta-rs/besu/issues/68) — down migrations.** The runner is
@@ -194,6 +156,9 @@ These are not large enough for their own section, but they are real. Each is a t
 
 Kept here so the history is visible rather than deleted:
 
+- **#59, `u128` support.** `Value::UInt128` / `Value::Int128`, a `U128` / `I128` `SqlType`
+  and derive mapping, and encode/decode in every driver. PostgreSQL and MySQL use exact
+  39-digit decimals; SQLite stores the decimal digits as `TEXT`.
 - **#60, the builder on wasm32.** `besu-core` and `besu` compile for
   `wasm32-unknown-unknown`, so SQL can be generated in a browser and executed on a server.
   Execution in the browser still needs a driver of its own; see
@@ -209,6 +174,12 @@ Kept here so the history is visible rather than deleted:
 - **#75, publish metadata.** Every crate has a README, keywords and categories, and the
   publish order is written down in `CONTRIBUTING.md`.
 - **#76, update from model.** `Update::set_model`.
+- **#66, partial indexes, checks and views.** `Index::predicate` and `Table::checks` are
+  introspected, diffed and rendered, `Schema::views` round-trips through `besu pull`, and an
+  object the IR cannot express (an expression index, an exclusion constraint, a trigger) is
+  skipped by introspection instead of making `push` drop it. A check cannot be declared in
+  Rust yet, and SQLite neither introspects one nor reads a partial index's predicate, so both
+  stay migration-only there.
 - **#71, PostgreSQL composite `UNIQUE`.** A multi-column constraint is `Table::uniques`,
   added and dropped with `ALTER TABLE`, instead of an index that `DROP INDEX` could not
   remove.
@@ -223,6 +194,10 @@ Kept here so the history is visible rather than deleted:
   dialect.
 - **#54, rename detection.** `#[besu(renamed_from = "...")]` turns a drop plus an add into one
   `ALTER TABLE ... RENAME COLUMN`. Renaming a table still is not modelled.
+- **#57, full-text search.** `matches(column, query)` and `Column::matches` bind the query and
+  render `to_tsvector(..) @@ plainto_tsquery(..)` on PostgreSQL, `MATCH ... AGAINST` on MySQL
+  and `MATCH` on SQLite. A `tsvector` column type, declaring the index or virtual table in
+  `TableDef`, a language parameter, ranking and highlighting are still open.
 
 ## Contributing
 

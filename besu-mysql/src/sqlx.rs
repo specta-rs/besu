@@ -1,4 +1,5 @@
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
+use num_traits::ToPrimitive;
 use sqlx::{
     Arguments, MySql, MySqlPool, Row,
     mysql::{MySqlArguments, MySqlConnectOptions, MySqlPoolOptions, MySqlQueryResult, MySqlRow},
@@ -68,6 +69,9 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             Value::Int(v) => add(&mut arguments, *v)?,
             // MySQL has real unsigned integers, so the full `u64` range round-trips.
             Value::UInt(v) => add(&mut arguments, *v)?,
+            // A `u128` column is `DECIMAL(39,0)`, which sqlx encodes from a `BigDecimal`.
+            Value::UInt128(v) => add(&mut arguments, sqlx::types::BigDecimal::from(*v))?,
+            Value::Int128(v) => add(&mut arguments, sqlx::types::BigDecimal::from(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -315,6 +319,51 @@ impl Decode<Sqlx> for u64 {
                 "a negative MySQL integer cannot be decoded as u64",
             ))
         })
+    }
+}
+
+impl Decode<Sqlx> for u128 {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+
+        // A `DECIMAL(39,0)` column decodes as a `BigDecimal`. `to_u128` returns `None` for a
+        // negative value and for anything above `u128::MAX`.
+        if let Ok(value) = row.try_get::<sqlx::types::BigDecimal, _>(index) {
+            *offset += 1;
+            return value.to_u128().ok_or_else(|| {
+                <Sqlx as Driver>::error(Error::decode(
+                    index,
+                    "the DECIMAL value is not a non-negative integer that fits in u128",
+                ))
+            });
+        }
+
+        // A value held in a real integer column still decodes through the integer path.
+        let value = decode_integer(row, offset)?;
+        u128::try_from(value).map_err(|_| {
+            <Sqlx as Driver>::error(Error::decode(
+                index,
+                "a negative MySQL integer cannot be decoded as u128",
+            ))
+        })
+    }
+}
+
+impl Decode<Sqlx> for i128 {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+
+        if let Ok(value) = row.try_get::<sqlx::types::BigDecimal, _>(index) {
+            *offset += 1;
+            return value.to_i128().ok_or_else(|| {
+                <Sqlx as Driver>::error(Error::decode(
+                    index,
+                    "the DECIMAL value is not an integer that fits in i128",
+                ))
+            });
+        }
+
+        decode_integer(row, offset).map(i128::from)
     }
 }
 

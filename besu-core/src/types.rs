@@ -17,7 +17,7 @@ pub enum TypeDef {
     Int8,
     /// An unsigned integer of the given bit width. Databases have no portable unsigned
     /// integer, so dialects widen these to the smallest type that fits (`u64` becomes a
-    /// `NUMERIC(20,0)` on PostgreSQL, for instance).
+    /// `NUMERIC(20,0)` on PostgreSQL, for instance, and `u128` a `NUMERIC(39,0)`).
     UInt(u8),
     /// 32-bit float.
     Float4,

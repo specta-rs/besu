@@ -143,13 +143,16 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
 
     /// Render the exact SQL this query will run, without running it.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build().seal())
+        Ok(self.query.build(self.exec.table_prefix()).seal())
     }
 
     /// Render the SQL with its parameters inlined, for logging.
     pub fn inspect(&self) -> Result<alloc::string::String, Error> {
         Ok(alloc::string::ToString::to_string(
-            &self.query.build::<DialectOf<E>>().inspect(),
+            &self
+                .query
+                .build::<DialectOf<E>>(self.exec.table_prefix())
+                .inspect(),
         ))
     }
 
@@ -253,9 +256,10 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
+        let prefix = self.exec.table_prefix();
         let (mut exec, query) = self.into_parts();
         let sql = query
-            .build::<DialectOf<E>>()
+            .build::<DialectOf<E>>(prefix)
             .finish()
             .map_err(<E::Driver as Driver>::error)?;
         let rows = exec.query(&sql).await?;
@@ -265,9 +269,10 @@ where
     /// Run the query and return the first row, if any.
     pub async fn first(mut self) -> Result<Option<R>, ErrorOf<E>> {
         self.query.limit = Some(1);
+        let prefix = self.exec.table_prefix();
         let (mut exec, query) = self.into_parts();
         let sql = query
-            .build::<DialectOf<E>>()
+            .build::<DialectOf<E>>(prefix)
             .finish()
             .map_err(<E::Driver as Driver>::error)?;
         let rows = exec.query(&sql).await?;

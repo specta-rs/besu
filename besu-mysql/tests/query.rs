@@ -186,6 +186,7 @@ async fn generated_ddl() {
                 name: "users_email".into(),
                 columns: vec!["email".into()],
                 unique: true,
+                predicate: None,
             }
         ),
         "DROP INDEX `users_email` ON `users`"
@@ -654,4 +655,63 @@ async fn json_path_access_renders_and_reads() {
         .to_sql()
         .unwrap();
     assert!(sql.sql().contains("JSON_EXTRACT"), "got {}", sql.sql());
+}
+
+/// MySQL only matches through a `FULLTEXT` index over exactly the columns named, so the
+/// index is part of the set-up rather than something the expression can imply.
+#[tokio::test]
+async fn full_text_match() {
+    let db = setup("besu_test_full_text").await;
+    db.execute(sql!(
+        "ALTER TABLE posts ADD FULLTEXT INDEX posts_title_fts (title)"
+    ))
+    .await
+    .unwrap();
+
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+    let author: User = db.select(users).await.unwrap().remove(0);
+    for title in ["Rust ownership and borrowing", "Gardening in spring"] {
+        db.insert(posts)
+            .value(posts.insert(title, author.id))
+            .await
+            .unwrap();
+    }
+
+    let found: Vec<Post> = db
+        .select(posts)
+        .filter(posts.title.matches("borrowing"))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].title, "Rust ownership and borrowing");
+
+    // An unrelated word matches nothing, which is what a boolean-mode match promises.
+    let unrelated: Vec<Post> = db
+        .select(posts)
+        .filter(matches(posts.title, "compiler"))
+        .await
+        .unwrap();
+    assert!(unrelated.is_empty());
+}
+
+#[tokio::test]
+async fn full_text_sql() {
+    let db = besu::dry::<besu_mysql::MySql>();
+    let sql = db
+        .select(posts)
+        .filter(posts.title.matches("rust"))
+        .to_sql()
+        .unwrap();
+
+    // MySQL has no `RETURNING` and no cache-key suffix, so the statement is exactly one
+    // placeholder and no trailing comment.
+    assert_eq!(
+        sql.sql(),
+        "SELECT `posts`.`id`, `posts`.`title`, `posts`.`author_id` FROM `posts` \
+         WHERE MATCH(`posts`.`title`) AGAINST (? IN BOOLEAN MODE)"
+    );
+    assert_eq!(sql.args(), [Value::Text("rust".into())]);
 }

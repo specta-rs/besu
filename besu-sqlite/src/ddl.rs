@@ -1,5 +1,5 @@
 use besu_core::{TypeDef, Value};
-use besu_schema::{Change, Column, Ddl, Schema, Table};
+use besu_schema::{Change, Check, Column, Ddl, Schema, Table};
 
 use crate::SQLite;
 
@@ -61,9 +61,9 @@ impl SQLiteDdl {
             self.quote(&desired.name),
         ));
 
-        // `DROP TABLE` took the old indexes with it. Unique column constraints and
-        // multi-column uniques are inline in `CREATE TABLE`; the secondary ones have to be
-        // recreated here.
+        // `DROP TABLE` took the old indexes with it. Unique column constraints, multi-column
+        // uniques, checks and foreign keys are inline in `CREATE TABLE`; the secondary
+        // indexes have to be recreated here.
         for index in &desired.indexes {
             statements.push(self.create_index(&desired.qualified_name(), index));
         }
@@ -102,6 +102,8 @@ impl Ddl for SQLiteDdl {
         // declares `i32`, `VARCHAR(20)` or `TIMESTAMPTZ` converge against the database.
         match ty {
             TypeDef::Int2 | TypeDef::Int4 | TypeDef::Int8 => TypeDef::Int8,
+            // A 128-bit value is stored as decimal text, so it converges against `TEXT`.
+            TypeDef::UInt(128) => TypeDef::Text,
             TypeDef::UInt(_) => TypeDef::Int8,
             TypeDef::Char(_) | TypeDef::VarChar(_) | TypeDef::Decimal(_, _) => TypeDef::Text,
             TypeDef::Jsonb => TypeDef::Json,
@@ -214,6 +216,18 @@ impl Ddl for SQLiteDdl {
         String::new()
     }
 
+    fn add_check(&self, _table: &str, _check: &Check) -> String {
+        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`; a check can only be written inside
+        // `CREATE TABLE`, so adding one to an existing table means rebuilding it. `push` does
+        // not rebuild for this change, so the statement is empty.
+        String::new()
+    }
+
+    fn drop_check(&self, _table: &str, _check: &Check) -> String {
+        // See `add_check`: dropping a check would need the same rebuild.
+        String::new()
+    }
+
     fn literal(&self, value: &Value) -> String {
         match value {
             Value::Null => "NULL".into(),
@@ -249,6 +263,7 @@ mod tests {
                 columns: vec!["user_id".into()],
             }],
             foreign_keys: Vec::new(),
+            checks: Vec::new(),
             comment: None,
         }
     }

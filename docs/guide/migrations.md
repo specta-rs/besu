@@ -12,6 +12,7 @@ drift between the two impossible to miss.
 pub struct Schema {
     pub tables: Vec<Table>,
     pub enums: Vec<Enum>,
+    pub views: Vec<View>,          // round-tripped for `besu pull`, never diffed
 }
 
 pub struct Table {
@@ -21,12 +22,30 @@ pub struct Table {
     pub indexes: Vec<Index>,
     pub uniques: Vec<Unique>,      // multi-column UNIQUE constraints
     pub foreign_keys: Vec<ForeignKey>,
+    pub checks: Vec<Check>,        // CHECK constraints
     pub comment: Option<String>,
 }
 
 pub struct Unique {
     pub name: String,
     pub columns: Vec<String>,
+}
+
+pub struct Index {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub predicate: Option<String>, // the WHERE clause of a partial index
+}
+
+pub struct Check {
+    pub name: String,
+    pub expression: String,        // the expression inside CHECK (...)
+}
+
+pub struct View {
+    pub name: String,
+    pub definition: String,        // the dialect's own SELECT, verbatim
 }
 
 pub struct Enum {
@@ -49,7 +68,8 @@ pub struct Column {
 A table's identity is `(schema, name)`, so two tables called `users` in different schemas are
 two tables, and `Schema::find(schema, name)` is how the differ pairs them up. A single-column
 `UNIQUE` stays on `Column::unique`; a multi-column one is a `Unique`, because it is a
-constraint the database owns rather than an index Besu can drop.
+constraint the database owns rather than an index Besu can drop. A `CHECK` is a `Check` for the
+same reason.
 
 Three things produce a `Schema`:
 
@@ -66,14 +86,16 @@ snapshot on disk  ─┘
 ```
 
 Ordering is deterministic on purpose. `Schema::sort()` sorts tables by schema and name, sorts
-enums by name, and normalises each table (primary-key columns first, indexes, uniques and
-foreign keys sorted by name), and `topological_order()` returns tables after the tables they
-reference. That means two equivalent schemas produce the same DDL and the same JSON, which is
-what makes snapshots reviewable.
+enums and views by name, and normalises each table (primary-key columns first, indexes,
+uniques, foreign keys and checks sorted by name), and `topological_order()` returns tables
+after the tables they reference. That means two equivalent schemas produce the same DDL and
+the same JSON, which is what makes snapshots reviewable.
 
 The diff's application order is fixed too: `CREATE TYPE` before the `CREATE TABLE` that uses
-the type, additive changes before destructive ones, and `DROP TYPE` after the last table that
-used it.
+the type; columns, indexes and constraints inside a table; then the destructive tail. Within a
+table, an object whose definition changed is *dropped before it is added again*, because both
+statements use the same name and the database will not accept the second copy. Checks are
+dropped before the columns they name, and `DROP TYPE` follows the last table that used it.
 
 ### Normalisation matters
 
@@ -83,9 +105,9 @@ collapses several canonical types therefore supplies its own folding:
 
 | Dialect | Folds |
 | --- | --- |
-| SQLite | `Int2`/`Int4`/`Int8` and every `UInt` → `Int8`; `Char`/`VarChar` → `Text`; `Jsonb` → `Json`; `TimestampTz` → `Timestamp`; `TimeTz` → `Time` |
-| PostgreSQL | `UInt(8)` → `Int2`; `UInt(16)` → `Int4`; `UInt(32)` → `Int8`; `UInt(64)` → `Decimal(20, 0)` |
-| MySQL | `TimeTz` → `Time` — otherwise nothing, it stores the declared types faithfully |
+| SQLite | `Int2`/`Int4`/`Int8` and `UInt` below 128 bits → `Int8`; `UInt(128)` → `Text`; `Char`/`VarChar`/`Decimal` → `Text`; `Jsonb` → `Json`; `TimestampTz` → `Timestamp`; `TimeTz` → `Time` |
+| PostgreSQL | `UInt(8)` → `Int2`; `UInt(16)` → `Int4`; `UInt(32)` → `Int8`; `UInt(64)` → `Decimal(20, 0)`; `UInt(128)` → `Decimal(39, 0)` |
+| MySQL | `TimeTz` → `Time`; `UInt(128)` → `Decimal(39, 0)` — otherwise nothing, it stores the declared types faithfully |
 
 So on SQLite, changing an `i32` field to `i64`, or a `VARCHAR(50)` to `TEXT`, is not reported
 as a change. On PostgreSQL, changing `u8` to `i16` is invisible because both are stored as
@@ -145,6 +167,7 @@ Every `Change` carries a `Safety` level:
 | `AddIndex` | Risky | Rewrites data, but is reversible |
 | `AddUnique` | Risky | Validates existing rows |
 | `AddForeignKey` | Risky | Validates existing rows |
+| `AddCheck` | Risky | Validates existing rows |
 | `AddEnumValue` | Risky | Appending cannot break a row, but rewrites the type |
 | `AlterColumn` (same type/nullable/default/auto-increment) | Safe | Metadata-only |
 | `AlterColumn` (anything else) | Risky | Rewrites the column |
@@ -152,6 +175,7 @@ Every `Change` carries a `Safety` level:
 | `DropColumn` | Destructive | Loses data |
 | `DropIndex` | Destructive | Loses an index (and possibly uniqueness) |
 | `DropUnique` | Destructive | Loses a uniqueness guarantee |
+| `DropCheck` | Destructive | Loses a validation rule new rows must satisfy |
 | `DropTable` | Destructive | Loses data |
 | `DropEnum` | Destructive | Nothing can read a row still holding the type |
 | `RemoveEnumValue` | Destructive | Rows holding that value can no longer be read |
@@ -184,7 +208,7 @@ A dialect that can do neither returns `false` from `can_alter_column`, and `push
 rather than falling back to the portable default `alter_column`, which is a `DROP COLUMN`
 followed by an `ADD COLUMN` and loses the column's data.
 
-### Enums, uniques and schemas
+### Enums, uniques, checks and schemas
 
 **Enums.** Only PostgreSQL has named types that are not part of a column. `Ddl::create_enum`,
 `drop_enum` and `add_enum_value` render `CREATE TYPE ... AS ENUM`, `DROP TYPE` and
@@ -221,6 +245,50 @@ An enum type is only dropped when a column uses it in the current schema and no 
 column still names it. A `TableDef` cannot describe an enum, so `push` from table definitions
 never drops types that belong to something else.
 
+**`CHECK` constraints.** A check is `Table::checks`: a name and the boolean expression inside
+`CHECK (...)`. It is written inline in `CREATE TABLE` as
+`CONSTRAINT "name" CHECK (expression)`, added with `ALTER TABLE ... ADD CONSTRAINT` and
+removed with `ALTER TABLE ... DROP CONSTRAINT`. SQLite has no `ALTER TABLE ... ADD CONSTRAINT`,
+so it only writes checks inside `CREATE TABLE`, like uniques and foreign keys.
+
+PostgreSQL stores `CHECK (value > 0)` as `(value > 0)`, and PostgreSQL 17 also lists `NOT
+NULL` constraints as `CHECK` in `information_schema`; introspection reads `pg_constraint`
+(`contype = 'c'`), so only real checks are reported, and `normalise_expression` strips pairs
+of parentheses that wrap the whole expression. A snapshot that says `value > 0` therefore
+converges against the database instead of being dropped and added on every push.
+
+A `TableDef` cannot express a check. That means a check written by hand is seen by the
+differ but is not declared by your Rust code, and `push` reports the difference as a
+`DropCheck`. Dropping a check is `Destructive`, exactly like dropping a composite `UNIQUE`, so
+`push` refuses and you either add the check to a snapshot or run `push_destructive`.
+
+**Partial indexes.** `Index::predicate` carries the `WHERE` clause of a partial index and it
+is rendered as `CREATE INDEX ... WHERE predicate`. Only PostgreSQL has them; introspection
+reads `pg_index.indpred` back through `pg_get_expr`. SQLite has partial indexes but the IR
+does not read the predicate out of its catalog, so its introspection skips a partial index
+rather than reporting it as a full one, and MySQL has none at all.
+
+### What the differ deliberately ignores
+
+An object the IR cannot describe is *skipped* by introspection rather than reported as a
+lossy version of itself. Reporting one would be worse than ignoring it: the differ would see
+a difference between the database and the declared schema, and `push` would drop or replace
+something it does not understand.
+
+| Object | Where | Why |
+| --- | --- | --- |
+| Expression indexes (`lower(email)`) | every driver | An index key is a column name in the IR; a reported index would name the wrong columns and `push` would replace it |
+| Indexes behind a constraint | PostgreSQL | The constraint owns the index and `DROP INDEX` cannot remove it; `UNIQUE` and primary keys are modelled as constraints, and an exclusion constraint is not modelled at all |
+| Exclusion constraints | PostgreSQL | No IR type; its backing index is skipped with it |
+| Partial indexes | SQLite, MySQL | No predicate is introspected, so the index is skipped instead of reported as a full index |
+| `CHECK` constraints | SQLite | They exist only inside the `CREATE TABLE` text; parsing that back is not something the IR can promise to get right. PostgreSQL and MySQL do report them |
+| Triggers | every driver | Never read, never written. A SQLite table rebuild recreates the table and therefore loses a trigger attached to it |
+| Views | every driver | Read into `Schema::views` for `besu pull`, but never diffed: a view is created by a migration, not by the derive |
+
+The consequence is that `push` will not drop any of these. The flip side is that it also
+cannot create or change one; keep them in migration files. A `besu pull` snapshot records
+views so the file names what is really there, but it does not execute them.
+
 ## Generating migration files
 
 For production, do not run `push`; generate SQL files, review them, and apply them in order.
@@ -255,7 +323,7 @@ The generated file starts with a warning worth keeping:
 `generate` does not stop at `Risky` changes: it writes whatever the dialect's `change`
 methods produce. On SQLite that is the table rebuild described above, which is why the
 generated file can be long. It is still for review — a rebuild recreates the table, and any
-trigger attached to it is not modelled (#66).
+trigger or check attached to it is not modelled on SQLite.
 
 ## The migration runner
 
@@ -478,6 +546,8 @@ besu migrate --database postgres://user:pass@host/db --dir migrations --down --t
 | The newest migration has a down file before it is reverted | Runtime, before any statement |
 | A table is created after the tables it references | At DDL generation, via topological order |
 | An enum type exists before a table that uses it, and is dropped after | At DDL generation, by the order of the changes |
+| A replaced index or constraint is dropped before it is created again | At DDL generation, by the order of the changes |
+| A view is never created or dropped by `push` | The differ ignores `Schema::views` |
 
 ## Gotchas
 
@@ -493,7 +563,9 @@ besu migrate --database postgres://user:pass@host/db --dir migrations --down --t
   their signed storage. MySQL detects the change. Check `Ddl::normalise_type` for the
   dialect you are using.
 - **SQLite rebuilds by dropping and recreating.** A type or nullability change recreates the
-  table, so a trigger attached to it is lost (#66). Rows are copied, so the data survives.
+  table, so a trigger attached to it is lost, and so is any `CHECK` constraint (SQLite's
+  catalog does not expose one, so it is not in the desired schema the rebuild writes). Rows are
+  copied, so the data survives.
 - **`generate` writes statements, not judgements.** It emits whatever the dialect would do,
   warning where a change loses data. Read the file.
 - **The CLI and `push` agree about types.** Both call `Ddl::normalise_type` for the target
@@ -522,5 +594,13 @@ besu migrate --database postgres://user:pass@host/db --dir migrations --down --t
   database's types alone apart from dropping one that a column used to use. Use a snapshot
   (`besu pull` / `Schema::load`) when you want the diff to own the list.
 - **SQLite cannot add a constraint to an existing table.** Adding or dropping a composite
-  `UNIQUE` on SQLite reports the change and emits no statement; only a `CREATE TABLE` (or a
-  table rebuild caused by an `AlterColumn`) writes one.
+  `UNIQUE` or a `CHECK` on SQLite reports the change and emits no statement; only a `CREATE
+  TABLE` (or a table rebuild caused by an `AlterColumn`) writes one.
+- **A check or a partial index cannot be declared in Rust.** `TableDef` has no attribute for a
+  `CHECK`, an index predicate or a view, so these are populated by a snapshot (`besu pull`)
+  rather than by `#[derive(Table)]`. Pushing table definitions against a table that has a
+  hand-written check refuses, because the check is not declared and dropping it is
+  destructive; use a snapshot, or accept `push_destructive`.
+- **An expression index is invisible.** The IR names columns, so an index on `lower(email)` is
+  skipped by every driver's introspection. `push` will neither create nor drop one, and a
+  `besu pull` snapshot does not mention it.

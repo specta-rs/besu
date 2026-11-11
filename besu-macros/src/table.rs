@@ -352,7 +352,8 @@ impl Column {
                     err.span(),
                     format!(
                         "besu: `{}` is not a supported column type. Supported types are signed \
-                     and unsigned integers, f32/f64, bool, String, Vec<u8>, uuid::Uuid, \
+                     and unsigned integers (including u128 and i128), f32/f64, bool, String, \
+                     Vec<u8>, uuid::Uuid, \
                      chrono::NaiveDate/NaiveTime/NaiveDateTime/DateTime<Utc> and \
                      serde_json::Value, each optionally wrapped in Option.",
                         quote!(#inner)
@@ -445,6 +446,8 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
         "u16" => (quote!(#besu::UInt2), quote!(#besu::TypeDef::UInt(16))),
         "u32" => (quote!(#besu::UInt4), quote!(#besu::TypeDef::UInt(32))),
         "u64" => (quote!(#besu::UInt8), quote!(#besu::TypeDef::UInt(64))),
+        "u128" => (quote!(#besu::U128), quote!(#besu::TypeDef::UInt(128))),
+        "i128" => (quote!(#besu::I128), quote!(#besu::TypeDef::Decimal(39, 0))),
         "f32" => (quote!(#besu::Float4), quote!(#besu::TypeDef::Float4)),
         "f64" => (quote!(#besu::Float8), quote!(#besu::TypeDef::Float8)),
         "bool" => (quote!(#besu::Bool), quote!(#besu::TypeDef::Bool)),

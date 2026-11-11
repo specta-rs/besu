@@ -19,6 +19,17 @@ pub enum Value {
     /// `i64`; smaller unsigned values are normalised to [`Value::Int`] so that dialects
     /// with a single integer type behave predictably.
     UInt(u64),
+    /// An unsigned 128-bit integer.
+    ///
+    /// This is always used for a `u128`, even when the value fits in a `u64`, for the same
+    /// reason [`Value::UInt`] is always used for a `u64`: a column has one SQL type, and a
+    /// prepared statement must not receive two different parameter types for the same SQL.
+    UInt128(u128),
+    /// A signed 128-bit integer.
+    ///
+    /// This is always used for an `i128`, even when the value fits in an `i64`, so that a
+    /// prepared statement sees one parameter type for the column.
+    Int128(i128),
     /// A 64-bit float.
     Float(f64),
     /// UTF-8 text.
@@ -57,6 +68,8 @@ impl Value {
                     Value::Bool(v) => write!(f, "{}", if *v { "TRUE" } else { "FALSE" }),
                     Value::Int(v) => write!(f, "{v}"),
                     Value::UInt(v) => write!(f, "{v}"),
+                    Value::UInt128(v) => write!(f, "{v}"),
+                    Value::Int128(v) => write!(f, "{v}"),
                     Value::Float(v) => write!(f, "{v}"),
                     Value::Text(v) => write!(f, "'{}'", v.escape_debug()),
                     Value::Bytes(v) => {
@@ -107,6 +120,20 @@ impl From<u64> for Value {
         // `INT8` for small values and `NUMERIC` for large ones would hand the same statement
         // two different parameter types.
         Self::UInt(value)
+    }
+}
+
+impl From<u128> for Value {
+    fn from(value: u128) -> Self {
+        // Always `UInt128`, for the same prepared-statement reason as `u64`.
+        Self::UInt128(value)
+    }
+}
+
+impl From<i128> for Value {
+    fn from(value: i128) -> Self {
+        // Always `Int128`, for the same prepared-statement reason as `u64`.
+        Self::Int128(value)
     }
 }
 

@@ -33,8 +33,12 @@ impl UpdateQuery {
         }
     }
 
-    pub(crate) fn build<D: besu_core::Dialect>(&self) -> besu_core::Sql<D> {
+    pub(crate) fn build<D: besu_core::Dialect>(
+        &self,
+        prefix: Option<alloc::sync::Arc<str>>,
+    ) -> besu_core::Sql<D> {
         let mut out = besu_core::Sql::new();
+        out.set_table_prefix(prefix);
 
         if self.sets.is_empty() {
             out.set_error(Error::invalid_query(
@@ -199,7 +203,7 @@ impl<'a, E: Executor, T, const SAFE: bool> Update<'a, E, T, SAFE> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build().seal())
+        Ok(self.query.build(self.exec.table_prefix()).seal())
     }
 }
 
@@ -231,10 +235,11 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            let prefix = self.exec.table_prefix();
             let mut exec = self.exec;
             let sql = self
                 .query
-                .build::<DialectOf<E>>()
+                .build::<DialectOf<E>>(prefix)
                 .finish()
                 .map_err(<E::Driver as Driver>::error)?;
             exec.execute(&sql).await
@@ -260,10 +265,11 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            let prefix = self.exec.table_prefix();
             let mut exec = self.exec;
             let sql = self
                 .query
-                .build::<DialectOf<E>>()
+                .build::<DialectOf<E>>(prefix)
                 .finish()
                 .map_err(<E::Driver as Driver>::error)?;
             let rows = exec.query(&sql).await?;

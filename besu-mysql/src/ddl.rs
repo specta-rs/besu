@@ -70,6 +70,9 @@ impl Ddl for MySqlDdl {
         // declaring `TIMETZ` must compare equal to the `TIME` the database reports back.
         match ty {
             TypeDef::TimeTz => TypeDef::Time,
+            // `u128` is `DECIMAL(39,0)`, which is indistinguishable from a
+            // `Decimal(39, 0)`; an `i128` is declared as that already.
+            TypeDef::UInt(128) => TypeDef::Decimal(39, 0),
             other => other.clone(),
         }
     }
@@ -198,8 +201,17 @@ impl Ddl for MySqlDdl {
             sql.push_str(&self.unique_clause(unique));
         }
 
+        // `CHECK` constraints. MySQL 8.0.16 and later enforce them; an older server parses
+        // and ignores the clause.
+        for check in &table.checks {
+            sql.push_str(", ");
+            sql.push_str(&self.check_clause(check));
+        }
+
         // Secondary indexes are inlined here because `create_schema` only runs
         // `CREATE TABLE`, and MySQL has no `CREATE INDEX` clause inside `ALTER TABLE`.
+        // MySQL has no partial indexes, so `Index::predicate` cannot be rendered and is
+        // ignored; introspection never produces one.
         for index in &table.indexes {
             sql.push_str(", ");
             if index.unique {
@@ -270,6 +282,8 @@ impl Ddl for MySqlDdl {
             Change::DropForeignKey { table, foreign_key } => {
                 vec![self.drop_foreign_key(table, foreign_key)]
             }
+            Change::AddCheck { table, check } => vec![self.add_check(table, check)],
+            Change::DropCheck { table, check } => vec![self.drop_check(table, check)],
             // MySQL has no named enum types (an enum is spelled inline in the column) and
             // SQLite has none either, so the enum changes render as nothing.
             _ => Vec::new(),
@@ -303,6 +317,7 @@ mod tests {
                 columns: vec!["user_id".into()],
             }],
             foreign_keys: Vec::new(),
+            checks: Vec::new(),
             comment: None,
         }
     }

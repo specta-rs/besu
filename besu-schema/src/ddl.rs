@@ -1,7 +1,7 @@
 use besu_core::{TypeDef, Value};
 
 use crate::{
-    Column, Enum, ForeignKey, Index, ReferenceAction, Schema, Table, Unique, diff::Change,
+    Check, Column, Enum, ForeignKey, Index, ReferenceAction, Schema, Table, Unique, diff::Change,
 };
 
 /// Render a schema as DDL for a particular database.
@@ -50,6 +50,8 @@ pub trait Ddl {
             Value::Bool(v) => if *v { "TRUE" } else { "FALSE" }.into(),
             Value::Int(v) => v.to_string(),
             Value::UInt(v) => v.to_string(),
+            Value::UInt128(v) => v.to_string(),
+            Value::Int128(v) => v.to_string(),
             Value::Float(v) => v.to_string(),
             Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
             other => format!("{other:?}"),
@@ -87,6 +89,11 @@ pub trait Ddl {
         for unique in &table.uniques {
             sql.push_str(", ");
             sql.push_str(&self.unique_clause(unique));
+        }
+
+        for check in &table.checks {
+            sql.push_str(", ");
+            sql.push_str(&self.check_clause(check));
         }
 
         for fk in &table.foreign_keys {
@@ -178,6 +185,10 @@ pub trait Ddl {
             sql.push_str(&self.quote(column));
         }
         sql.push(')');
+        if let Some(predicate) = &index.predicate {
+            sql.push_str(" WHERE ");
+            sql.push_str(predicate);
+        }
         sql
     }
 
@@ -216,6 +227,38 @@ pub trait Ddl {
             "ALTER TABLE {} DROP CONSTRAINT {}",
             self.quote_table(table),
             self.quote(&unique.name)
+        )
+    }
+
+    /// The `CHECK` clause used inside `CREATE TABLE`.
+    fn check_clause(&self, check: &Check) -> String {
+        format!(
+            "CONSTRAINT {} CHECK ({})",
+            self.quote(&check.name),
+            check.expression
+        )
+    }
+
+    /// `ALTER TABLE ... ADD CONSTRAINT ... CHECK`.
+    ///
+    /// SQLite has no such statement, so it renders checks inside `CREATE TABLE` only and
+    /// returns no statement here, exactly as it does for uniques and foreign keys.
+    fn add_check(&self, table: &str, check: &Check) -> String {
+        format!(
+            "ALTER TABLE {} ADD {}",
+            self.quote_table(table),
+            self.check_clause(check)
+        )
+    }
+
+    /// `ALTER TABLE ... DROP CONSTRAINT`.
+    ///
+    /// Like [`Ddl::add_check`], SQLite returns no statement.
+    fn drop_check(&self, table: &str, check: &Check) -> String {
+        format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.quote_table(table),
+            self.quote(&check.name)
         )
     }
 
@@ -334,6 +377,8 @@ pub trait Ddl {
             Change::DropForeignKey { table, foreign_key } => {
                 vec![self.drop_foreign_key(table, foreign_key)]
             }
+            Change::AddCheck { table, check } => vec![self.add_check(table, check)],
+            Change::DropCheck { table, check } => vec![self.drop_check(table, check)],
         }
     }
 

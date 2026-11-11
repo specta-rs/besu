@@ -1,4 +1,4 @@
-use alloc::{borrow::Cow, fmt, string::String, vec::Vec};
+use alloc::{borrow::Cow, fmt, string::String, sync::Arc, vec::Vec};
 
 use crate::{Dialect, Error, Value};
 
@@ -36,6 +36,13 @@ pub struct Sql<D: Dialect> {
     sql: Cow<'static, str>,
     args: Vec<D::Value>,
     error: Option<Error>,
+    /// A prefix applied to every table name this statement mentions.
+    ///
+    /// Multi-tenant deployments that share one physical database often name tables
+    /// `tenant_42_users`. The prefix lives here rather than in the query builder because
+    /// every table name — in a `FROM`, a `JOIN`, or a qualified column reference — is written
+    /// through this type, which makes it the one place that can apply it consistently.
+    prefix: Option<Arc<str>>,
 }
 
 impl<D: Dialect> Default for Sql<D> {
@@ -50,6 +57,7 @@ impl<D: Dialect> Clone for Sql<D> {
             sql: self.sql.clone(),
             args: self.args.clone(),
             error: self.error.clone(),
+            prefix: self.prefix.clone(),
         }
     }
 }
@@ -75,6 +83,7 @@ impl<D: Dialect> Sql<D> {
             sql: Cow::Borrowed(""),
             args: Vec::new(),
             error: None,
+            prefix: None,
         }
     }
 
@@ -85,6 +94,29 @@ impl<D: Dialect> Sql<D> {
             sql: sql.into(),
             args: Vec::new(),
             error: None,
+            prefix: None,
+        }
+    }
+
+    /// Apply `prefix` to every table name this statement will write.
+    pub fn set_table_prefix(&mut self, prefix: Option<Arc<str>>) {
+        self.prefix = prefix;
+    }
+
+    /// The prefix applied to table names, if any.
+    pub fn table_prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
+    }
+
+    /// Write a table name, prefixed and schema-qualified.
+    pub fn push_table(&mut self, schema: Option<&str>, table: &str) {
+        if let Some(schema) = schema {
+            self.push_raw(&D::quote(schema));
+            self.push_raw(".");
+        }
+        match &self.prefix {
+            Some(prefix) => self.push_raw(&D::quote(&alloc::format!("{prefix}{table}"))),
+            None => self.push_raw(&D::quote(table)),
         }
     }
 
@@ -119,11 +151,20 @@ impl<D: Dialect> Sql<D> {
 
     /// Append a quoted, schema-qualified identifier.
     pub fn push_qualified(&mut self, table: &str, column: &str) {
-        {
-            let out = self.sql.to_mut();
-            D::write_ident(out, table);
-            out.push('.');
-            D::write_ident(out, column);
+        match &self.prefix {
+            Some(prefix) => {
+                let prefixed = alloc::format!("{prefix}{table}");
+                let out = self.sql.to_mut();
+                D::write_ident(out, &prefixed);
+                out.push('.');
+                D::write_ident(out, column);
+            }
+            None => {
+                let out = self.sql.to_mut();
+                D::write_ident(out, table);
+                out.push('.');
+                D::write_ident(out, column);
+            }
         }
     }
 

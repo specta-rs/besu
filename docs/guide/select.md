@@ -98,6 +98,47 @@ Each dialect renders this its own way — `#>> '{user,name}'` on PostgreSQL, `->
 on SQLite, `JSON_UNQUOTE(JSON_EXTRACT(..))` on MySQL — but the call site is the same. Keys
 containing a dot are not expressible; drop to `raw` for those.
 
+## Full-text search
+
+`matches` searches a column's text, and `posts.title.matches("rust")` is the method form:
+
+```rust
+db.select(posts)
+    .filter(posts.title.matches("rust"))
+    .await?;
+```
+
+The search text is bound as a parameter, so untrusted input never becomes SQL, and each
+database parses it with its own search grammar. Every dialect spells the match differently:
+
+| Dialect | Rendered |
+| --- | --- |
+| PostgreSQL | `to_tsvector('english', col) @@ plainto_tsquery('english', $1)` |
+| MySQL | `MATCH(col) AGAINST ($1 IN BOOLEAN MODE)` |
+| SQLite | `col MATCH $1` |
+
+The differences go beyond spelling, so what the schema needs differs too:
+
+- **PostgreSQL** needs nothing. `to_tsvector` builds the vector for each row, so the query is
+  correct without an index and only slow; add an expression index if it matters.
+- **MySQL** requires a `FULLTEXT` index over exactly the columns the expression names. The
+  schema layer cannot declare one, so add it yourself:
+  `db.execute(sql!("ALTER TABLE posts ADD FULLTEXT INDEX posts_title_fts (title)"))`.
+- **SQLite** matches an FTS5 virtual table, which the schema layer cannot create either.
+  Create it with `sql!("CREATE VIRTUAL TABLE documents USING fts5(body)")` and query it
+  through an ordinary table handle.
+
+Using `matches` against SQLite's ordinary table is an error from the database — `MATCH` is a
+property of the FTS5 table, not a function.
+
+The search is a word match, not a substring one, and query syntax belongs to the database:
+`"brown fox"` is a phrase search on SQLite, `+rust` requires a token on MySQL, and PostgreSQL
+understands the `english` dictionary's operators.
+
+PostgreSQL's text search configuration is fixed at `english` for now, which is why `borrow`
+finds `borrowing`; a parameter for it, along with ranking and highlighting, is the rest of
+[#57](https://github.com/specta-rs/besu/issues/57).
+
 ## Ordering
 
 ```rust
@@ -480,6 +521,9 @@ for humans, never for execution.
 - **Grouping is not checked.** SQL requires every non-aggregated projection column to be
   grouped; Besu does not. The database will reject the query, not the compiler.
 - **`sum` is a float.** `pick(sum(users.age))` is `Vec<f64>`, not `Vec<i32>`.
+- **`matches` is not type-checked against the column.** Any expression is accepted, because
+  `TEXT`, `VARCHAR(n)` and a hand-declared FTS5 table are all plausible, so matching an
+  integer column fails in the database rather than the compiler.
 - **MySQL's `CAST` grammar is narrower than the renderer's.** `cast::<besu::Text>()` emits
   `CAST(x AS TEXT)`, which MySQL rejects; MySQL only accepts targets such as `CHAR`,
   `SIGNED`, `DECIMAL` and `DATETIME`. The cast is fine on SQLite and PostgreSQL, or write the

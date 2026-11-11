@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use besu_core::dialect::FullTextStyle;
 use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The MySQL dialect.
@@ -45,6 +46,10 @@ impl Dialect for MySql {
     const UNBOUNDED_LIMIT: i64 = i64::MAX;
 
     const JSON_PATH: JsonPathStyle = JsonPathStyle::Mysql;
+
+    /// MySQL has exactly one match spelling, and it needs a `FULLTEXT` index over the column
+    /// it names; the schema is the caller's to declare.
+    const FULL_TEXT: FullTextStyle = FullTextStyle::Mysql;
     const UPSERT: UpsertStyle = UpsertStyle::OnDuplicateKey;
 
     /// MySQL can hold every value Besu models, including unsigned 64-bit integers, so
@@ -87,6 +92,9 @@ impl Dialect for MySql {
                     8 => "TINYINT UNSIGNED",
                     16 => "SMALLINT UNSIGNED",
                     32 => "INT UNSIGNED",
+                    // `BIGINT UNSIGNED` stops at `u64::MAX`; a 128-bit value needs an exact
+                    // decimal, and `DECIMAL(39,0)` holds every `u128`.
+                    128 => "DECIMAL(39,0)",
                     _ => "BIGINT UNSIGNED",
                 },
                 TypeDef::Float4 => "FLOAT",

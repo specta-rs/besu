@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use besu_core::dialect::FullTextStyle;
 use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The PostgreSQL dialect.
@@ -22,6 +23,10 @@ impl Dialect for Postgres {
     const SUPPORTS_DEFAULT_IN_VALUES: bool = true;
     const MAX_PARAMS: usize = 65_535;
     const JSON_PATH: JsonPathStyle = JsonPathStyle::Postgres;
+
+    /// A match is a `tsquery` against a `tsvector`, and both are built for the same text
+    /// search configuration so the document and the query are normalised identically.
+    const FULL_TEXT: FullTextStyle = FullTextStyle::Postgres;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
 
     /// Encode the bound values' shapes so the prepared-statement cache cannot confuse two
@@ -44,6 +49,8 @@ impl Dialect for Postgres {
                 Value::Bool(_) => 'b',
                 Value::Int(_) => 'i',
                 Value::UInt(_) => 'u',
+                Value::UInt128(_) => 'U',
+                Value::Int128(_) => 'I',
                 Value::Float(_) => 'f',
                 Value::Text(_) => 't',
                 Value::Bytes(_) => 'x',
@@ -80,7 +87,10 @@ impl Dialect for Postgres {
             TypeDef::UInt(8) => Cow::Borrowed("SMALLINT"),
             TypeDef::UInt(16) => Cow::Borrowed("INTEGER"),
             TypeDef::UInt(32) => Cow::Borrowed("BIGINT"),
-            // `NUMERIC(20,0)` is the smallest native type that holds every `u64`.
+            // `NUMERIC(20,0)` is the smallest native type that holds every `u64`, and
+            // `NUMERIC(39,0)` every `u128`.
+            TypeDef::UInt(64) => Cow::Borrowed("NUMERIC(20,0)"),
+            TypeDef::UInt(128) => Cow::Borrowed("NUMERIC(39,0)"),
             TypeDef::UInt(_) => Cow::Borrowed("NUMERIC(20,0)"),
             TypeDef::Float4 => Cow::Borrowed("REAL"),
             TypeDef::Float8 => Cow::Borrowed("DOUBLE PRECISION"),

@@ -1,5 +1,5 @@
 use besu_core::{TypeDef, schema::ReferenceAction};
-use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique};
+use besu_schema::{Check, Column, ForeignKey, Index, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
@@ -7,6 +7,11 @@ use crate::Sqlx;
 ///
 /// The result is exactly what [`besu::Database::push`] compares against, so pushing a
 /// schema that already exists produces no statements.
+///
+/// Functional (expression) indexes are skipped as a whole, because the IR can only name
+/// columns and reporting the remaining key parts would describe an index that does not
+/// exist. Views are read into [`Schema::views`] for `besu pull`; the differ ignores them, so
+/// `push` never creates or drops one. Triggers are not read at all.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let tables = db
         .execute(besu::sql!(
@@ -22,8 +27,30 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
     for (name,) in tables {
         schema.tables.push(introspect_table(db, name).await?);
     }
+    schema.views = introspect_views(db).await?;
     schema.sort();
     Ok(schema)
+}
+
+async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+             WHERE TABLE_SCHEMA = DATABASE() \
+             ORDER BY TABLE_NAME"
+        ))
+        .all::<(String, Option<String>)>()
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(name, definition)| {
+            Some(View {
+                name,
+                definition: definition?,
+            })
+        })
+        .collect())
 }
 
 /// A `SELECT` against `information_schema` filtered to one table.
@@ -36,6 +63,8 @@ struct RawIndex {
     name: String,
     columns: Vec<String>,
     unique: bool,
+    /// Whether any key part is an expression rather than a column.
+    expression: bool,
 }
 
 async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Table, sqlx::Error> {
@@ -87,6 +116,21 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         .all::<(String, String, String, String, String, String)>()
         .await?;
 
+    let checks = db
+        .execute(table_query(
+            "SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE \
+             FROM information_schema.TABLE_CONSTRAINTS tc \
+             JOIN information_schema.CHECK_CONSTRAINTS cc \
+               ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+              AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+             WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? \
+               AND tc.CONSTRAINT_TYPE = 'CHECK' \
+             ORDER BY cc.CONSTRAINT_NAME",
+            &name,
+        ))
+        .all::<(String, String)>()
+        .await?;
+
     let mut table = Table {
         name: name.clone(),
         schema: None,
@@ -112,6 +156,16 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         indexes: Vec::new(),
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
+        // MySQL spells a check expression with backticks (`(`v` > 0)`), which is what a
+        // snapshot round-trips verbatim; the surrounding parentheses are folded away so a
+        // check declared without them compares equal.
+        checks: checks
+            .into_iter()
+            .map(|(name, expression)| Check {
+                name,
+                expression: besu_schema::normalise_expression(&expression),
+            })
+            .collect(),
         comment: None,
     };
 
@@ -119,18 +173,17 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
 
     let mut indexes: Vec<RawIndex> = Vec::new();
     for (index_name, column_name, non_unique) in statistics {
-        let Some(column_name) = column_name else {
-            // A functional index has an expression instead of a column, which Besu cannot
-            // model, so it is skipped rather than reported as a change every push.
-            continue;
-        };
-
+        let expression = column_name.is_none();
         match indexes.iter_mut().find(|index| index.name == index_name) {
-            Some(index) => index.columns.push(column_name),
+            Some(index) => match column_name {
+                Some(column_name) => index.columns.push(column_name),
+                None => index.expression = true,
+            },
             None => indexes.push(RawIndex {
-                columns: vec![column_name],
+                columns: column_name.into_iter().collect(),
                 name: index_name,
                 unique: non_unique == 0,
+                expression,
             }),
         }
     }
@@ -152,6 +205,13 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     }
 
     for index in indexes {
+        // A functional index has an expression where a column would be. Besu cannot model
+        // one, and reporting only its plain key parts would describe an index that does not
+        // exist, so the whole index is skipped rather than reported as a change every push.
+        if index.expression {
+            continue;
+        }
+
         if index.unique && index.columns.len() == 1 && index.name == index.columns[0] {
             continue;
         }
@@ -183,6 +243,8 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
             name: index.name,
             columns: index.columns,
             unique: index.unique,
+            // MySQL has no partial indexes.
+            predicate: None,
         });
     }
 

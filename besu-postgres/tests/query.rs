@@ -537,3 +537,68 @@ async fn json_path_access() {
         .unwrap();
     assert!(sql.sql().contains("#>>"), "got {}", sql.sql());
 }
+
+/// A PostgreSQL match needs no index: `to_tsvector` builds the vector for each row, so a
+/// plain text column is all the set-up there is.
+#[tokio::test]
+async fn full_text_match() {
+    let db = setup().await;
+    let author = db
+        .insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    for title in ["Rust ownership and borrowing", "Gardening in spring"] {
+        db.insert(posts)
+            .value(posts.insert(title, author.id))
+            .await
+            .unwrap();
+    }
+
+    let found: Vec<Post> = db
+        .select(posts)
+        .filter(posts.title.matches("borrowing"))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].title, "Rust ownership and borrowing");
+
+    // An unrelated word matches nothing rather than everything, which is what a `LIKE`
+    // left unanchored would do.
+    let unrelated: Vec<Post> = db
+        .select(posts)
+        .filter(posts.title.matches("compiler"))
+        .await
+        .unwrap();
+    assert!(unrelated.is_empty());
+
+    // The query goes through the same dictionary as the document, so the stem finds the
+    // inflected word: this is a word match, not a substring one.
+    let stemmed: Vec<Post> = db
+        .select(posts)
+        .filter(matches(posts.title, "borrow"))
+        .await
+        .unwrap();
+    assert_eq!(stemmed.len(), 1);
+}
+
+#[tokio::test]
+async fn full_text_sql() {
+    let db = besu::dry::<besu_postgres::Postgres>();
+    let sql = db
+        .select(posts)
+        .filter(posts.title.matches("rust"))
+        .to_sql()
+        .unwrap();
+
+    assert_eq!(
+        sql.sql(),
+        concat!(
+            r#"SELECT "posts"."id", "posts"."title", "posts"."author_id" FROM "posts" WHERE to_tsvector('english', "posts"."title") @@ plainto_tsquery('english', $1)"#,
+            "\n/* besu:t */"
+        )
+    );
+    assert_eq!(sql.args(), [Value::Text("rust".into())]);
+}

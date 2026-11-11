@@ -134,12 +134,29 @@ impl<Dr: SchemaDriver> Database<Dr> {
         self.driver().introspect().await
     }
 
+    /// Apply this database's table prefix to a schema, if it has one.
+    fn with_prefix(&self, schema: &Schema) -> Schema {
+        let Some(prefix) = self.prefix() else {
+            return schema.clone();
+        };
+
+        let mut schema = schema.clone();
+        for table in &mut schema.tables {
+            table.name = alloc::format!("{prefix}{}", table.name);
+            for foreign_key in &mut table.foreign_keys {
+                foreign_key.references_table =
+                    alloc::format!("{prefix}{}", foreign_key.references_table);
+            }
+        }
+        schema
+    }
+
     /// Create every table that does not exist yet, and leave everything else alone.
     pub async fn create_schema(
         &self,
         tables: impl IntoIterator<Item = &'static TableDef>,
     ) -> Result<PushResult, Dr::Error> {
-        let schema = Self::schema(tables);
+        let schema = self.with_prefix(&Self::schema(tables));
         let statements = <Dr::Ddl as Ddl>::create_schema(&Dr::Ddl::default(), &schema);
         self.driver().execute_statements(&statements).await?;
         Ok(PushResult {
@@ -195,9 +212,19 @@ impl<Dr: SchemaDriver> Database<Dr> {
         desired: &Schema,
         allow_destructive: bool,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        let current = self.introspect().await.map_err(SchemaError::Driver)?;
+        let mut current = self.introspect().await.map_err(SchemaError::Driver)?;
+        let desired = self.with_prefix(desired);
+
+        // A shared database holds other tenants' tables. They are not this database's
+        // business, so they are dropped from the comparison rather than reported as a
+        // `DropTable` — which would be refused, and rightly so.
+        if let Some(prefix) = self.prefix() {
+            current
+                .tables
+                .retain(|table| table.name.starts_with(prefix));
+        }
         let ddl = Dr::Ddl::default();
-        let changes = besu_schema::diff_with(&current, desired, &|ty| ddl.normalise_type(ty));
+        let changes = besu_schema::diff_with(&current, &desired, &|ty| ddl.normalise_type(ty));
 
         if !allow_destructive {
             let destructive: Vec<Change> = changes
@@ -222,7 +249,7 @@ impl<Dr: SchemaDriver> Database<Dr> {
         }
 
         let statements =
-            <Dr::Ddl as Ddl>::apply_with(&Dr::Ddl::default(), &changes, &current, desired);
+            <Dr::Ddl as Ddl>::apply_with(&Dr::Ddl::default(), &changes, &current, &desired);
         self.driver()
             .execute_statements(&statements)
             .await
