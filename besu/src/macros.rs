@@ -20,6 +20,23 @@ use besu_core::{Dialect, Error, Sql, Value};
 pub struct Fragment {
     sql: Cow<'static, str>,
     args: Vec<Value>,
+    placeholders: Placeholders,
+}
+
+/// Where a fragment's placeholders came from.
+///
+/// A fragment built by `sql!` spells its parameters `?` and is rewritten for whichever
+/// dialect renders it. A fragment built from a finished [`Sql`] is the opposite: the
+/// placeholders are already numbered and the text may carry a driver-specific suffix, so it
+/// is only valid for the dialect that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Placeholders {
+    /// `?` placeholders, rewritten at render time.
+    Rewrite,
+    /// Already rendered by the named dialect.
+    Rendered(&'static str),
+    /// Two fragments that could not be joined were joined anyway.
+    Mixed,
 }
 
 impl Fragment {
@@ -28,6 +45,7 @@ impl Fragment {
         Self {
             sql: sql.into(),
             args: Vec::new(),
+            placeholders: Placeholders::Rewrite,
         }
     }
 
@@ -36,11 +54,49 @@ impl Fragment {
         Self {
             sql: sql.into(),
             args,
+            placeholders: Placeholders::Rewrite,
         }
     }
 
+    /// Wrap an already-built statement in more SQL.
+    ///
+    /// This is how a typed query is embedded in a statement that has no builder: `EXPLAIN`,
+    /// `INSERT ... SELECT`, `CREATE TABLE ... AS`, or a `WITH` clause written by hand. The
+    /// outer text must not add parameters, because the inner statement's placeholders are
+    /// already numbered; anything the builder bound stays bound, in order.
+    ///
+    /// ```ignore
+    /// let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
+    /// let plan: Vec<String> = db
+    ///     .execute(Fragment::from(sql).wrap("EXPLAIN ", ""))
+    ///     .all()
+    ///     .await?;
+    /// ```
+    pub fn wrap(mut self, prefix: &str, suffix: &str) -> Self {
+        if !prefix.is_empty() || !suffix.is_empty() {
+            let mut text = String::with_capacity(prefix.len() + self.sql.len() + suffix.len());
+            text.push_str(prefix);
+            text.push_str(&self.sql);
+            text.push_str(suffix);
+            self.sql = Cow::Owned(text);
+        }
+        self
+    }
+
     /// Append another fragment.
+    ///
+    /// Both must come from the same place. A fragment whose `?` are still to be rewritten
+    /// cannot be glued to one that is already rendered, because the latter's placeholders are
+    /// numbered and the former's are not; joining them records an error at render time rather
+    /// than producing SQL that happens to parse.
     pub fn push(&mut self, other: Fragment) {
+        self.placeholders = match (&self.placeholders, &other.placeholders) {
+            (Placeholders::Rewrite, Placeholders::Rewrite) => Placeholders::Rewrite,
+            (Placeholders::Rendered(a), Placeholders::Rendered(b)) if a == b => {
+                Placeholders::Rendered(a)
+            }
+            _ => Placeholders::Mixed,
+        };
         self.sql.to_mut().push_str(&other.sql);
         self.args.extend(other.args);
     }
@@ -58,6 +114,38 @@ impl Fragment {
     /// Render for a specific dialect.
     #[track_caller]
     pub fn render<D: Dialect>(&self) -> Sql<D> {
+        // A statement a builder already rendered has its placeholders numbered, so rewriting
+        // them would corrupt the text. It is valid only for the dialect that produced it.
+        match self.placeholders {
+            Placeholders::Rendered(name) if name != D::NAME => {
+                let mut out = Sql::<D>::raw(self.sql.clone());
+                out.set_error(Error::unsupported(alloc::format!(
+                    "this statement was rendered for `{name}` and cannot be re-rendered for \
+                     `{}`; build it against a `{}` dialect instead",
+                    D::NAME,
+                    D::NAME
+                )));
+                return out;
+            }
+            Placeholders::Mixed => {
+                let mut out = Sql::<D>::raw(self.sql.clone());
+                out.set_error(Error::unsupported(
+                    "this fragment joins raw SQL with an already-rendered statement, which \
+                     mixes unnumbered and numbered placeholders; build the whole statement \
+                     against one dialect instead",
+                ));
+                return out;
+            }
+            Placeholders::Rendered(_) => {
+                let mut out = Sql::<D>::raw(self.sql.clone());
+                for arg in &self.args {
+                    out.push_arg(arg.clone());
+                }
+                return out;
+            }
+            Placeholders::Rewrite => {}
+        }
+
         let mut sql = String::with_capacity(self.sql.len() + 8);
         let mut index = 0usize;
         let mut quote: Option<char> = None;
@@ -107,6 +195,26 @@ impl Fragment {
             )));
         }
         out.seal()
+    }
+}
+
+impl<D: Dialect> From<Sql<D>> for Fragment
+where
+    D::Value: Into<Value>,
+{
+    /// Keep a finished statement as a fragment, placeholders and all.
+    ///
+    /// Every shipped dialect uses [`Value`] as its parameter type, so this is lossless. The
+    /// text is *not* re-rendered: it already carries the dialect's placeholders and the
+    /// driver's statement suffix, and [`Fragment::render`] refuses to hand it to another
+    /// dialect.
+    fn from(sql: Sql<D>) -> Self {
+        let (text, args) = sql.into_parts();
+        Self {
+            sql: Cow::Owned(text),
+            args: args.into_iter().map(Into::into).collect(),
+            placeholders: Placeholders::Rendered(D::NAME),
+        }
     }
 }
 

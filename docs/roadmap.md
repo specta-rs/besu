@@ -6,8 +6,22 @@ would actually require. The order is a judgement about impact versus cost, not a
 | # | Item | Why it matters | Rough size |
 | --- | --- | --- | --- |
 | 1 | A native database backend | sqlx is three dependencies deep in the driver crates | Large |
-| 2 | [Custom column types](#custom-column-types) | An exact decimal cannot be read back as a string | Medium |
-| 3 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 2 | [Table aliases and self-joins](https://github.com/specta-rs/besu/issues/77) | A self-join is impossible today | Medium |
+| 3 | [CTEs](https://github.com/specta-rs/besu/issues/78) | Recursive queries need `sql!` | Medium |
+| 4 | [Derived tables and scalar subqueries](https://github.com/specta-rs/besu/issues/79) | Aggregating a subquery is not expressible | Medium |
+| 5 | [Generated columns](https://github.com/specta-rs/besu/issues/80) | A common schema feature `push` cannot manage | Medium |
+| 6 | [Sequences](https://github.com/specta-rs/besu/issues/81) | PostgreSQL sequences are invisible to the IR | Small |
+| 7 | [Views](https://github.com/specta-rs/besu/issues/83) | `pull` records them, `push` ignores them | Medium |
+| 8 | [Row-level security](https://github.com/specta-rs/besu/issues/82) | Policies are migration SQL only | Small |
+| 9 | [Operator coverage](https://github.com/specta-rs/besu/issues/86) | `IS DISTINCT FROM`, regex and arrays | Small–medium |
+| 10 | [Batch API](https://github.com/specta-rs/besu/issues/84) | One await and one transaction for several statements | Medium |
+| 11 | [Seeding](https://github.com/specta-rs/besu/issues/85) | No deterministic data generator | Large |
+| 12 | [Query comments](https://github.com/specta-rs/besu/issues/87) | Slow-query logs are hard to attribute | Small |
+| 13 | [Custom column types](#custom-column-types) | An exact decimal cannot be read back as a string | Medium |
+| 14 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+
+The complete picture, including what is deliberately not planned, is on the
+[Drizzle parity](parity.md) page.
 
 ## A native database backend
 
@@ -68,10 +82,12 @@ is the shape this half of the work was for.
 
 These are not large enough for their own section, but they are real. Each is a tracking issue.
 
-- **[#67](https://github.com/specta-rs/besu/issues/67) — savepoints and nested
-  transactions.** One level only.
-- **[#68](https://github.com/specta-rs/besu/issues/68) — down migrations.** The runner is
-  append-only by design.
+- **[#86](https://github.com/specta-rs/besu/issues/86) — operator coverage.** `IS DISTINCT
+  FROM`, regex and array operators.
+- **[#87](https://github.com/specta-rs/besu/issues/87) — query comments.** A slow-query log
+  cannot attribute a statement to a call site.
+- **[#95](https://github.com/specta-rs/besu/issues/95) — cast spellings.** MySQL's `CAST`
+  accepts a smaller set of types than its DDL does.
 
 ## Recently closed
 

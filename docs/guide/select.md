@@ -490,6 +490,142 @@ The common aggregate functions:
 the builder widens the result. If you want an integer sum, cast the result back and accept the
 range, or use `raw`.
 
+## Set operations
+
+`union`, `union_all`, `intersect`, `intersect_all`, `except` and `except_all` combine two
+`SELECT`s into one statement:
+
+```rust
+let adults = db.select(users).filter(users.age.gte(18));
+let minors = db.select(users).filter(users.age.lt(18));
+
+let everyone: Vec<User> = adults
+    .union(minors)
+    .order_by(users.name.asc())
+    .await?;
+```
+
+```sql
+SELECT ... FROM "users" WHERE ("users"."age" >= $1)
+UNION
+SELECT ... FROM "users" WHERE ("users"."age" < $2)
+ORDER BY "name" ASC
+```
+
+The builder is a `SetQuery` rather than a `Select`, and the second operand has to decode as
+the same row type `R`. That is what stops `select(users).union(select(posts))` from
+compiling: a compound row is decoded by the row type of the first branch, so a second branch
+that decodes differently has no meaning. A `pick` on both sides is the usual fix.
+
+| Method | SQL | Duplicates |
+| --- | --- | --- |
+| `union` | `UNION` | removed |
+| `union_all` | `UNION ALL` | kept |
+| `intersect` | `INTERSECT` | removed |
+| `intersect_all` | `INTERSECT ALL` | smaller of the two counts |
+| `except` | `EXCEPT` | removed |
+| `except_all` | `EXCEPT ALL` | left count minus right count |
+
+The `ALL` forms are multiset operations, not a spelling variant: `intersect_all` of two
+copies with two copies is two copies, while `intersect` of the same inputs is one. SQLite has
+neither, so those two queries fail while the statement is built instead of being sent.
+
+Operations chain, and the chain keeps every operator in order:
+
+```rust
+let rows: Vec<User> = adults
+    .union(db.select(users).filter(users.age.lt(10)))
+    .except(db.select(users).filter(users.name.like("A%")))
+    .order_by(users.name.asc())
+    .await?;
+```
+
+`order_by`, `limit`, `offset` and `first` apply to the whole compound, which is where SQL
+puts them; `first` sets `limit(1)`, replacing any limit already set. The ordering term names
+an output column and is written unqualified:
+
+```sql
+... UNION ... EXCEPT ... ORDER BY "name" ASC LIMIT $1
+```
+
+It has to be unqualified because PostgreSQL and MySQL only accept a result column name in a
+compound's `ORDER BY`; a table-qualified name is rejected by both. An expression there is
+written as given and may be rejected too — those two databases allow only column names.
+
+A branch may not carry its own `ORDER BY`, `LIMIT` or `OFFSET`. PostgreSQL and SQLite could
+parenthesise a branch and keep it, but MySQL wants a derived table, and dropping it silently
+would run a different query from the one you wrote, so it is an error that names the branch.
+
+Mixing `INTERSECT` with `UNION` or `EXCEPT` in one chain is refused as well. The SQL has no
+parentheses because SQLite cannot parse a parenthesised compound operand, and without them
+the two families group differently: PostgreSQL and MySQL bind `INTERSECT` tighter, SQLite
+evaluates left to right. `1 UNION 2 INTERSECT 2` is `{1, 2}` there and `{2}` on SQLite. Use
+one operator family per chain.
+
+## Subqueries
+
+`exists` and `not_exists` take a whole `Select` and produce a condition:
+
+```rust
+let with_posts: Vec<User> = db
+    .select(users)
+    .filter(exists(
+        db.select(posts)
+            .correlate(users)
+            .filter(posts.author_id.eq(users.id)),
+    ))
+    .await?;
+```
+
+```sql
+SELECT ... FROM "users" WHERE EXISTS (
+    SELECT "posts"."id", "posts"."title", "posts"."author_id" FROM "posts"
+    WHERE ("posts"."author_id" = "users"."id")
+)
+```
+
+`correlate(users)` is what lets the subquery read `users.id`. It adds `users` to the
+subquery's row set without adding a `FROM` entry, so the column is type-checked exactly as it
+would be in the outer query:
+
+```rust
+db.select(posts)
+    .correlate(users)                        // `users.id` is now in scope here
+    .filter(posts.author_id.eq(users.id));
+```
+
+Without it, `users.id` inside the subquery is a compile error, because `users` is not one of
+the subquery's own tables. The reverse direction — that the enclosing query really does
+select from `users` — is not checked: the outer query's type is not in scope at the point the
+subquery is built, so a correlation with a table the outer query does not have fails in the
+database as an unknown column.
+
+`exists` ignores the subquery's projection; only whether a row comes back matters. The
+subquery is rendered as part of the enclosing statement, so its parameters continue that
+statement's numbering — it is one statement, not a round trip.
+
+`in_query` and `not_in_query` compare a column against a one-column subquery:
+
+```rust
+let authors: Vec<User> = db
+    .select(users)
+    .filter(users.id.in_query(db.select(posts).pick(posts.author_id)))
+    .await?;
+```
+
+```sql
+SELECT ... FROM "users" WHERE ("users"."id" IN (SELECT "posts"."author_id" FROM "posts"))
+```
+
+The subquery's row type must be the column's Rust type, which is how the two sides are kept
+honest: `pick` erases the SQL type to whatever the selection decodes as, so `i64` against
+`i64` is checked but a `VARCHAR` against an integer is left to the database. It also means a
+nullable column's pick is `Option<T>` and is rejected; select it through `as_expr()` to
+compare the value without the nullability.
+
+Prefer `not_exists` to `not_in_query` when the subquery can produce `NULL`: `NOT IN` is
+unknown rather than true when the list contains a null, while `NOT EXISTS` stays true.
+
 ## Expressions and casts
 
 Columns support arithmetic directly:
@@ -586,11 +722,15 @@ for humans, never for execution.
 | A value of the wrong type (`users.age.eq("old")`) | Compile error at the argument |
 | A table that was never joined, via a column method | Compile error: `Contains` is not satisfied |
 | A relation on a query with a join (`Select::with`) | Compile error: the row set is not a single table |
+| A `union` with a branch of a different row type | Compile error at the second operand |
 | A projection whose type does not match the binding | Compile error at the `Vec<T>` annotation |
 | A nullable column assigned to a non-`Option` type | Compile error |
 | `ILIKE` on a dialect without it | Runtime error while building the SQL |
 | `FULL OUTER JOIN` / `RIGHT JOIN` on a dialect without it | Runtime error while building the SQL |
 | Row locking on SQLite | Runtime error while building the SQL |
+| `INTERSECT ALL` / `EXCEPT ALL` on SQLite | Runtime error while building the SQL |
+| A set branch with its own `ORDER BY`, `LIMIT` or `OFFSET` | Runtime error while building the SQL |
+| `INTERSECT` mixed with `UNION` or `EXCEPT` in one chain | Runtime error while building the SQL |
 
 ## Gotchas
 
@@ -610,7 +750,15 @@ for humans, never for execution.
 - **A table handle does not use the model's `Decode`.** `pick(users)` is a list of columns, so
   a field marked `#[besu(skip)]` is filled with `Default::default()` exactly as it is in the
   default projection.
-- **`first()` overrides a previous `limit`.** It sets the limit to 1 unconditionally.
+- **`first()` overrides a previous `limit`.** It sets the limit to 1 unconditionally, including
+  on a set query.
+- **A correlated subquery needs `correlate`.** `users.id` inside a subquery is only in scope
+  once `correlate(users)` has put it there, and the compiler cannot check that the enclosing
+  query really selects from it.
+- **A set query's `ORDER BY` must name an output column.** It is written unqualified, because
+  PostgreSQL and MySQL accept nothing else there.
+- **`in_query` compares Rust types, not SQL types.** A nullable column's pick is `Option<T>`
+  and does not match a non-null column; use `as_expr()` on the picked column.
 - **Grouping is not checked.** SQL requires every non-aggregated projection column to be
   grouped; Besu does not. The database will reject the query, not the compiler.
 - **`sum` is a float.** `pick(sum(users.age))` is `Vec<f64>`, not `Vec<i32>`.
