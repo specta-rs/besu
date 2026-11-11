@@ -121,13 +121,6 @@ pub trait Ddl {
     /// creates them afterwards.
     const INLINE_INDEXES: bool = false;
 
-    /// Whether `CREATE INDEX` needs the table's column types.
-    ///
-    /// MySQL does, because it may need a prefix length. Dialects that override
-    /// [`Ddl::create_index`] and need the types can read them from there; this flag exists
-    /// so [`Ddl::create_schema`] does not have to know.
-    const CREATE_INDEX_NEEDS_TYPES: bool = false;
-
     /// Whether `ALTER TABLE ... ALTER COLUMN` is available at all.
     ///
     /// SQLite has no such statement: changing a column means rebuilding the table. When

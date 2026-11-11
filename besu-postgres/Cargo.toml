@@ -30,7 +30,7 @@ besu = { workspace = true, features = ["derive", "migrate"] }
 besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu = { workspace = true, features = ["derive", "migrate"] }
-sqlx = { workspace = true, optional = true, features = ["postgres", "chrono", "uuid", "json"] }
+sqlx = { workspace = true, optional = true, features = ["postgres", "chrono", "uuid", "json", "bigdecimal"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }

@@ -100,10 +100,9 @@ about is the one you get, which is the useful one.
   options or execute `SET TRANSACTION` yourself with `tx.execute(sql!(..))`.
 - **No implicit retry.** A serialisation failure is returned as the driver's error; retrying
   is the application's decision.
-- **No transaction-aware migrations by default.** `Database::migrate` runs each migration on
-  the database, not inside a transaction, so a failure leaves the earlier migrations applied.
-  `Migrator::run` is generic over any `Executor`, including `&mut Transaction`, if you want
-  all-or-nothing behaviour.
+- **Migrations are already transactional.** `Database::migrate` begins a transaction, runs the
+  whole set on it, and commits or rolls back. `Migrator::run` is generic over any `Executor`
+  if you need a different boundary.
 
 ## Gotchas
 

@@ -25,7 +25,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     if args.dry_run {
         let current = db.introspect().await?;
-        let changes = besu::schema::diff::diff(&current, &desired);
+        let changes = db.diff(&current, &desired);
         if changes.is_empty() {
             println!("schema is up to date");
             return Ok(());

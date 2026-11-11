@@ -102,10 +102,11 @@ from_int!(i8, i16, i32, i64, u8, u16, u32);
 
 impl From<u64> for Value {
     fn from(value: u64) -> Self {
-        match i64::try_from(value) {
-            Ok(v) => Self::Int(v),
-            Err(_) => Self::UInt(value),
-        }
+        // Always `UInt`, even when the value happens to fit in an `i64`. A `u64` column has
+        // one SQL type, and a database caches a prepared statement per SQL string: binding
+        // `INT8` for small values and `NUMERIC` for large ones would hand the same statement
+        // two different parameter types.
+        Self::UInt(value)
     }
 }
 

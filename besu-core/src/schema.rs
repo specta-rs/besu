@@ -131,7 +131,11 @@ impl ReferenceAction {
 pub struct TableDef {
     /// The table name exactly as it appears in SQL.
     pub name: &'static str,
-    /// An optional schema (Postgres only; other dialects ignore it).
+    /// An optional schema or database namespace.
+    ///
+    /// Every dialect qualifies the name when this is set; PostgreSQL calls it a schema and
+    /// MySQL calls it a database. SQLite attached databases work the same way, but SQLite
+    /// itself ignores the distinction for a normal file.
     pub schema: Option<&'static str>,
     /// Every column, in the order the model's fields are declared. This ordering is
     /// load-bearing: `SELECT` lists and row decoding both follow it.

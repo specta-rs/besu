@@ -41,7 +41,7 @@ Three things produce a `Schema`:
 - A live database, via `Database::introspect()`.
 - A JSON snapshot on disk, via `Schema::load(..)`.
 
-And two things consume it: `diff` and `Ddl`. The whole pipeline is:
+And two things consume it: `diff` (or `diff_with`) and `Ddl`. The whole pipeline is:
 
 ```text
 #[derive(Table)]  ─┐
@@ -57,18 +57,23 @@ reviewable.
 
 ### Normalisation matters
 
-Diffing folds away spellings that databases disagree about:
+`diff` compares types literally. `diff_with(current, desired, normalise)` takes a function and
+is what `push` uses, passing `Ddl::normalise_type` from the dialect. A dialect whose storage
+collapses several canonical types therefore supplies its own folding:
 
-| Normalised | Becomes |
+| Dialect | Folds |
 | --- | --- |
-| `Char(n)`, `VarChar(n)` | `Text` |
-| `Int2`, `Int4`, `Int8` | `Int8` |
-| `Json`, `Jsonb` | `Json` |
-| `now()`, `current_timestamp()` | `current_timestamp` |
+| SQLite | `Int2`/`Int4`/`Int8` and every `UInt` → `Int8`; `Char`/`VarChar` → `Text`; `Jsonb` → `Json`; `TimestampTz` → `Timestamp` |
+| PostgreSQL | `UInt(8)` → `Int2`; `UInt(16)` → `Int4`; `UInt(32)` → `Int8`; `UInt(64)` → `Decimal(20, 0)` |
+| MySQL | Nothing — it stores the declared types faithfully |
 
-So changing an `i32` field to `i64`, or a `VARCHAR(50)` to `TEXT`, is not reported as a change.
-That avoids a diff that never converges against databases that report a different spelling.
-The trade-off is that a genuine widening is invisible to `push`.
+So on SQLite, changing an `i32` field to `i64`, or a `VARCHAR(50)` to `TEXT`, is not reported
+as a change. On PostgreSQL, changing `u8` to `i16` is invisible because both are stored as
+`SMALLINT`. That avoids a diff that never converges; the trade-off is that a genuine widening
+is invisible to `push`.
+
+Defaults are normalised separately, and universally: surrounding quotes and whitespace are
+stripped, and `now()`, `current_timestamp()` and `current_timestamp` all compare equal.
 
 ## `push`
 
@@ -185,9 +190,10 @@ The generated file starts with a warning worth keeping:
 -- Review before applying: dropping a column loses its data.
 ```
 
-`generate` does not stop at `Risky` changes and does not consult `can_alter_column`; it writes
-whatever the dialect's `change` methods produce. On SQLite, an `AlterColumn` therefore becomes
-the default drop-and-add pair. That is exactly why the file is for review.
+`generate` does not stop at `Risky` changes and does not refuse an alter the database cannot
+do: it writes whatever the dialect's `change` methods produce. On SQLite, an `AlterColumn`
+therefore becomes the default drop-and-add pair, with a warning at the top of the file. That is
+exactly why the file is for review.
 
 ## The migration runner
 
@@ -206,12 +212,15 @@ strings and `--` comments. `Migrator::from_dir` reads `<version>_<name>.sql` fil
 directory and sorts them by version.
 
 ```rust
+use besu::schema::Migrator;
+
 let migrator = Migrator::from_dir("migrations")?;
 let applied = db.migrate(&migrator).await?;
 ```
 
-`Database::migrate` returns the migrations that were newly applied and wraps any failure in
-`SchemaError::Migration`.
+`Database::migrate` runs the whole set inside a transaction, returns the migrations that were
+newly applied, and wraps any failure in `SchemaError::Migration`. It requires the driver to
+implement `TransactionDriver`; the runner itself is generic over any `Executor`.
 
 ### The journal table
 
@@ -246,14 +255,27 @@ or a generated migration.
 
 ### All-or-nothing migrations
 
-`Database::migrate` runs each migration against the database, not inside a transaction. If
-migration 3 of 5 fails, migrations 1 and 2 stay applied. The runner is generic over any
-`Executor`, so you can pass a transaction instead:
+`Database::migrate` runs the whole migration set inside a transaction: it begins one, passes a
+transaction executor to the runner, commits on success and rolls back on the first failure.
+That gives atomicity *and* keeps every statement on the same connection, which matters on
+SQLite where a pool may otherwise hand two statements of a schema change to different
+connections.
+
+It therefore requires `Dr: TransactionDriver`. For a driver without transactions, use
+`Migrator::run` directly against whatever executor you have; statements then commit as they
+run, so a failure can leave a migration half-applied:
+
+```rust
+let mut executor = &*db;
+let applied = migrator.run(&mut executor).await?;
+```
+
+To control the boundary yourself, pass a transaction:
 
 ```rust
 let mut tx = db.begin().await?;
 let mut executor = &mut tx;
-migrator.run(&mut executor).await?;   // roll back if any migration fails
+migrator.run(&mut executor).await?;
 tx.commit().await?;
 ```
 
@@ -316,12 +338,21 @@ besu migrate --database postgres://user:pass@host/db --dir migrations
   destructive and `generate` writes a `DROP`/`ADD` pair. Write the rename by hand.
 - **`push` is not transactional.** Statements are executed one at a time. A failure halfway
   leaves the earlier ones applied. Use `generate` plus `migrate` for anything that matters.
-- **Type widening is invisible.** `Int4` → `Int8`, `VarChar` → `Text` and `Json` → `Jsonb`
-  normalise to the same thing, so no change is emitted.
+- **Type widening is invisible on a dialect that folds types.** SQLite folds every integer
+  width and `Char`/`VarChar` to their storage types; PostgreSQL folds unsigned integers to
+  their signed storage. MySQL detects the change. Check `Ddl::normalise_type` for the
+  dialect you are using.
 - **SQLite cannot alter.** A type or nullability change needs a table rebuild, written as an
   explicit migration.
-- **`generate` bypasses the safety review.** It will happily write a drop-and-add for a column
-  change on SQLite. Read the file.
+- **`generate` writes a warning, not a refusal.** On a database that cannot alter a column in
+  place (SQLite), an `AlterColumn` becomes a drop-and-add. The generated file starts with a
+  warning saying the column's data will be lost, and then writes the statements anyway. Read
+  the file.
+- **The CLI's diff is the identity diff.** `besu generate` and `besu push --dry-run` call
+  `diff`, while `Database::push` calls `diff_with` with `Ddl::normalise_type`. On a dialect
+  that folds types (SQLite, or PostgreSQL's unsigned integers) the CLI can therefore report a
+  type change that `push` itself would consider equal. Read the generated file; the fix is to
+  route the CLI through `diff_with` too.
 - **`Migrator::from_dir` silently skips files it cannot parse.** A file whose name does not
   start with an integer is ignored; a typo in the version is easy to miss.
 - **Migrations are split on `;`.** `split_statements` understands quotes and `--` comments,

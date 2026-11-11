@@ -46,6 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // those unless you call `push_destructive` explicitly.
     db.push_destructive([users.def(), posts.def()]).await?;
 
+    // Start from an empty database so running the example twice behaves the same way twice.
+    // `all_rows` is the explicit opt-in to a statement with no `WHERE`.
+    db.delete(posts).all_rows().await?;
+    db.delete(users).all_rows().await?;
+
     // MySQL has no `RETURNING`, so read the row back by its unique column. Besu rejects a
     // `returning` clause on MySQL with a clear error rather than silently ignoring it.
     db.insert(users)

@@ -186,5 +186,5 @@ assert_eq!(
   two spellings; `None` without a type annotation usually needs the turbofish.
 - **`all_rows` is not required for `to_sql`.** You can render the SQL of an unsafe statement;
   only execution needs the flag.
-- **MySQL cannot return the affected rows.** Select them before or after the write, or use the
-  driver output's row count.
+- **MySQL cannot return the modified rows.** Select them before or after the write, or read
+  the driver output's row count.

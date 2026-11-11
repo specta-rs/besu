@@ -254,13 +254,15 @@ With `returning(users)`, the same statement ends in
 | More parameters than the dialect allows | Runtime build error with a suggested batch size |
 | Ragged bulk insert on a dialect without `DEFAULT` in `VALUES` | Runtime build error |
 | `RETURNING` on a dialect without it | Runtime build error |
+| `ON CONFLICT` with no target on PostgreSQL or SQLite | Runtime build error |
 | `do_nothing` on MySQL | Runtime build error |
 
 ## Gotchas
 
-- **`do_update` without `on_conflict` is a build error.** It emits
-  ``ON CONFLICT needs a target column; call `.on_conflict(column)` first``. Call
-  `on_conflict` first, even on MySQL where the target is ignored.
+- **`do_update` without `on_conflict` is a build error on PostgreSQL and SQLite.** It emits
+  ``ON CONFLICT needs a target column; call `.on_conflict(column)` first``. MySQL ignores the
+  target, so the chain happens to work there, but call `on_conflict` first for a statement
+  that is valid everywhere.
 - **Do not write `.into()` on insert arguments.** The parameter is `impl Into<String>` (or
   `impl Into<i32>`), so the target type is not concrete and the compiler sees several
   `From<&str>` impls in scope. Pass the literal or a value of the exact type.

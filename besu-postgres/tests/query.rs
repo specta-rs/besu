@@ -469,3 +469,21 @@ async fn introspection_skips_besu_migrations() {
     let schema = db.introspect().await.unwrap();
     assert!(schema.table("_besu_migrations").is_none());
 }
+
+/// One statement can be built with different value types; sqlx caches a prepared statement
+/// per SQL string, so the driver must not let PostgreSQL reuse the types it saw first.
+#[tokio::test]
+async fn same_sql_text_with_different_parameter_types() {
+    let db = setup().await;
+
+    db.transaction(async |tx| {
+        let text: Vec<(String,)> = tx.execute(sql!("SELECT ?::text", "abc")).all().await?;
+        assert_eq!(text[0].0, "abc");
+
+        let integer: Vec<(String,)> = tx.execute(sql!("SELECT ?::text", 1_i64)).all().await?;
+        assert_eq!(integer[0].0, "1");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
