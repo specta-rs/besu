@@ -154,6 +154,19 @@ impl besu::SchemaDriver for Sqlx {
         let db = besu::Database::new(self.clone());
         crate::introspect::introspect(&db).await
     }
+
+    /// Run every schema statement on one connection.
+    ///
+    /// SQLite's table rebuild toggles `PRAGMA foreign_keys`, which applies to the connection
+    /// that ran it. Through a pool, the `DROP TABLE` would otherwise land on a connection
+    /// that still has foreign keys enabled and cascade into child rows.
+    async fn execute_statements(&self, statements: &[String]) -> Result<(), Self::Error> {
+        let mut connection = self.pool.acquire().await?;
+        for statement in statements {
+            sqlx::query(statement).execute(&mut *connection).await?;
+        }
+        Ok(())
+    }
 }
 
 impl TransactionDriver for Sqlx {

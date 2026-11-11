@@ -148,16 +148,15 @@ definitions, which is what the CLI uses for a snapshot.
 ### Dialect limits
 
 Before executing anything, `push` also asks the DDL dialect whether it can alter a column in
-place. SQLite cannot (`can_alter_column() == false`), so a schema change that needs an
-`ALTER COLUMN` is refused with a clear error rather than the default drop-and-add:
+place. PostgreSQL and MySQL can. SQLite cannot, so it *rebuilds the table* instead: create the
+new definition under a temporary name, copy the columns that exist in both old and new, drop
+the old table, rename, and recreate the indexes. Foreign keys are disabled around that
+sequence, which is why `SchemaDriver::execute_statements` exists — the pragma is per
+connection, so every statement of a rebuild has to reach the same one.
 
-```text
-unsupported: sqlite cannot change a column in place; write an explicit migration instead
-```
-
-That is deliberate. The portable default implementation of `alter_column` is a `DROP COLUMN`
-followed by an `ADD COLUMN`, which loses the column's data; silently doing that during `push`
-would be worse than stopping.
+A dialect that can do neither returns `false` from `can_alter_column`, and `push` refuses
+rather than falling back to the portable default `alter_column`, which is a `DROP COLUMN`
+followed by an `ADD COLUMN` and loses the column's data.
 
 ## Generating migration files
 
@@ -190,10 +189,10 @@ The generated file starts with a warning worth keeping:
 -- Review before applying: dropping a column loses its data.
 ```
 
-`generate` does not stop at `Risky` changes and does not refuse an alter the database cannot
-do: it writes whatever the dialect's `change` methods produce. On SQLite, an `AlterColumn`
-therefore becomes the default drop-and-add pair, with a warning at the top of the file. That is
-exactly why the file is for review.
+`generate` does not stop at `Risky` changes: it writes whatever the dialect's `change`
+methods produce. On SQLite that is the table rebuild described above, which is why the
+generated file can be long. It is still for review — a rebuild recreates the table, and any
+trigger attached to it is not modelled (#66).
 
 ## The migration runner
 
@@ -326,7 +325,7 @@ besu migrate --database postgres://user:pass@host/db --dir migrations
 | --- | --- |
 | The declared schema and the live schema agree | Runtime, by `push` / `generate` |
 | A destructive change needs `push_destructive` or `--destructive` | Runtime, before any statement |
-| SQLite cannot alter a column in place | Runtime, before any statement |
+| A dialect that cannot alter or rebuild a column refuses | Runtime, before any statement |
 | A migration version is not duplicated | Runtime, when the runner starts |
 | An applied migration was not edited | Runtime, by checksum |
 | A table is created after the tables it references | At DDL generation, via topological order |
@@ -342,17 +341,12 @@ besu migrate --database postgres://user:pass@host/db --dir migrations
   width and `Char`/`VarChar` to their storage types; PostgreSQL folds unsigned integers to
   their signed storage. MySQL detects the change. Check `Ddl::normalise_type` for the
   dialect you are using.
-- **SQLite cannot alter.** A type or nullability change needs a table rebuild, written as an
-  explicit migration.
-- **`generate` writes a warning, not a refusal.** On a database that cannot alter a column in
-  place (SQLite), an `AlterColumn` becomes a drop-and-add. The generated file starts with a
-  warning saying the column's data will be lost, and then writes the statements anyway. Read
-  the file.
-- **The CLI's diff is the identity diff.** `besu generate` and `besu push --dry-run` call
-  `diff`, while `Database::push` calls `diff_with` with `Ddl::normalise_type`. On a dialect
-  that folds types (SQLite, or PostgreSQL's unsigned integers) the CLI can therefore report a
-  type change that `push` itself would consider equal. Read the generated file; the fix is to
-  route the CLI through `diff_with` too.
+- **SQLite rebuilds by dropping and recreating.** A type or nullability change recreates the
+  table, so a trigger attached to it is lost (#66). Rows are copied, so the data survives.
+- **`generate` writes statements, not judgements.** It emits whatever the dialect would do,
+  warning where a change loses data. Read the file.
+- **The CLI and `push` agree about types.** Both call `Ddl::normalise_type` for the target
+  dialect, so `besu generate` and `besu push --dry-run` report exactly what `push` would do.
 - **`Migrator::from_dir` silently skips files it cannot parse.** A file whose name does not
   start with an integer is ignored; a typo in the version is easy to miss.
 - **Migrations are split on `;`.** `split_statements` understands quotes and `--` comments,
