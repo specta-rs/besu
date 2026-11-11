@@ -630,3 +630,28 @@ async fn secondary_indexes_round_trip() {
     assert_eq!(table.indexes[0].columns, ["name"]);
     assert!(!table.indexes[0].unique);
 }
+
+#[tokio::test]
+async fn json_path_access_renders_and_reads() {
+    let db = fresh("besu_json_path").await;
+
+    // `JSON_EXTRACT` returns a JSON value, so the text form wraps it in `JSON_UNQUOTE` —
+    // which is exactly what `json_text` renders.
+    let rows: Vec<(String,)> = db
+        .execute(sql!(
+            "SELECT JSON_UNQUOTE(JSON_EXTRACT(?, '$.user.name')) AS name",
+            r#"{"user": {"name": "Oscar", "age": 21}}"#
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [("Oscar".to_string(),)]);
+
+    // The typed helpers render MySQL's spelling, with `JSON_UNQUOTE` only for the text form.
+    let rendered = besu::dry::<besu_mysql::MySql>();
+    let sql = rendered
+        .execute(sql!("SELECT JSON_UNQUOTE(JSON_EXTRACT(?, '$.a'))", ""))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains("JSON_EXTRACT"), "got {}", sql.sql());
+}

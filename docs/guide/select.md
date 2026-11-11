@@ -77,6 +77,27 @@ Rust integers and floats are checked against the column's SQL type. `users.age` 
 not: there is no `IntoSqlValue<Int4>` for `&str`, and the error points at the argument. This
 is the `SameType` / `IntoSqlValue` machinery described in [Architecture](../architecture.md).
 
+## Reading inside a JSON document
+
+`json_get` takes a JSON value out of a document and keeps its JSON type; `json_text` returns
+it unquoted, so it compares like any other string. The path is a dotted key path and must be a
+literal, because it is rendered into the SQL rather than bound:
+
+```rust
+let names: Vec<String> = db
+    .select(documents)
+    .pick(json_text(documents.body, "user.name"))
+    .await?;
+
+db.select(documents)
+    .filter(json_text(documents.body, "user.name").eq("Oscar"))
+    .await?;
+```
+
+Each dialect renders this its own way — `#>> '{user,name}'` on PostgreSQL, `->> '$.user.name'`
+on SQLite, `JSON_UNQUOTE(JSON_EXTRACT(..))` on MySQL — but the call site is the same. Keys
+containing a dot are not expressible; drop to `raw` for those.
+
 ## Ordering
 
 ```rust

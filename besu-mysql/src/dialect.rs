@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use besu_core::{Dialect, Error, Placeholder, TypeDef, UpsertStyle, Value};
+use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The MySQL dialect.
 ///
@@ -44,6 +44,7 @@ impl Dialect for MySql {
     /// `LIMIT` and is just as unbounded in practice.
     const UNBOUNDED_LIMIT: i64 = i64::MAX;
 
+    const JSON_PATH: JsonPathStyle = JsonPathStyle::Mysql;
     const UPSERT: UpsertStyle = UpsertStyle::OnDuplicateKey;
 
     /// MySQL can hold every value Besu models, including unsigned 64-bit integers, so
