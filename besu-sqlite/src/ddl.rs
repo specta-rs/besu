@@ -30,6 +30,20 @@ impl Ddl for SQLiteDdl {
         SQLite::type_name(ty.clone()).into_owned()
     }
 
+    fn normalise_type(&self, ty: &TypeDef) -> TypeDef {
+        // SQLite has one integer type, one text type and one blob type, so everything else
+        // is a matter of intent rather than storage. Folding here is what lets a schema that
+        // declares `i32`, `VARCHAR(20)` or `TIMESTAMPTZ` converge against the database.
+        match ty {
+            TypeDef::Int2 | TypeDef::Int4 | TypeDef::Int8 => TypeDef::Int8,
+            TypeDef::UInt(_) => TypeDef::Int8,
+            TypeDef::Char(_) | TypeDef::VarChar(_) => TypeDef::Text,
+            TypeDef::Jsonb => TypeDef::Json,
+            TypeDef::TimestampTz => TypeDef::Timestamp,
+            other => other.clone(),
+        }
+    }
+
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
         let mut sql = format!(
             "{} {}",

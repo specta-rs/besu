@@ -23,6 +23,7 @@ use crate::{Dialect, Error, Value};
 /// #     const SUPPORTS_RETURNING: bool = true;
 /// #     const SUPPORTS_ILIKE: bool = true;
 /// #     const SUPPORTS_FULL_JOIN: bool = true;
+/// #     const UPSERT: besu_core::UpsertStyle = besu_core::UpsertStyle::OnConflict;
 /// #     fn bind(value: besu_core::Value) -> Result<Self::Value, besu_core::Error> { Ok(value) }
 /// #     fn write_placeholder(out: &mut String, index: usize) { out.push('$'); out.push_str(&(index + 1).to_string()); }
 /// #     fn type_name(ty: besu_core::TypeDef) -> std::borrow::Cow<'static, str> { "TEXT".into() }

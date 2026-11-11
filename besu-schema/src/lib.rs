@@ -25,6 +25,6 @@ pub mod ir;
 pub mod migrate;
 
 pub use ddl::Ddl;
-pub use diff::{Change, Safety};
+pub use diff::{Change, Safety, diff_with};
 pub use ir::{Column, Default, ForeignKey, Index, ReferenceAction, Schema, Table};
 pub use migrate::{AppliedMigration, Migration, MigrationError, Migrator};

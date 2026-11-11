@@ -60,7 +60,11 @@ impl Ddl for MySqlDdl {
     }
 
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
-        let mut sql = format!("{} {}", self.quote(&column.name), self.type_name(&column.ty));
+        let mut sql = format!(
+            "{} {}",
+            self.quote(&column.name),
+            self.type_name(&column.ty)
+        );
 
         // MySQL makes primary key columns `NOT NULL` implicitly, but spelling it out keeps
         // the generated `CREATE TABLE` readable and matches `SHOW CREATE TABLE`.

@@ -177,7 +177,8 @@ impl<Dr: SchemaDriver> Database<Dr> {
         allow_destructive: bool,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
         let current = self.introspect().await.map_err(SchemaError::Driver)?;
-        let changes = besu_schema::diff::diff(&current, desired);
+        let ddl = Dr::Ddl::default();
+        let changes = besu_schema::diff_with(&current, desired, &|ty| ddl.normalise_type(ty));
 
         if !allow_destructive {
             let destructive: Vec<Change> = changes
@@ -222,7 +223,6 @@ impl<Dr: SchemaDriver> Database<Dr> {
     where
         i64: besu_core::Decode<Dr>,
         String: besu_core::Decode<Dr>,
-        Option<String>: besu_core::Decode<Dr>,
     {
         let mut executor = &*self;
         migrator

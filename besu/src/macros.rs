@@ -193,3 +193,23 @@ pub mod __private {
 
     pub use super::count_placeholders;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::count_placeholders;
+
+    #[test]
+    fn counts_placeholders() {
+        assert_eq!(count_placeholders("SELECT 1"), 0);
+        assert_eq!(count_placeholders("SELECT * FROM t WHERE a = ?"), 1);
+        assert_eq!(count_placeholders("a = ? AND b = ?"), 2);
+    }
+
+    #[test]
+    fn ignores_placeholders_inside_strings() {
+        assert_eq!(count_placeholders("SELECT '?'"), 0);
+        assert_eq!(count_placeholders(r#"SELECT "?" , ?"#), 1);
+        assert_eq!(count_placeholders("SELECT 'it''s ?' , ?"), 1);
+        assert_eq!(count_placeholders("SELECT '?', ?, '?'"), 1);
+    }
+}

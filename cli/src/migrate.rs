@@ -13,7 +13,7 @@ pub struct Args {
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
     let migrator = besu::schema::Migrator::from_dir(&args.dir)?;
-    if migrator.clone().migrations().is_empty() {
+    if migrator.is_empty() {
         println!("no migrations found in {}", args.dir.display());
         return Ok(());
     }
