@@ -1,18 +1,14 @@
 # Indexes and constraints
 
-Primary keys, uniqueness, indexes, foreign keys and checks are part of the schema, so they are
-diffed by `push` and rendered by the same DDL generator as the tables. The derive can declare
-some of them; the rest arrive through a `Schema` snapshot or a migration.
+Primary keys, uniqueness, indexes, foreign keys and checks are schema objects: `push` diffs them
+and the same DDL renders them. The derive can declare some; the rest need a snapshot or a migration.
 
 ## Primary keys
 
 One field marked `primary_key` is an inline `PRIMARY KEY`; two or more are a table-level
-constraint in declaration order. A primary key column is implicitly `NOT NULL`.
+constraint in declaration order.
 
 ```rust
-#[besu(primary_key, auto_increment)]
-pub id: i64,
-
 #[besu(primary_key)]
 pub user_id: i64,
 #[besu(primary_key)]
@@ -27,26 +23,20 @@ CREATE TABLE "memberships" (
 )
 ```
 
-`TableDef::primary_key()` iterates the key columns and `has_composite_primary_key()` answers the
-question the DDL generator asks. A table with no primary key is legal SQL, and the derive does
-not require one.
+A primary key column is implicitly `NOT NULL`. `TableDef::primary_key()` iterates the key columns
+and `has_composite_primary_key()` answers the question the DDL generator asks.
 
 ## Unique constraints
 
-A single-column `UNIQUE` is a flag on the column, rendered inline.
+A single-column `UNIQUE` is a flag on the column, rendered inline as `"email" TEXT NOT NULL UNIQUE`.
 
 ```rust
 #[besu(unique)]
 pub email: String,
 ```
 
-```sql
-"email" TEXT NOT NULL UNIQUE
-```
-
-Anything wider is a `Unique` — a name and a column list — because a constraint over several
-columns has no per-column spelling. The derive has no attribute for one, so it comes from a
-`Schema`:
+Anything wider is a `Unique` — a name and a column list — because a constraint over several columns
+has no per-column spelling, and the derive has no attribute for one:
 
 ```rust
 use besu::schema::Unique;
@@ -61,11 +51,11 @@ schema.table_mut("memberships").unwrap().uniques.push(Unique {
 ALTER TABLE "memberships" ADD CONSTRAINT "memberships_user_team_key" UNIQUE ("user_id", "team_id")
 ```
 
-On PostgreSQL that constraint owns a backing index, so `DROP INDEX` cannot remove it; the drop
-is `ALTER TABLE ... DROP CONSTRAINT`. SQLite writes a composite unique inside `CREATE TABLE` and
-has no `ALTER TABLE ... ADD CONSTRAINT`, so adding or dropping one afterwards renders no
-statement. MySQL has no object separate from the unique key, and introspects a multi-column
-unique as a `Unique` keyed by that index.
+On PostgreSQL that constraint owns a backing index, so `DROP INDEX` cannot remove it; the drop is
+`ALTER TABLE ... DROP CONSTRAINT`. SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so a composite
+unique is written inside `CREATE TABLE` and adding or dropping one afterwards renders nothing.
+MySQL has no object separate from the unique key, and introspects a multi-column unique as a
+`Unique` keyed by that index.
 
 ## Indexes
 
@@ -80,9 +70,8 @@ pub created_at: chrono::DateTime<chrono::Utc>,
 CREATE INDEX "users_created_at_idx" ON "users" ("created_at")
 ```
 
-A composite index has no attribute, but the IR expresses one, so a hand-built `Schema` can
-declare it — `Schema::from_defs` gives you the tables and `table_mut` lets you push onto the
-list:
+A composite index has no attribute, but the IR expresses one, so a hand-built `Schema` can declare
+it — `Schema::from_defs` gives you the tables and `table_mut` lets you push onto the list:
 
 ```rust
 use besu::schema::{Index, Schema};
@@ -102,9 +91,9 @@ db.push_schema(&schema).await?;
 CREATE INDEX "users_name_email_idx" ON "users" ("name", "email")
 ```
 
-A `TableDef` is also a plain public struct, so a hand-written const can carry a composite index
-or a multi-column foreign key instead of the derived definition. It cannot carry a unique, a
-predicate or a check: those live only in the `Schema` IR.
+A `TableDef` is also a plain public struct, so a hand-written const can carry a composite index or
+a multi-column foreign key. It cannot carry a unique, a predicate or a check: those live only in
+the `Schema` IR.
 
 ### Partial indexes
 
@@ -125,8 +114,7 @@ CREATE INDEX "events_errors_idx" ON "events" ("kind") WHERE kind = 'error'
 ```
 
 SQLite supports partial indexes but its catalogue report has no predicate the IR can carry, so
-introspection skips one rather than reporting it as a full index. MySQL has none, and its DDL
-ignores the predicate.
+introspection skips one rather than report it as a full index. MySQL has none.
 
 ## Foreign keys
 
@@ -149,8 +137,7 @@ unrecognised one silently becomes "no clause". A composite foreign key has no at
 a `Schema` or a hand-written `TableDef`.
 
 The referenced table does not have to be in the same `push` call, but it has to exist before the
-constraint is created. `push` orders `CREATE TABLE` by dependency, so a table is always created
-after the tables it references.
+constraint is created; `push` creates tables in dependency order.
 
 ## CHECK constraints
 
@@ -170,10 +157,9 @@ schema.table_mut("accounts").unwrap().checks.push(Check {
 ALTER TABLE "accounts" ADD CONSTRAINT "accounts_balance_check" CHECK (balance >= 0)
 ```
 
-PostgreSQL is the only dialect that round-trips a check: it is read from `pg_constraint`, the
-extra parentheses it adds are normalised away, and adding or dropping one is a plain
-`ALTER TABLE`. SQLite keeps a check only inside the `CREATE TABLE` text, and MySQL reports a
-`CHECK_CLAUSE` it will not accept back, so neither introspects one.
+PostgreSQL is the only dialect that round-trips a check: it is read from `pg_constraint`, the extra
+parentheses are normalised away, and adding or dropping one is a plain `ALTER TABLE`. SQLite keeps
+a check inside the `CREATE TABLE` text and MySQL reports a `CHECK_CLAUSE` it will not accept back.
 
 ## What the derive can declare
 
@@ -189,16 +175,13 @@ extra parentheses it adds are normalised away, and adding or dropping one is a p
 | Foreign key, composite | No | Yes | Yes |
 | `CHECK` | No | No | Yes |
 
-A table definition pushed from Rust therefore declares its keys, single-column uniques and
-indexes, and its single-column foreign keys. Everything else needs `besu pull` to write a
-snapshot, `besu generate` to produce a migration, or a hand-built `Schema`.
+A table definition pushed from Rust therefore declares its keys, single-column uniques and indexes,
+and its single-column foreign keys. Everything else needs a `besu pull` snapshot or a migration.
 
 ## Safety
 
-Adding an index, a unique, a foreign key or a check is `Risky`: it validates or rewrites existing
-rows, so it can be slow or fail, but it does not lose data. Dropping an index, a unique or a
-check is `Destructive`, so `push` refuses the whole plan and asks for `push_destructive`.
-Dropping a foreign key is only `Risky`, because it loses a constraint rather than data.
+Adding an index, unique, foreign key or check is `Risky`: it validates existing rows. Dropping an
+index, unique or check is `Destructive`; dropping a foreign key is only `Risky`.
 
 ## Gotchas
 
@@ -209,11 +192,9 @@ Dropping a foreign key is only `Risky`, because it loses a constraint rather tha
   is applied once and then reported again on the next push, where the duplicate name fails.
 - SQLite does not report a constraint's own name, so uniques are matched by their columns rather
   than by name. Renaming a unique in a snapshot is not a change.
-- MySQL stores a single-column `UNIQUE` as an index named after the column, and introspects it
-  back onto the column. A unique index you declare yourself with a different name stays an
-  index.
-- An expression index (`lower(email)`), an index with `INCLUDE` columns and a PostgreSQL
-  exclusion constraint are invisible to the IR. Introspection skips them rather than reporting
-  something `push` would then drop, so they are migration-only in both directions.
-- Index and foreign-key names are fixed by the derive. A hand-written object with the same name
-  collides with the generated one.
+- MySQL stores a single-column `UNIQUE` as an index named after the column and introspects it back
+  onto the column; a unique index you name yourself stays an index.
+- An expression index, an index with `INCLUDE` columns and a PostgreSQL exclusion constraint are
+  invisible to the IR: introspection skips them, so `push` never drops one.
+- Index and foreign-key names are fixed by the derive; a hand-written object with the same name
+  collides.

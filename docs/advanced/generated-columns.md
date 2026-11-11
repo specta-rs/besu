@@ -74,6 +74,10 @@ and `push_destructive` applies it. On PostgreSQL and MySQL a snapshot from `besu
 the column as an ordinary one, so `push --schema` against that snapshot leaves it alone; that
 does not make `create_schema` understand it.
 
+Nothing tracks generated columns on the roadmap. The work would start in the schema IR: its
+`Column` has no generated flag and no expression field, so the derive and introspection have
+nowhere to put one today.
+
 On SQLite there is a sharper edge. Because the column is absent from the IR, a table rebuild
 — which `push` performs to change any other column — creates the table from the declared
 columns and copies the shared ones across. The generated column is not in either list, so it

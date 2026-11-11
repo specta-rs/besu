@@ -50,13 +50,13 @@ SELECT ... FROM "users"
 WHERE (("users"."age" >= ?) AND (("users"."bio" IS NOT NULL) OR (NOT ("users"."name" = ?))))
 ```
 
-A boolean column needs no comparison: `filter(users.active)` renders `WHERE "users"."active"`,
-without parentheses.
+A boolean column needs no comparison, so for a table with an `active: bool` column,
+`filter(users.active)` renders `WHERE "users"."active"`, without parentheses.
 
 ## Null and boolean tests
 
 `is_null` and `is_not_null` are column methods and functions. `is_true` and `is_false` are
-functions only, and take any typed expression.
+functions only, and take any typed expression — a boolean column such as `active` included.
 
 ```rust
 db.select(users)
@@ -193,9 +193,9 @@ rest; `min` and `max` keep the argument's type. `sum` and `avg` are widened to `
 the database (`REAL` on SQLite, `DOUBLE PRECISION` on PostgreSQL), because a sum of integers can
 overflow and PostgreSQL and MySQL return `NUMERIC` for one. `count(expr)` counts non-`NULL`.
 
-`now()` renders `CURRENT_TIMESTAMP`. `json_get` and `json_text` take a dotted key path and render
-`->` / `->>` (PostgreSQL `#>` / `#>>`); `json_get` keeps the JSON type, so comparing needs
-`json_text`.
+`now()` renders `CURRENT_TIMESTAMP`. `json_get` and `json_text` take a dotted key path into a
+JSON column — here `events.payload` — and render `->` / `->>` (PostgreSQL `#>` / `#>>`);
+`json_get` keeps the JSON type, so comparing needs `json_text`.
 
 ```rust
 db.select(events)

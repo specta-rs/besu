@@ -31,7 +31,7 @@ db.update(users).set(users.name, "Alicia").await?;
 ```
 
 ```text
-error[E0277]: `Update<'_, &Database<Sqlx>, UserTable, false>` is not a future
+error[E0277]: `Update<'_, &Database<Sqlx>, UserTable>` is not a future
 ```
 
 There are exactly two ways to flip the flag:
@@ -115,7 +115,8 @@ let updated: Vec<User> = db
     .await?;
 ```
 
-It takes the same selections as `pick`: a column, an expression, a tuple or the table handle.
+It takes the same selections as [`pick`](select.md#projection): a column, an expression, a tuple
+or the table handle.
 `RETURNING` is dialect-dependent — PostgreSQL and SQLite support it, MySQL does not, and the
 MySQL failure is a build error (``unsupported: `mysql` does not support `RETURNING` ``) rather
 than a compile error.

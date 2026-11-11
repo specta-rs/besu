@@ -10,7 +10,7 @@ them in one transaction.
 
 ## Await each statement
 
-Two independent statements are two round trips. That is the same SQL Drizzle would send, just
+Two independent statements are two round trips. That is the same SQL Drizzle would send,
 without the request batching.
 
 ```rust
@@ -80,6 +80,10 @@ The chunks are **not** atomic; each statement commits on its own unless the whol
 inside a transaction. The parameter limit is enforced per statement, and `values_chunked` is
 how a bulk load gets past it.
 
+No batch API is tracked. It would need a driver method that accepts several statements and
+returns several results in one exchange; `Driver` has only `query`, `execute` and
+`query_stream` today.
+
 ## Gotchas
 
 - **Batching is a latency feature, not a correctness one.** Each `await` here is a full round
@@ -87,7 +91,7 @@ how a bulk load gets past it.
   multi-row insert or one transaction.
 - **There is no pipelining.** The next statement is not sent until the previous future
   resolves, even on a pool with idle connections. Awaiting concurrently with `join!` uses
-  several connections, which is a different guarantee and can deadlock against a small pool.
+  several connections, which is a different guarantee and can exhaust a small pool.
 - **A transaction is not one round trip.** It is `BEGIN`, then each statement, then `COMMIT`.
   It buys atomicity and a single connection, not fewer messages.
 - **`values_chunked` is not a batch.** The statements are independent, and a failure part-way

@@ -35,12 +35,7 @@ INSERT INTO "users" ("email", "name", "age") VALUES (?, ?, ?)
 INSERT INTO "posts" ("title", "author_id") VALUES (?, ?), (?, ?)
 ```
 
-An insert with no rows is a build error: ``insert` requires at least one value; call
-`.value(..)` or `.values(..)` ``.
-
 ## What the derive generates
-
-For this table:
 
 ```rust
 #[derive(Table)]
@@ -54,7 +49,7 @@ pub struct User {
 }
 ```
 
-the macro emits a `UserInsert` with one `Set` field per column, and a constructor with one
+The macro emits a `UserInsert` with one `Set` field per column, and a constructor with one
 argument per required column:
 
 ```rust
@@ -66,6 +61,9 @@ pub struct UserInsert {
 impl UserTable {
     pub fn insert(email: impl Into<String>, name: impl Into<String>, age: impl Into<i32>)
         -> UserInsert
+    {
+        todo!()
+    }
 }
 ```
 
@@ -77,8 +75,6 @@ setter, for the optional ones:
 users.insert("oscar@example.com", "Oscar", 21).bio("Rust");        // writes 'Rust'
 users.insert("oscar@example.com", "Oscar", 21).bio(None::<String>); // writes NULL
 ```
-
-Calling neither omits the column, so the default applies.
 
 ## `Set` has three states
 
@@ -106,8 +102,8 @@ every row the same columns when targeting SQLite, or insert in separate statemen
 
 ## `returning`
 
-`returning` takes the same selections as `pick`: the table handle, a column, an expression or a
-tuple such as `(users.id, users.name)`. `returning(users)` is the whole row, including generated
+`returning` takes the same selections as [`pick`](select.md#projection): the table handle, a
+column, an expression or a tuple such as `(users.id, users.name)`. `returning(users)` is the whole row, including generated
 columns, which is the reliable way to learn the `id` an auto-increment column produced.
 
 ```rust
@@ -116,6 +112,10 @@ let ids: Vec<i64> = db
     .value(users.insert("a@example.com", "Alice", 30))
     .returning(users.id)
     .await?;
+```
+
+```sql
+INSERT INTO "users" ("email", "name", "age") VALUES (?, ?, ?) RETURNING "users"."id"
 ```
 
 `RETURNING` is a dialect capability. PostgreSQL and SQLite support it; MySQL does not, and the
@@ -174,8 +174,8 @@ let outputs = db.insert(users).values_chunked(rows, 5_000).await?;
 ```
 
 The batches are **not** atomic: wrap the call in `db.transaction(..)` when all of them must
-succeed or none. `returning` is unavailable here, because there is no single statement to attach
-it to.
+succeed or none. `returning` is unavailable here, because there is no single statement to
+attach it to.
 
 ## What is checked
 
@@ -185,7 +185,6 @@ it to.
 | Setting a column to a value of the wrong type | Compile error at the setter |
 | Inserting zero rows | Build error |
 | More parameters than the dialect allows | Build error with a suggested batch size |
-| A ragged bulk insert on SQLite | Build error |
 | `RETURNING` or `do_nothing` on MySQL | Build error |
 | `do_update` with no target on PostgreSQL or SQLite | Build error |
 
@@ -195,9 +194,7 @@ it to.
   ``ON CONFLICT needs a target column; call `.on_conflict(column)` first``.
 - **Do not write `.into()` on insert arguments.** The parameter is `impl Into<String>`, so the
   target type is not concrete and the compiler sees several `From` implementations.
-- **`to_sql()` is not available once you call `returning`.** The builder changes type and has no
-  rendering method, so assert the plain insert instead.
-- **A nullable field is optional, not required-and-nullable.** The constructor does not ask for
-  `bio`; use the setter to write `NULL` deliberately.
+- **`to_sql()` is not available once you call `returning`.** The builder changes type, so assert
+  the plain insert instead.
 - **A `NOT NULL` column with `#[besu(default = ..)]` is optional too**, and an upsert target
   must match a real unique constraint — the columns are checked, the constraint is not.

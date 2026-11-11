@@ -44,9 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`on_conflict(users.email)` renders `ON CONFLICT (email) DO NOTHING`, so running the program
+`on_conflict(users.email)` renders `ON CONFLICT ("email") DO NOTHING`, so running the program
 twice does not duplicate the rows. Drop it if you want the second run to fail on the unique
-constraint instead.
+constraint instead. MySQL has no `ON CONFLICT DO NOTHING`; there, upsert with `do_update(..)`
+or check for the row first.
 
 ## A seed migration
 
@@ -100,6 +101,9 @@ pub struct User {
 verbatim and is the place for a database function; `default_now` renders
 `DEFAULT CURRENT_TIMESTAMP`. The full list and the per-dialect rendering are in
 [Declaring a schema](../schema/declaration.md).
+
+No seed API is tracked. The insert builder, `Set` for optional columns, and `on_conflict` for
+idempotence already express a seed without new surface.
 
 ## Gotchas
 
