@@ -62,7 +62,7 @@ fn mixed_statement() -> Sql<MySql> {
 fn bench_encode(c: &mut Criterion) {
     let mixed = mixed_statement();
 
-    let mut group = c.benchmark_group("encode");
+    let mut group = c.benchmark_group("mysql_encode");
     group.bench_function("mixed_10", |b| {
         b.iter(|| {
             let arguments = besu_mysql::arguments_for_bench(black_box(&mixed)).unwrap();
@@ -105,8 +105,13 @@ fn bench_encode(c: &mut Criterion) {
     group.finish();
 }
 
+/// A DDL statement with no bound values.
+fn ddl(sql: &'static str) -> Fragment {
+    Fragment::with_args(sql, Vec::new())
+}
+
 fn bench_query(c: &mut Criterion) {
-    let Some(url) = std::env::var("BESU_MYSQL_BENCH_URL").ok() else {
+    let Ok(url) = std::env::var("BESU_MYSQL_BENCH_URL") else {
         println!("set BESU_MYSQL_BENCH_URL to run the database benchmarks");
         return;
     };
@@ -125,7 +130,7 @@ fn bench_query(c: &mut Criterion) {
     // the URL is shared with whatever else lives in it and `push` would want to drop the
     // tables it does not know about.
     runtime.block_on(async {
-        for statement in [
+        for sql in [
             "DROP TABLE IF EXISTS `bench_rows`",
             "DROP TABLE IF EXISTS `bench_numbers`",
             "CREATE TABLE `bench_rows` (\
@@ -142,9 +147,7 @@ fn bench_query(c: &mut Criterion) {
                  `signed` DECIMAL(39,0) NOT NULL\
              )",
         ] {
-            db.execute(Fragment::with_args(statement, Vec::new()))
-                .await
-                .unwrap();
+            db.execute(ddl(sql)).await.unwrap();
         }
 
         let mut tx = db.begin().await.unwrap();
@@ -173,7 +176,7 @@ fn bench_query(c: &mut Criterion) {
         tx.commit().await.unwrap();
     });
 
-    let mut group = c.benchmark_group("query");
+    let mut group = c.benchmark_group("mysql_query");
     group.bench_function("select_1000_rows", |b| {
         b.iter(|| {
             let rows: Vec<BenchRow> = runtime
@@ -223,10 +226,10 @@ fn bench_query(c: &mut Criterion) {
     group.finish();
 
     runtime.block_on(async {
-        db.execute(sql!("DROP TABLE IF EXISTS `bench_rows`"))
+        db.execute(ddl("DROP TABLE IF EXISTS `bench_rows`"))
             .await
             .unwrap();
-        db.execute(sql!("DROP TABLE IF EXISTS `bench_numbers`"))
+        db.execute(ddl("DROP TABLE IF EXISTS `bench_numbers`"))
             .await
             .unwrap();
     });

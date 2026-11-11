@@ -53,7 +53,7 @@ fn mixed_statement() -> Sql<SQLite> {
 fn bench_encode(c: &mut Criterion) {
     let mixed = mixed_statement();
 
-    let mut group = c.benchmark_group("encode");
+    let mut group = c.benchmark_group("sqlite_encode");
     group.bench_function("sqlite_mixed_10", |b| {
         b.iter(|| {
             let arguments = besu_sqlite::arguments_for_bench(black_box(&mixed)).unwrap();
@@ -121,7 +121,7 @@ fn bench_query(c: &mut Criterion) {
         tx.commit().await.unwrap();
     });
 
-    let mut group = c.benchmark_group("query");
+    let mut group = c.benchmark_group("sqlite_query");
     group.bench_function("sqlite_select_1000_rows", |b| {
         b.iter(|| {
             let rows: Vec<BenchRow> = runtime
