@@ -2,51 +2,81 @@
 
 Besu is a typesafe, async, database-agnostic SQL query builder for Rust. It is not an ORM:
 every query you write maps onto exactly the SQL you would have written by hand, and the
-compiler checks the parts of that SQL it can see — column names, column types, nullability,
-which tables are in the query, and whether a bulk write was intentional.
+compiler checks the parts it can see — column names, column types, nullability, which tables
+are in the query, and whether a bulk write was intentional.
 
-The documentation follows the same path as the API: define a table from a plain struct, build
-a query out of typed columns, render it to SQL, and run it against a driver. The later pages
-cover the schema IR that powers migrations and the traits you implement to add a database.
+The structure follows [Drizzle ORM](https://orm.drizzle.team/docs/overview), because that is
+where the design comes from. If you know Drizzle, the pages here will feel familiar; if you
+do not, read them in order.
 
-## Start here
+## Fundamentals
 
-- [Getting started](guide/getting-started.md) — install the crates, define a table, run your first query
-- [Defining a schema](guide/schema.md) — every `#[derive(Table)]` attribute, the type mappings, nullability, defaults, indexes and foreign keys
+- [Overview](overview.md) — what Besu is, and what it deliberately is not
+- [Get started with SQLite](get-started/sqlite.md)
+- [Get started with PostgreSQL](get-started/postgresql.md)
+- [Get started with MySQL](get-started/mysql.md)
+- [Schema declaration](schema/declaration.md) — `#[derive(Table)]` and every attribute
+- [Relations](schema/relations.md) — `has_many`, and loading children without an N+1
+- [Connect](connect/overview.md) — a driver, a pool, a database
+- [Queries and CRUD](queries/select.md) — the shape of every statement
+- [Migrations](migrations/overview.md) — the schema IR, `push`, `generate`, `migrate`
 
-## Guide
+## Manage schema
 
-- [Selecting data](guide/select.md) — filtering, ordering, paging, row locking, projections, joins, grouping and aggregates
-- [Inserting data](guide/insert.md) — `value`/`values`, the generated insert struct, `Set`, `RETURNING` and upserts
-- [Updating and deleting](guide/update-delete.md) — the `all_rows()` safety mechanism, `set` versus `set_expr`, `RETURNING`
-- [Raw SQL](guide/raw-sql.md) — the `sql!` macro, placeholder rewriting, compile-time arity checking and escape hatches
-- [Transactions](guide/transactions.md) — `begin`/`commit`/`rollback` and the `transaction()` helper
-- [Migrations](guide/migrations.md) — the schema IR, `push` versus `push_destructive`, generated files and the migration runner
-- [Writing a driver](guide/drivers.md) — `Dialect`, `Driver`, `TransactionDriver`, `SchemaDriver`, `Ddl` and `Decode`
+- Column types: [PostgreSQL](schema/column-types/postgresql.md) · [MySQL](schema/column-types/mysql.md) · [SQLite](schema/column-types/sqlite.md)
+- [Indexes and constraints](schema/indexes-constraints.md)
+- [Views](schema/views.md)
+- [Sequences](schema/sequences.md) — PostgreSQL
+- [Table schemas](schema/schemas.md) — PostgreSQL
+- [Row-level security](schema/rls.md) — PostgreSQL
+- [Extensions](schema/extensions.md) — PostgreSQL
+- [Custom types](advanced/custom-types.md)
+
+## Access your data
+
+- [Select](queries/select.md) · [Insert](queries/insert.md) · [Update](queries/update.md) · [Delete](queries/delete.md)
+- [Filter and conditional operators](queries/operators.md)
+- [Joins](queries/joins.md)
+- [Aliases](queries/aliases.md)
+- [The `sql!` operator](queries/sql.md)
+- [Query utilities](queries/query-utils.md)
+- [SQL comments](queries/comments.md)
+- [Set operations](advanced/set-operations.md)
+- [Subqueries](advanced/subqueries.md)
+
+## Migrations
+
+- [Migrations overview](migrations/overview.md)
+- [`besu generate`](migrations/generate.md) · [`besu migrate`](migrations/migrate.md) · [`besu push`](migrations/push.md) · [`besu pull`](migrations/pull.md)
+- [`besu-studio`](migrations/studio.md)
+- [Custom migrations](migrations/custom.md)
+- [Configuration](migrations/config.md)
+
+## Advanced
+
+- [Transactions](advanced/transactions.md)
+- [Generated columns](advanced/generated-columns.md)
+- [Batch API](advanced/batch-api.md)
+- [Dynamic query building](advanced/dynamic-query-building.md)
+- [CTEs](advanced/ctes.md)
+- [Seeding](advanced/seeding.md)
+- [Cache](advanced/cache.md)
+- [Read replicas](advanced/read-replicas.md)
 
 ## Reference
 
-- [Architecture](architecture.md) — the crate graph, where the seams are, and how a query becomes SQL
-- [Comparison](comparison.md) — how Besu differs from Diesel, SeaORM, sqlx and Drizzle
-- [Roadmap](roadmap.md) — what is missing, in priority order, and what each item would take
-
-## Crates
-
-| Crate | Role |
-| --- | --- |
-| [`besu-core`](../besu-core) | The vocabulary: `Dialect`, `Driver`, `Executor`, `Sql`, `Value` and row decoding. No query API and no database, so SQL can be built with nothing attached. |
-| [`besu`](../besu) | The query builders and expression DSL: select, insert, update, delete, joins, upserts, aggregates, transactions and raw SQL. |
-| [`besu-schema`](../besu-schema) | One serialisable schema IR shared by migrations, introspection and DDL generation. |
-| [`besu-macros`](../besu-macros) | `#[derive(Table)]`. |
-| [`besu-sqlite`](../besu-sqlite) · [`besu-postgres`](../besu-postgres) · [`besu-mysql`](../besu-mysql) | Dialects, drivers, DDL and introspection for each database. |
-| [`besu-cli`](../cli) | `besu pull`, `besu push`, `besu generate` and `besu migrate`. |
+- [Performance](performance.md) — what a query costs, with numbers
+- [Drizzle parity](parity.md) — the full scoreboard against Drizzle
+- [Architecture](architecture.md) — the crate graph and how a query becomes SQL
+- [Writing a driver](drivers.md) — `Dialect`, `Driver`, `SchemaDriver`, `Ddl`, `Decode`
+- [Comparison](comparison.md) — Besu against Diesel, SeaORM, sqlx and Drizzle
+- [Roadmap](roadmap.md) — what is missing, and what it would take
 
 ## How to read a page
 
-Each guide page ends with **What is checked** or **Gotchas**. Those sections are the honest
-part: what the compiler proves, what it cannot prove, and which mistakes are still possible.
-If a feature is not implemented, the page says so and points at the [roadmap](roadmap.md)
-rather than pretending otherwise.
+Pages are code first: a short statement of what the thing is, an example you can paste, then
+the details that are easy to get wrong. Each page ends with **What is checked** or
+**Gotchas** — the honest part, where the compiler stops helping and what still bites.
 
-Snippets use SQLite because it needs no server. The same query code works with any driver;
+Examples use SQLite because it needs no server. The same query code works with every driver;
 only the connection setup changes.

@@ -151,7 +151,11 @@ impl<Dr: SchemaDriver> Database<Dr> {
         schema
     }
 
-    /// Create every table that does not exist yet, and leave everything else alone.
+    /// Create every table in `tables`, without reading the database first.
+    ///
+    /// A table that already exists is an error from the database, not a no-op: this is the
+    /// "create, I know the database is empty" path. Use
+    /// [`push`](Database::push) to converge an existing schema.
     pub async fn create_schema(
         &self,
         tables: impl IntoIterator<Item = &'static TableDef>,

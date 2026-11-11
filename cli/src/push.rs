@@ -16,7 +16,7 @@ pub struct Args {
     /// Also drop columns and tables that the snapshot no longer declares.
     #[arg(long)]
     pub destructive: bool,
-    /// Print the statements instead of running them.
+    /// Print the planned changes, with their safety, instead of applying them.
     #[arg(long)]
     pub dry_run: bool,
 }

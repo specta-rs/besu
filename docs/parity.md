@@ -1,0 +1,94 @@
+# Drizzle parity
+
+Besu follows [Drizzle ORM](https://orm.drizzle.team/docs/overview)'s feature set as its
+north star, translated into Rust. This page is the honest scoreboard: what maps cleanly, what
+is partial, and what is deliberately absent.
+
+Legend: **Yes** — supported end to end. **Partial** — the listed half is missing. **No** —
+not implemented. **N/A** — no meaning in a Rust library.
+
+## Fundamentals
+
+| Drizzle | Besu | Notes |
+| --- | --- | --- |
+| Define a schema | **Yes** | `#[derive(Table)]`, see [schema declaration](schema/declaration.md) |
+| Declare relations | **Partial** | `with(has_many(users.id, posts.author_id))` loads children in one extra statement. There is no relation *object*, no many-to-many and no nested `with` |
+| Connect | **Yes** | One driver per crate, see [connect](connect/overview.md) |
+| Queries + CRUD | **Partial** | SQL-style select/insert/update/delete are complete. The relational query builder is limited to one has-many level |
+| Migrations | **Yes** | `push`, `pull`, `generate`, `migrate`, `--down` |
+
+## Manage schema
+
+| Drizzle | Besu | Notes |
+| --- | --- | --- |
+| Column types | **Partial** | Every primitive round-trips. `INTERVAL`, `INET`/`CIDR`, `BIT`, arrays, ranges, spatial and `pgvector` are database-native only |
+| Indexes | **Partial** | Single-column indexes and uniques are declarable; composite indexes, expression indexes and index methods are snapshot-only or not modelled |
+| Constraints | **Partial** | Foreign keys, single and composite `UNIQUE`, and `CHECK` round-trip. A check cannot be declared from the derive yet |
+| Sequences | **No** | `SERIAL`/`IDENTITY` only. No standalone sequence — [#81](https://github.com/specta-rs/besu/issues/81) |
+| Views | **Partial** | Introspection round-trips a view through `besu pull`; `push` never creates, alters or drops one, and materialised views are not modelled — [#83](https://github.com/specta-rs/besu/issues/83) |
+| Table schemas | **Yes** | PostgreSQL; `#[besu(schema = "..")]` |
+| Row-level security | **No** | Write the policy in a migration — [#82](https://github.com/specta-rs/besu/issues/82) |
+| Extensions | **No** | `CREATE EXTENSION` is migration SQL, by design |
+| Enum types | **Partial** | PostgreSQL enums round-trip and are diffed; MySQL's inline column enums are not modelled |
+| Generated columns | **No** | Use a migration and `sql!` until the derive can declare one — [#80](https://github.com/specta-rs/besu/issues/80) |
+
+## Access your data
+
+| Drizzle | Besu | Notes |
+| --- | --- | --- |
+| Select | **Yes** | Filter, order, group, having, limit/offset, distinct, row locks, joins |
+| Insert | **Yes** | `value`/`values`, `RETURNING`, `ON CONFLICT`, chunked and bulk |
+| Update / delete | **Yes** | Type-state guard against a `WHERE`-less write |
+| Operators | **Partial** | Comparison, `LIKE`/`ILIKE`, `BETWEEN`, `IN`, null and boolean tests, arithmetic, `COALESCE`, `CASE`, `CAST`, JSON paths, full text. Missing: `IS DISTINCT FROM`, array operators, regex operators, `ANY`/`ALL` over arrays — [#86](https://github.com/specta-rs/besu/issues/86) |
+| Joins | **Yes** | Inner, left, right, full, cross; outer joins widen the projection to `Option` |
+| Aliases | **No** | A self-join needs one, and is the clearest gap against Drizzle. Use `sql!` for now — [#77](https://github.com/specta-rs/besu/issues/77) |
+| `sql` operator | **Yes** | `sql!`, with compile-time arity checking |
+| SQL comments | **No** | Use `sql!` — [#87](https://github.com/specta-rs/besu/issues/87) |
+| Query utils | **Partial** | `to_sql`, `inspect`, `stream`. No `$dynamic`, `$count`, or subquery as a table — [#79](https://github.com/specta-rs/besu/issues/79) |
+| Set operations | **Yes** | `union`, `union_all`, `intersect`, `except`, … |
+| Subqueries | **Partial** | `EXISTS`, `NOT EXISTS`, `IN (SELECT …)`. No derived table in `FROM`, no scalar subquery in a projection — [#79](https://github.com/specta-rs/besu/issues/79) |
+| CTEs | **No** | `WITH` and `WITH RECURSIVE` are not expressible — [#78](https://github.com/specta-rs/besu/issues/78) |
+| Transactions | **Yes** | `begin`/`commit`/`rollback`, `transaction()`, savepoints |
+| Batch API | **No** | Await each statement, or use one transaction — [#84](https://github.com/specta-rs/besu/issues/84) |
+| Dynamic query building | **Partial** | A query is a value, so it can be stored, passed and composed; there is no `$dynamic` mutation handle |
+| Prepared statements | **Partial** | The drivers cache prepared statements per SQL string. There is no explicit `prepare` handle |
+| Custom types | **Yes** | `#[besu(sql_type = "..")]` plus your own `SqlType` marker |
+| Codecs | **No** | A custom type implements `Decode` per driver instead |
+| Cache | **No** | Not a library concern |
+| Read replicas | **No** | Point a second `Database` at the replica |
+| Streaming | **Yes** | `db.stream::<T>(&sql)` — a Besu addition, not in Drizzle |
+
+## Migrations and tooling
+
+| Drizzle Kit | Besu CLI | Notes |
+| --- | --- | --- |
+| `generate` | **Yes** | `besu generate` |
+| `migrate` | **Yes** | `besu migrate`, with `--down` and `--to` |
+| `push` | **Yes** | `besu push`, refusing destructive changes unless asked |
+| `pull` | **Yes** | `besu pull` |
+| `export` | **Partial** | `pull` writes the schema IR; SQL comes from `generate` |
+| `check` | **No** | The differ and the journal verify checksums at run time instead |
+| `up` | **No** | The journal upgrades itself when the runner opens it |
+| `studio` | **Yes** | `besu-studio`, development only |
+| Seeding | **No** | Write a `main` that inserts, or a migration — [#85](https://github.com/specta-rs/besu/issues/85) |
+| Config file | **Partial** | Flags and environment variables; no project file |
+
+## Not applicable
+
+These are part of Drizzle's surface because it is a TypeScript library or a hosted service,
+and have no counterpart here:
+
+- **Validations** — `zod`, `valibot`, `typebox`, `arktype`, `effect-schema`. Rust has the
+  type system, and an owned struct is the boundary.
+- **Extensions** — the ESLint plugin and `drizzle-graphql`.
+- **Realtime** — Drizzle Pulse.
+- **Provider pages** — Neon, Supabase, PlanetScale, D1, Turso, Bun, Xata, Nile and the rest.
+  Besu connects with a URL; TLS and pooling are the driver's business.
+- **Other dialects** — MSSQL, SingleStore, CockroachDB, Gel.
+- **`drizzle-kit` as a separate binary** — the same jobs live in `besu`'s subcommands.
+
+## Where the gaps are tracked
+
+Every **No** above that is a real feature rather than a deliberate boundary is on the
+[roadmap](roadmap.md). The query-layer gaps (aliases, CTEs, derived tables) are the ones that
+bite first, because they are the things a Drizzle user reaches for in the first week.
