@@ -26,6 +26,13 @@ tracing = ["dep:tracing"]
 [lints]
 workspace = true
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "build"
+harness = false
+
 [dependencies]
 besu-core = { workspace = true, features = ["uuid", "chrono", "json"] }
 chrono = { workspace = true }
