@@ -55,6 +55,7 @@ async fn introspect_table(
                     unique: false,
                     default: default.map(normalise_default),
                     comment: None,
+                    renamed_from: None,
                 },
             )
             .collect(),

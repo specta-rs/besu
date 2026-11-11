@@ -7,15 +7,14 @@ would actually require. The order is a judgement about impact versus cost, not a
 | --- | --- | --- | --- |
 | 1 | [Eager loading / relations](#eager-loading--relations) | The biggest functional gap versus an ORM | Large |
 | 2 | [Streaming results](#streaming-results) | Large result sets are fully buffered | Medium, breaking |
-| 3 | [Rename detection in migrations](#rename-detection-in-migrations) | A rename currently looks like data loss | Medium |
-| 4 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are out of reach | Medium |
-| 5 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
-| 6 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
-| 7 | [JSON path operators](#json-path-operators) | JSON is stored but not queryable in a typed way | Medium |
-| 8 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
-| 9 | [wasm support](#wasm-support) | The builder could run in a browser; execution cannot | Large |
-| 10 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
-| 11 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
+| 3 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
+| 4 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
+| 5 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
+| 6 | [JSON path operators](#json-path-operators) | JSON is stored but not queryable in a typed way | Medium |
+| 7 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
+| 8 | [wasm support](#wasm-support) | The builder could run in a browser; execution cannot | Large |
+| 9 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
+| 10 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
 
 ## Eager loading / relations
 
@@ -60,24 +59,6 @@ What it would take:
   caller.
 
 `RawQuery` is buffered too, so it needs the same treatment.
-
-## Rename detection in migrations
-
-Tracked as [#54](https://github.com/specta-rs/besu/issues/54).
-
-`diff` cannot tell a rename from a drop plus an add, so it deliberately refuses to guess. The
-consequence is that renaming a column is classified as `Destructive` and a generated migration
-drops the data.
-
-What it would take:
-
-- An explicit declaration. A pure diff can never be sure, so the API needs something like
-  `#[besu(renamed_from = "old_name")]` on a field, or a rename map passed to `diff`.
-- New `Change` variants (`RenameColumn`, `RenameTable`) and `Ddl` methods that render
-  `ALTER TABLE ... RENAME COLUMN` / `RENAME TO`.
-- A safety classification: a rename is `Risky` (it rewrites metadata and can break views), not
-  `Destructive`, but it must never be inferred silently.
-- CLI support so `besu generate` can consume the declaration from the snapshot.
 
 ## Custom column types
 
@@ -270,6 +251,8 @@ Kept here so the history is visible rather than deleted:
 - **#75, publish metadata.** Every crate has a README, keywords and categories, and the
   publish order is written down in `CONTRIBUTING.md`.
 - **#76, update from model.** `Update::set_model`.
+- **#54, rename detection.** `#[besu(renamed_from = "...")]` turns a drop plus an add into one
+  `ALTER TABLE ... RENAME COLUMN`. Renaming a table still is not modelled.
 
 ## Contributing
 

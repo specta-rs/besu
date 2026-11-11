@@ -40,6 +40,15 @@ pub enum Change {
         /// The removed column.
         column: String,
     },
+    /// A column was renamed, keeping its data.
+    RenameColumn {
+        /// The table.
+        table: String,
+        /// The name it has now.
+        from: String,
+        /// The name it should have.
+        to: String,
+    },
     /// A column's definition changed.
     AlterColumn {
         /// The table.
@@ -84,6 +93,9 @@ impl Change {
     pub fn safety(&self) -> Safety {
         match self {
             Self::CreateTable(_) => Safety::Safe,
+            // A rename rewrites metadata, and can break views or code that named the old
+            // column. It never loses the column's data, so it is not destructive.
+            Self::RenameColumn { .. } => Safety::Risky,
             Self::AddColumn { column, .. } => {
                 if column.nullable || column.default.is_some() {
                     Safety::Safe
@@ -119,6 +131,7 @@ impl Change {
             Self::AddColumn { table, .. }
             | Self::DropColumn { table, .. }
             | Self::AlterColumn { table, .. }
+            | Self::RenameColumn { table, .. }
             | Self::AddIndex { table, .. }
             | Self::DropIndex { table, .. }
             | Self::AddForeignKey { table, .. }
@@ -138,6 +151,9 @@ impl core::fmt::Display for Change {
             Self::DropColumn { table, column } => write!(f, "drop column {table}.{column}"),
             Self::AlterColumn { table, to, .. } => {
                 write!(f, "alter column {table}.{}", to.name)
+            }
+            Self::RenameColumn { table, from, to } => {
+                write!(f, "rename column {table}.{from} to {to}")
             }
             Self::AddIndex { table, index } => write!(f, "create index {} on {table}", index.name),
             Self::DropIndex { table, index } => write!(f, "drop index {} on {table}", index.name),
@@ -203,16 +219,27 @@ pub fn diff_with(
     changes.sort_by_key(|change| match change {
         Change::CreateTable(_) => 0,
         Change::AddColumn { .. } => 1,
-        Change::AlterColumn { .. } => 2,
-        Change::AddIndex { .. } => 3,
-        Change::AddForeignKey { .. } => 4,
-        Change::DropForeignKey { .. } => 5,
-        Change::DropIndex { .. } => 6,
-        Change::DropColumn { .. } => 7,
-        Change::DropTable { .. } => 8,
+        Change::RenameColumn { .. } => 2,
+        Change::AlterColumn { .. } => 3,
+        Change::AddIndex { .. } => 4,
+        Change::AddForeignKey { .. } => 5,
+        Change::DropForeignKey { .. } => 6,
+        Change::DropIndex { .. } => 7,
+        Change::DropColumn { .. } => 8,
+        Change::DropTable { .. } => 9,
     });
 
     changes
+}
+
+/// The name a column used to have, if that name still exists on the live table.
+fn renamed_previous<'a>(column: &'a Column, current: &Table) -> Option<&'a str> {
+    let previous = column.renamed_from.as_deref()?;
+    if current.column(previous).is_some() && current.column(&column.name).is_none() {
+        Some(previous)
+    } else {
+        None
+    }
 }
 
 fn diff_table(
@@ -221,9 +248,26 @@ fn diff_table(
     normalise: &dyn Fn(&besu_core::TypeDef) -> besu_core::TypeDef,
     changes: &mut Vec<Change>,
 ) {
+    // Renames first: a declared `renamed_from` turns what would be a drop plus an add into
+    // one statement that keeps the data.
+    for column in &desired.columns {
+        if current.column(&column.name).is_some() {
+            continue;
+        }
+        if let Some(previous) = &column.renamed_from
+            && current.column(previous).is_some()
+        {
+            changes.push(Change::RenameColumn {
+                table: desired.name.clone(),
+                from: previous.clone(),
+                to: column.name.clone(),
+            });
+        }
+    }
+
     // Added columns.
     for column in &desired.columns {
-        if current.column(&column.name).is_none() {
+        if current.column(&column.name).is_none() && renamed_previous(column, current).is_none() {
             changes.push(Change::AddColumn {
                 table: desired.name.clone(),
                 column: column.clone(),
@@ -233,7 +277,11 @@ fn diff_table(
 
     // Removed columns.
     for column in &current.columns {
-        if desired.column(&column.name).is_none() {
+        let renamed_away = desired.columns.iter().any(|desired| {
+            desired.renamed_from.as_deref() == Some(column.name.as_str())
+                && current.column(&desired.name).is_none()
+        });
+        if desired.column(&column.name).is_none() && !renamed_away {
             changes.push(Change::DropColumn {
                 table: desired.name.clone(),
                 column: column.name.clone(),
@@ -243,8 +291,22 @@ fn diff_table(
 
     // Changed columns.
     for column in &desired.columns {
-        let Some(existing) = current.column(&column.name) else {
-            continue;
+        let mut renamed_existing;
+        let existing = match current.column(&column.name) {
+            Some(existing) => existing,
+            // After a rename the definition lives under the old name, so compare against
+            // that — with the column's new name in place, because that is what the table
+            // will have by the time the alter runs.
+            None => match renamed_previous(column, current)
+                .and_then(|previous| current.column(previous))
+            {
+                Some(previous) => {
+                    renamed_existing = previous.clone();
+                    renamed_existing.name = column.name.clone();
+                    &renamed_existing
+                }
+                None => continue,
+            },
         };
         if !existing.same_shape(column, normalise) {
             changes.push(Change::AlterColumn {
@@ -339,6 +401,7 @@ mod tests {
             unique: false,
             default: None,
             comment: None,
+            renamed_from: None,
         }
     }
 

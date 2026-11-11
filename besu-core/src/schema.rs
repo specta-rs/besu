@@ -23,6 +23,12 @@ pub struct ColumnDef {
     pub unique: bool,
     /// A literal default value, rendered by each dialect.
     pub default: Option<DefaultValue>,
+    /// The column's previous name, if it was renamed.
+    ///
+    /// A pure diff cannot tell a rename from a drop plus an add, and guessing would be
+    /// dangerous, so the intent is declared instead. Migrations then emit
+    /// `ALTER TABLE ... RENAME COLUMN` and the data survives.
+    pub renamed_from: Option<&'static str>,
 }
 
 /// A column default, kept in a form each dialect can render.
