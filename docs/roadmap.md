@@ -5,33 +5,40 @@ would actually require. The order is a judgement about impact versus cost, not a
 
 | # | Item | Why it matters | Rough size |
 | --- | --- | --- | --- |
-| 1 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
-| 2 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 1 | A native database backend | sqlx is three dependencies deep in the driver crates | Large |
+| 2 | [Custom column types](#custom-column-types) | An exact decimal cannot be read back as a string | Medium |
+| 3 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+
+## A native database backend
+
+Tracked as [#1](https://github.com/specta-rs/besu/issues/1).
+
+Everything sqlx-specific is already behind `besu_core::Driver`, so the seam is ready; what is
+missing is the work. A `rusqlite`-backed SQLite driver first (no wire protocol, but it forces
+the synchronous-to-asynchronous decision: a connection thread with request channels, not
+`spawn_blocking`), then `tokio-postgres`, then `mysql_async`. Two things to settle first,
+because they change the API rather than the driver: pooling becomes Besu's problem, and TLS
+becomes Besu's dependency. The issue carries the full plan.
 
 ## Custom column types
 
-Tracked as [#55](https://github.com/specta-rs/besu/issues/55).
+`#[besu(sql_type = "besu::Decimal<10, 2>")]` names a `SqlType` directly, so a sized `VARCHAR`,
+an exact `DECIMAL` and a user-defined marker type can all be declared and all round-trip
+through migrations. What is missing is one thing: **an exact decimal cannot be read back**.
 
-`#[besu(sql_type = "...")]` now names a `SqlType` directly, so a sized `VARCHAR`, an exact
-`DECIMAL` and a user-defined marker type can all be declared. What is still missing is a
-first-class decimal value type: `Decimal`'s Rust type is a `String`, which SQLite handles by
-storing text, but PostgreSQL and MySQL return `NUMERIC` and no driver decodes that into a
-string yet.
-
-`TypeDef::Custom(Cow<'static, str>)` already exists and introspection uses it for native types
-Besu does not model. The derive does not: a field type outside the built-in list is a compile
-error, so `DECIMAL`, PostgreSQL enums and domain types cannot be declared.
+`Decimal`'s Rust type is a `String`. SQLite stores it as `TEXT` and that works, but PostgreSQL
+and MySQL return `NUMERIC`, and no driver decodes that into a string. Until one does,
+`pick(decimal_column)` needs a cast, and a decimal is only half a column type.
 
 What it would take:
 
-- A derive attribute such as `#[besu(sql_type = "decimal(10,2)")]`, or a `ColumnType` trait
-  mapping a Rust type to a `SqlType` plus `IntoSqlValue`.
-- `SqlType` implementations for `Decimal`, `Char` and `VarChar` that a field can name. The
-  types exist; the derive cannot produce them.
-- DDL for `TypeDef::Custom` that round-trips (the dialects already pass the string through in
-  most cases).
-- A `Decode` story: a user type still has to decode from a driver row, so either the user
-  implements `Decode` per driver or the mapping goes through an existing primitive.
+- Either a `Rust = String` decode path for `NUMERIC` in the two drivers (the binary decoder
+  already exists for `u64` and `u128`, so this is mostly formatting dscale), or a real decimal
+  value type behind a feature. The second is better and is a dependency decision.
+- The same question for PostgreSQL `INTERVAL`/`INET`/`CIDR`, MySQL `SET` and domain types,
+  all of which currently come back as `TypeDef::Custom` by design.
+- A derive attribute for a check constraint if `Table::checks` should be declarable rather
+  than only introspectable.
 
 ## wasm support
 
@@ -107,6 +114,8 @@ Kept here so the history is visible rather than deleted:
 - **#73, `TimeTz` and enum types.** `TypeDef::TimeTz` for PostgreSQL's `TIMETZ`, and
   `Schema::enums` is introspected, diffed and rendered as `CREATE TYPE` / `ALTER TYPE`. A
   `DECIMAL` still cannot decode into a `String` on PostgreSQL or MySQL.
+- **#52, eager loading.** `with(has_many(parent_key, child_fk))` loads children in one extra,
+  visible statement.
 - **#56, runtime driver switching.** `besu-any`'s `AnyDatabase`, chosen from the connection
   string; typed queries stay per-backend, which is the honest limit.
 - **#61, table prefixes.** `Database::prefixed`. The prefix lives on `Sql`, because that is
