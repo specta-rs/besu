@@ -24,6 +24,9 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
+serde_json = { workspace = true }
 besu = { workspace = true, features = ["derive", "migrate"] }
 
 [dependencies]
