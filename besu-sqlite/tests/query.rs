@@ -5,6 +5,7 @@
     clippy::too_many_arguments
 )]
 
+use besu::Driver;
 use besu::prelude::*;
 use besu_sqlite::Sqlx;
 
@@ -975,7 +976,11 @@ async fn subqueries() {
 
     let non_authors: Vec<User> = db
         .select(users)
-        .filter(users.id.not_in_query(db.select(posts).pick(posts.author_id)))
+        .filter(
+            users
+                .id
+                .not_in_query(db.select(posts).pick(posts.author_id)),
+        )
         .order_by(users.name.asc())
         .all()
         .await
@@ -986,9 +991,11 @@ async fn subqueries() {
     let world: Vec<User> = db
         .select(users)
         .filter(
-            users
-                .id
-                .in_query(db.select(posts).filter(posts.title.eq("World")).pick(posts.author_id)),
+            users.id.in_query(
+                db.select(posts)
+                    .filter(posts.title.eq("World"))
+                    .pick(posts.author_id),
+            ),
         )
         .all()
         .await
@@ -1042,4 +1049,154 @@ async fn set_operation_and_subquery_sql() {
         sql.sql(),
         r#"SELECT "users"."id" FROM "users" WHERE ("users"."id" IN (SELECT "posts"."author_id" FROM "posts"))"#
     );
+}
+
+/// An upsert can read the row it was trying to insert, and can leave the stored row alone
+/// when a predicate says so. Both are pure SQLite syntax (`excluded` is the standard name
+/// SQLite shares with PostgreSQL), so nothing here needs a dialect branch.
+#[tokio::test]
+async fn upsert_from_the_incoming_row_and_a_predicate() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice Updated", 31))
+        .on_conflict(users.email)
+        .do_update(users.name, excluded(users.name))
+        .do_update(users.age, excluded(users.age))
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Alice Updated");
+    assert_eq!(rows[0].age, 31);
+
+    // The update's predicate is evaluated against the stored row, so a false one suppresses
+    // the update and keeps the row as it was.
+    db.insert(users)
+        .value(users.insert("a@example.com", "Ignored", 99))
+        .on_conflict(users.email)
+        .do_update(users.name, excluded(users.name))
+        .do_update_filter(users.age.gt(35))
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows[0].name, "Alice Updated");
+
+    // SQLite allows a targetless `DO NOTHING`, so the other half of the clause works too.
+    db.insert(users)
+        .value(users.insert("a@example.com", "Nope", 1))
+        .on_conflict_all()
+        .do_nothing()
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Alice Updated");
+
+    // Unlike PostgreSQL, SQLite also allows `DO UPDATE` with no target: the clause applies
+    // to any unique constraint. The rendered statement is checked before it runs.
+    let query = db
+        .insert(users)
+        .value(users.insert("a@example.com", "Any Key", 50))
+        .on_conflict_all()
+        .do_update(users.name, excluded(users.name));
+    let sql = query.to_sql().unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "users" ("email", "name", "age") VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET "name" = "excluded"."name""#
+    );
+    query.await.unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows[0].name, "Any Key");
+    assert_eq!(rows[0].age, 31);
+}
+
+/// An empty `IN` list is a syntax error, so it renders as a constant predicate instead. If
+/// the rewrite were wrong the statement would not parse at all.
+#[tokio::test]
+async fn empty_in_lists_execute() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    let none: Vec<User> = db
+        .select(users)
+        .filter(users.id.in_list(Vec::<i64>::new()))
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+
+    let all: Vec<User> = db
+        .select(users)
+        .filter(users.id.not_in(Vec::<i64>::new()))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+
+    let none: Vec<User> = db
+        .select(users)
+        .filter(in_list(users.name, Vec::<&str>::new()))
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+}
+
+/// Every `SqlType` marker the crate ships has to survive a trip through `CAST`. SQLite
+/// accepts the DDL names, so this also pins the default `cast_type_name` down.
+#[tokio::test]
+async fn cast_to_every_marker_executes() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    // The results are not decoded: the point is that the server accepts the statement, so
+    // the SQL is executed through the driver directly.
+    macro_rules! cast {
+        ($literal:literal, $ty:ty) => {{
+            let sql = db
+                .select(users)
+                .pick(raw::<(UserTable,)>($literal).cast::<$ty>())
+                .to_sql()
+                .unwrap();
+            db.driver().query(&sql).await.unwrap();
+        }};
+    }
+
+    cast!("1", besu::Bool);
+    cast!("1", besu::Int1);
+    cast!("1", besu::Int2);
+    cast!("1", besu::Int4);
+    cast!("1", besu::Int8);
+    cast!("1", besu::UInt1);
+    cast!("1", besu::UInt2);
+    cast!("1", besu::UInt4);
+    cast!("1", besu::UInt8);
+    cast!("1", besu::U128);
+    cast!("1", besu::I128);
+    cast!("1.5", besu::Float4);
+    cast!("1.5", besu::Float8);
+    cast!("'x'", besu::Text);
+    cast!("'x'", besu::Char<8>);
+    cast!("'x'", besu::VarChar<8>);
+    cast!("'x'", besu::Bytes);
+    cast!("'00000000-0000-0000-0000-000000000000'", besu::Uuid);
+    cast!("'{}'", besu::Json);
+    cast!("'{}'", besu::Jsonb);
+    cast!("'2020-01-01'", besu::Date);
+    cast!("'12:00:00'", besu::Time);
+    cast!("'2020-01-01 12:00:00'", besu::Timestamp);
+    cast!("'2020-01-01 12:00:00'", besu::TimestampTz);
+    cast!("1.5", besu::Decimal<10, 2>);
 }

@@ -113,6 +113,15 @@ pub trait Dialect: 'static + Sized {
     /// How the dialect spells an upsert.
     const UPSERT: UpsertStyle;
 
+    /// Whether `ON CONFLICT DO UPDATE` may omit the conflict target.
+    ///
+    /// PostgreSQL requires the inference specification — `ON CONFLICT DO UPDATE` on its own
+    /// is an error — while SQLite allows it on the last `ON CONFLICT` clause of the
+    /// statement, where it applies to any unique constraint. The default is the stricter
+    /// PostgreSQL rule, because a dialect that has not said otherwise is more likely to
+    /// reject the statement than to accept it.
+    const SUPPORTS_TARGETLESS_DO_UPDATE: bool = false;
+
     /// How the dialect spells access to a value inside a JSON document.
     const JSON_PATH: JsonPathStyle = JsonPathStyle::Sqlite;
 
@@ -177,8 +186,25 @@ pub trait Dialect: 'static + Sized {
         out.push('"');
     }
 
-    /// The dialect's name for a canonical type, used by `CAST` and as the basis of DDL.
+    /// The dialect's name for a canonical type, as DDL spells it.
+    ///
+    /// This is the type a column is declared with, not necessarily the type a `CAST` may
+    /// name: see [`Dialect::cast_type_name`].
     fn type_name(ty: TypeDef) -> Cow<'static, str>;
+
+    /// The dialect's name for a canonical type inside `CAST`.
+    ///
+    /// DDL and `CAST` are two separate grammars, and a dialect may accept a type in one but
+    /// not the other. MySQL is the clear case: its `CAST` only names `BINARY`, `CHAR`,
+    /// `DATE`, `DATETIME`, `DECIMAL`, `DOUBLE`, `FLOAT`, `JSON`, `NCHAR`, `REAL`, `SIGNED`,
+    /// `TIME`, `UNSIGNED`, `YEAR` and the spatial types, so the DDL spelling `INTEGER` or
+    /// `VARCHAR(n)` there is a syntax error.
+    ///
+    /// The default is the DDL spelling, because PostgreSQL and SQLite accept the names they
+    /// declare columns with in `CAST` too.
+    fn cast_type_name(ty: TypeDef) -> Cow<'static, str> {
+        Self::type_name(ty)
+    }
 
     /// Append a comment to a finished statement that carries no meaning to the database.
     ///

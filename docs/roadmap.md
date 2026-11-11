@@ -86,8 +86,6 @@ These are not large enough for their own section, but they are real. Each is a t
   FROM`, regex and array operators.
 - **[#87](https://github.com/specta-rs/besu/issues/87) — query comments.** A slow-query log
   cannot attribute a statement to a call site.
-- **[#95](https://github.com/specta-rs/besu/issues/95) — cast spellings.** MySQL's `CAST`
-  accepts a smaller set of types than its DDL does.
 
 ## Recently closed
 

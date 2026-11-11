@@ -119,3 +119,71 @@ async fn declared_type_is_a_128_bit_unsigned_integer() {
     let second = db.push([wide_numbers.def()]).await.unwrap();
     assert!(second.is_empty(), "got {:?}", second.changes);
 }
+
+/// A `DECIMAL` with a scale still goes through `BigDecimal`, which truncates it, even though
+/// a `DECIMAL(39,0)` is decoded from its text directly.
+#[tokio::test]
+async fn a_scaled_decimal_truncates_into_a_128_bit_integer() {
+    let db = fresh("besu_u128_scaled_decimal").await;
+    db.execute(sql!(
+        "CREATE TABLE `scaled` (`value` DECIMAL(10,2) NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    // Bound as text so the stored value is exactly 1.90.
+    db.execute(Fragment::with_args(
+        "INSERT INTO `scaled` VALUES (?)",
+        vec![Value::Text("1.90".to_owned())],
+    ))
+    .await
+    .unwrap();
+
+    let rows: Vec<(u128,)> = db
+        .execute(sql!("SELECT `value` FROM `scaled`"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 1);
+}
+
+/// An unsigned column decodes as `i64` and as `u64`, and only the `u64` covers the top half
+/// of the range.
+#[tokio::test]
+async fn an_unsigned_column_decodes_through_both_integer_paths() {
+    let db = fresh("besu_unsigned_integer").await;
+    db.execute(sql!(
+        "CREATE TABLE `counter` (`value` BIGINT UNSIGNED NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(Fragment::with_args(
+        "INSERT INTO `counter` VALUES (?), (?)",
+        vec![Value::UInt(42), Value::UInt(u64::MAX)],
+    ))
+    .await
+    .unwrap();
+
+    let signed: Vec<(i64,)> = db
+        .execute(sql!("SELECT `value` FROM `counter` WHERE `value` = 42"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(signed[0].0, 42);
+
+    let unsigned: Vec<(u64,)> = db
+        .execute(sql!("SELECT `value` FROM `counter` ORDER BY `value`"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(unsigned, [(42,), (u64::MAX,)]);
+
+    // `u64::MAX` does not fit in `i64`, and that is an error rather than a truncation.
+    let too_wide = db
+        .execute(sql!(
+            "SELECT `value` FROM `counter` WHERE `value` = 18446744073709551615"
+        ))
+        .all::<(i64,)>()
+        .await;
+    assert!(too_wide.is_err(), "got {too_wide:?}");
+}

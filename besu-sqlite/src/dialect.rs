@@ -37,6 +37,10 @@ impl Dialect for SQLite {
     const UNBOUNDED_LIMIT: i64 = -1;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
 
+    /// SQLite allows `ON CONFLICT DO UPDATE` without a target: the clause applies to any
+    /// unique constraint, which PostgreSQL does not permit.
+    const SUPPORTS_TARGETLESS_DO_UPDATE: bool = true;
+
     /// SQLite's `MATCH` is provided by the table, not the expression: it only works against
     /// an FTS5 virtual table, which the schema layer cannot create.
     const FULL_TEXT: FullTextStyle = FullTextStyle::Sqlite;

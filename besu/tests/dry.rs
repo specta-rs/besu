@@ -684,3 +684,298 @@ fn mysql_json_paths_are_quoted() {
         sql.sql()
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Upserts
+// ---------------------------------------------------------------------------------------
+
+/// Every upsert shape PostgreSQL and SQLite share: no target at all, a target with an index
+/// predicate, and an update that reads the incoming row plus a predicate against the stored
+/// one.
+#[test]
+fn upserts_render_the_on_conflict_shapes() {
+    let db = dry::<TestDialect>();
+
+    // No target. `ON CONFLICT DO NOTHING` is the only action that allows it.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict_all()
+        .do_nothing()
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"#
+    );
+    assert_eq!(sql.args().len(), 3);
+    assert!(sql.error().is_none());
+
+    // An empty conflict target spelled as a tuple means the same thing.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(())
+        .do_nothing()
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"#
+    );
+
+    // A target, the index predicate, an update of the incoming row, and the update's own
+    // predicate, in that order.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .on_conflict_where(users.bio.is_null())
+        .do_update(users.name, excluded(users.name))
+        .do_update_filter(users.age.lt(100))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) ON CONFLICT ("email") WHERE ("users"."bio" IS NULL) DO UPDATE SET "name" = "excluded"."name" WHERE ("users"."age" < $4)"#
+    );
+    assert_eq!(
+        sql.args(),
+        [
+            Value::Text("oscar@example.com".into()),
+            Value::Text("Oscar".into()),
+            Value::Int(21),
+            Value::Int(100),
+        ]
+    );
+    assert!(sql.error().is_none());
+
+    // `new_row` is `excluded` under MySQL's name, so the rendered SQL is identical.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_update(users.name, new_row(users.name))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) ON CONFLICT ("email") DO UPDATE SET "name" = "excluded"."name""#
+    );
+
+    // Each `do_update` adds a `SET` entry, and the value is type-checked against the column.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_update(users.name, excluded(users.name))
+        .do_update(users.age, excluded(users.age))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) ON CONFLICT ("email") DO UPDATE SET "name" = "excluded"."name", "age" = "excluded"."age""#
+    );
+}
+
+/// MySQL's upsert reads the incoming row through a row alias, and `do_nothing` needs a
+/// target to assign to itself.
+#[test]
+fn upserts_render_the_on_duplicate_key_shapes() {
+    let db = dry::<BacktickDialect>();
+
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_update(users.name, new_row(users.name))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        "INSERT INTO `users` (`email`, `name`, `age`) VALUES (?, ?, ?) AS `new` ON DUPLICATE KEY UPDATE `name` = `new`.`name`"
+    );
+    assert!(sql.error().is_none());
+
+    // The alias is chosen per statement, and it is stamped at render time so the call order
+    // of `row_alias` and `do_update` does not matter.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_update(users.name, excluded(users.name))
+        .row_alias("incoming")
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        "INSERT INTO `users` (`email`, `name`, `age`) VALUES (?, ?, ?) AS `incoming` ON DUPLICATE KEY UPDATE `name` = `incoming`.`name`"
+    );
+
+    // A value-only update does not mention the incoming row, so no alias is written and the
+    // statement keeps working on MySQL older than 8.0.19.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_update(users.age, 21)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        "INSERT INTO `users` (`email`, `name`, `age`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `age` = ?"
+    );
+
+    // `do_nothing` becomes a self-assignment: MySQL has no `DO NOTHING`, and `INSERT IGNORE`
+    // would also swallow truncation and foreign-key errors.
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_nothing()
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        "INSERT INTO `users` (`email`, `name`, `age`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `email` = `email`"
+    );
+    assert!(sql.error().is_none());
+}
+
+/// The forms each dialect has no grammar for are refused while building, with a message
+/// that says what to do instead.
+#[test]
+fn an_upsert_rejects_what_the_dialect_cannot_express() {
+    // PostgreSQL and SQLite require the target for `DO UPDATE`, with or without a predicate.
+    let sql = dry::<TestDialect>()
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict_all()
+        .do_update(users.age, 21)
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("`DO UPDATE` needs a target");
+    assert_eq!(
+        error.to_string(),
+        "invalid query: `ON CONFLICT DO UPDATE` needs a conflict target on `test`; call \
+         `.on_conflict(column)` to name the key it applies to, or use `.do_nothing()`"
+    );
+
+    // A predicate with no target has nowhere to attach.
+    let sql = dry::<TestDialect>()
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict_all()
+        .on_conflict_where(users.bio.is_null())
+        .do_nothing()
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("an index predicate needs a target");
+    assert!(
+        error.to_string().contains("needs a conflict target"),
+        "got: {error}"
+    );
+
+    // MySQL has neither predicate.
+    let sql = dry::<BacktickDialect>()
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .on_conflict_where(users.bio.is_null())
+        .do_nothing()
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("MySQL has no index predicate");
+    assert!(matches!(error, Error::Unsupported(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("on_conflict_where"),
+        "got: {error}"
+    );
+
+    let sql = dry::<BacktickDialect>()
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict(users.email)
+        .do_update(users.age, 21)
+        .do_update_filter(users.age.lt(100))
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("MySQL has no per-row predicate");
+    assert!(matches!(error, Error::Unsupported(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("`case`"),
+        "the message must point at the replacement: {error}"
+    );
+
+    // Without a target there is nothing for MySQL's `do_nothing` to assign to itself.
+    let sql = dry::<BacktickDialect>()
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .on_conflict_all()
+        .do_nothing()
+        .to_sql()
+        .unwrap();
+    let error = sql
+        .error()
+        .expect("MySQL cannot do nothing without a target");
+    assert!(matches!(error, Error::Unsupported(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("assign it to itself"),
+        "the message must say what is missing: {error}"
+    );
+}
+
+/// An empty `IN` list is a syntax error everywhere, so it renders as a constant predicate
+/// that every planner folds away.
+#[test]
+fn empty_in_lists_render_a_constant_predicate() {
+    let db = dry::<TestDialect>();
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.id.in_list(Vec::<i64>::new()))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE (1 = 0)"#
+    );
+    assert!(sql.args().is_empty());
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.id.not_in(Vec::<i64>::new()))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE (1 = 1)"#
+    );
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(in_list(users.name, Vec::<&str>::new()))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE (1 = 0)"#
+    );
+}
+
+/// `CAST` names a type with the dialect's cast spelling, which is not always the DDL one.
+/// This dialect does not override it, so the default (the DDL name) must be used.
+#[test]
+fn a_cast_uses_the_cast_spelling_not_the_ddl_one() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .pick(raw::<(UserTable,)>("1").cast::<besu::Float8>())
+        .to_sql()
+        .unwrap();
+    assert_eq!(sql.sql(), r#"SELECT CAST(1 AS TEXT) FROM "users""#);
+    assert!(sql.error().is_none());
+}

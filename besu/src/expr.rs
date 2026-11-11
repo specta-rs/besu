@@ -100,6 +100,18 @@ pub enum ExprKind {
     },
     /// `CAST(expr AS type)`.
     Cast { expr: Operand, ty: TypeDef },
+    /// A column of the row an upsert is trying to insert.
+    ///
+    /// PostgreSQL and SQLite name that row `excluded`; MySQL 8.0.19 names it with a row
+    /// alias, which the insert builder substitutes for `row` before rendering. Keeping the
+    /// name in the node rather than hard-coding both spellings here is what lets one
+    /// [`excluded`](fn@excluded) call site work on every dialect.
+    UpsertRef {
+        /// How the dialect names the incoming row: `excluded`, or MySQL's row alias.
+        row: &'static str,
+        /// The column to read.
+        column: &'static str,
+    },
     /// A value inside a JSON document, reached by a dotted path.
     JsonPath {
         expr: Operand,
@@ -184,6 +196,21 @@ impl Operand {
             Self::Column { table, .. } => *table = "",
             Self::Expr(kind) => kind.unqualify(),
             Self::Value(_) => {}
+        }
+    }
+
+    /// Whether this operand reads a column of the row being inserted.
+    fn reads_upsert_row(&self) -> bool {
+        match self {
+            Self::Expr(kind) => kind.reads_upsert_row(),
+            Self::Column { .. } | Self::Value(_) => false,
+        }
+    }
+
+    /// Point every reference to the incoming row at `row`.
+    fn set_upsert_row(&mut self, row: &'static str) {
+        if let Self::Expr(kind) = self {
+            kind.set_upsert_row(row);
         }
     }
 }
@@ -278,16 +305,24 @@ impl ExprKind {
                 list,
                 negated,
             } => {
-                out.push_raw("(");
-                expr.render(out);
-                out.push_raw(if *negated { " NOT IN (" } else { " IN (" });
-                for (i, item) in list.iter_mut().enumerate() {
-                    if i != 0 {
-                        out.push_raw(", ");
+                if list.is_empty() {
+                    // `IN ()` is a syntax error in every SQL dialect, but an empty list has
+                    // an obvious meaning. `1 = 0` is false and `1 = 1` is true, both are
+                    // portable, and every planner folds the constant away, so the plan is
+                    // the same as a hand-written `WHERE false`.
+                    out.push_raw(if *negated { "(1 = 1)" } else { "(1 = 0)" });
+                } else {
+                    out.push_raw("(");
+                    expr.render(out);
+                    out.push_raw(if *negated { " NOT IN (" } else { " IN (" });
+                    for (i, item) in list.iter_mut().enumerate() {
+                        if i != 0 {
+                            out.push_raw(", ");
+                        }
+                        item.render(out);
                     }
-                    item.render(out);
+                    out.push_raw("))");
                 }
-                out.push_raw("))");
             }
             Self::Case {
                 operand,
@@ -315,8 +350,16 @@ impl ExprKind {
                 out.push_raw("CAST(");
                 expr.render(out);
                 out.push_raw(" AS ");
-                out.push_raw(&D::type_name(ty.clone()));
+                out.push_raw(&D::cast_type_name(ty.clone()));
                 out.push_raw(")");
+            }
+            Self::UpsertRef { row, column } => {
+                // The row name is quoted rather than written bare so a row alias the caller
+                // chose cannot turn into SQL. `"excluded"` is the same identifier as
+                // `excluded` on PostgreSQL and SQLite.
+                out.push_ident(row);
+                out.push_raw(".");
+                out.push_ident(column);
             }
             Self::JsonPath {
                 expr,
@@ -485,9 +528,112 @@ impl ExprKind {
             // `FullText` needs a column qualified only when a query has more than one table,
             // and a compound `ORDER BY` never does.
             Self::FullText { column, .. } => column.unqualify(),
-            // Nothing to rewrite: a value has no table, and a nested `EXISTS` already
-            // contains only what its own tables provide.
-            Self::Value(_) | Self::Raw(_) | Self::Star | Self::Exists { .. } => {}
+            // Nothing to rewrite: a value has no table, a nested `EXISTS` already
+            // contains only what its own tables provide, and the incoming row of an upsert
+            // is named by the statement rather than by the row set.
+            Self::Value(_)
+            | Self::Raw(_)
+            | Self::Star
+            | Self::Exists { .. }
+            | Self::UpsertRef { .. } => {}
+        }
+    }
+
+    /// Whether this expression reads a column of the row being inserted.
+    ///
+    /// MySQL only accepts a row alias on an `INSERT` whose `ON DUPLICATE KEY UPDATE` mentions
+    /// it, so the insert builder asks before writing the alias at all.
+    pub(crate) fn reads_upsert_row(&self) -> bool {
+        match self {
+            Self::UpsertRef { .. } => true,
+            Self::Binary { left, right, .. } => left.reads_upsert_row() || right.reads_upsert_row(),
+            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } => expr.reads_upsert_row(),
+            Self::Function { args, .. } => args.iter().any(Self::reads_upsert_row),
+            Self::Between {
+                expr, low, high, ..
+            } => expr.reads_upsert_row() || low.reads_upsert_row() || high.reads_upsert_row(),
+            Self::InList { expr, list, .. } => {
+                expr.reads_upsert_row() || list.iter().any(Self::reads_upsert_row)
+            }
+            Self::Case {
+                operand,
+                branches,
+                fallback,
+            } => {
+                operand.as_ref().is_some_and(Operand::reads_upsert_row)
+                    || branches
+                        .iter()
+                        .any(|(when, then)| when.reads_upsert_row() || then.reads_upsert_row())
+                    || fallback.as_ref().is_some_and(Operand::reads_upsert_row)
+            }
+            Self::Cast { expr, .. }
+            | Self::JsonPath { expr, .. }
+            | Self::InSubquery { expr, .. } => expr.reads_upsert_row(),
+            Self::FullText { column, .. } => column.reads_upsert_row(),
+            Self::Column { .. }
+            | Self::Value(_)
+            | Self::Star
+            | Self::Raw(_)
+            | Self::Exists { .. } => false,
+        }
+    }
+
+    /// Point every reference to the incoming row at `row`.
+    ///
+    /// MySQL's row alias is chosen per statement, so the name cannot be fixed when
+    /// [`excluded`](fn@excluded) builds the node; the insert builder rewrites it once it
+    /// knows what the statement will call the row.
+    pub(crate) fn set_upsert_row(&mut self, row: &'static str) {
+        match self {
+            Self::UpsertRef { row: name, .. } => *name = row,
+            Self::Binary { left, right, .. } => {
+                left.set_upsert_row(row);
+                right.set_upsert_row(row);
+            }
+            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } => expr.set_upsert_row(row),
+            Self::Function { args, .. } => {
+                for arg in args {
+                    arg.set_upsert_row(row);
+                }
+            }
+            Self::Between {
+                expr, low, high, ..
+            } => {
+                expr.set_upsert_row(row);
+                low.set_upsert_row(row);
+                high.set_upsert_row(row);
+            }
+            Self::InList { expr, list, .. } => {
+                expr.set_upsert_row(row);
+                for item in list {
+                    item.set_upsert_row(row);
+                }
+            }
+            Self::Case {
+                operand,
+                branches,
+                fallback,
+            } => {
+                if let Some(operand) = operand {
+                    operand.set_upsert_row(row);
+                }
+                for (when, then) in branches {
+                    when.set_upsert_row(row);
+                    then.set_upsert_row(row);
+                }
+                if let Some(fallback) = fallback {
+                    fallback.set_upsert_row(row);
+                }
+            }
+            Self::Cast { expr, .. }
+            | Self::JsonPath { expr, .. }
+            | Self::InSubquery { expr, .. } => expr.set_upsert_row(row),
+            Self::FullText { column, .. } => column.set_upsert_row(row),
+            Self::Column { .. }
+            | Self::Value(_)
+            | Self::Star
+            | Self::Raw(_)
+            | Self::Exists { .. } => {}
         }
     }
 }
@@ -949,34 +1095,40 @@ where
 }
 
 /// `a IN (values...)`.
+///
+/// An empty list is rendered as the false constant rather than the invalid `IN ()`, so a
+/// list built from a collection that happens to be empty is a query that runs and returns
+/// no rows.
 pub fn in_list<RowSet, A, I, V, MA>(a: A, values: I) -> Expr<RowSet, Bool>
 where
     A: TypedExpr<RowSet, MA>,
     I: IntoIterator<Item = V>,
-    V: Into<Value>,
+    V: IntoSqlValue<A::SqlType>,
 {
     Expr::from_kind(ExprKind::InList {
         expr: Operand::new(a.into_typed().into_kind()),
         list: values
             .into_iter()
-            .map(|v| ExprKind::Value(v.into()))
+            .map(|v| ExprKind::Value(v.into_sql_value()))
             .collect(),
         negated: false,
     })
 }
 
 /// `a NOT IN (values...)`.
+///
+/// An empty list is rendered as the true constant, because a value is not in nothing.
 pub fn not_in<RowSet, A, I, V, MA>(a: A, values: I) -> Expr<RowSet, Bool>
 where
     A: TypedExpr<RowSet, MA>,
     I: IntoIterator<Item = V>,
-    V: Into<Value>,
+    V: IntoSqlValue<A::SqlType>,
 {
     Expr::from_kind(ExprKind::InList {
         expr: Operand::new(a.into_typed().into_kind()),
         list: values
             .into_iter()
-            .map(|v| ExprKind::Value(v.into()))
+            .map(|v| ExprKind::Value(v.into_sql_value()))
             .collect(),
         negated: true,
     })
@@ -1474,6 +1626,45 @@ pub fn raw<T>(sql: impl Into<String>) -> Expr<T, Bool> {
     Expr::from_kind(ExprKind::Raw(sql.into()))
 }
 
+/// A column of the row an upsert is trying to insert.
+///
+/// This is the row that would have been written had it not collided, and reading it is how
+/// an upsert copies an incoming value into the existing row:
+///
+/// ```ignore
+/// db.insert(users)
+///     .value(users.insert("oscar@example.com", "Oscar", 21))
+///     .on_conflict(users.email)
+///     .do_update(users.name, excluded(users.name))
+/// ```
+///
+/// `excluded` is the spelling the SQL standard and PostgreSQL give this pseudo-table, and it
+/// is the one to write: on MySQL the same call renders through the statement's row alias
+/// (`new."name"` by default, see [`Insert::row_alias`](crate::Insert::row_alias)) instead, so
+/// one call site works on every database. [`new_row`] is the same function under MySQL's name.
+///
+/// The returned expression has no row set of its own, so it borrows the one its use implies:
+/// it can only be used where the statement being built supplies it.
+pub fn excluded<T: Table, S: SqlType, N: Nullability, RowSet>(
+    column: Column<T, S, N>,
+) -> Expr<RowSet, S> {
+    Expr::from_kind(ExprKind::UpsertRef {
+        row: "excluded",
+        column: column.name(),
+    })
+}
+
+/// A column of the row an upsert is trying to insert.
+///
+/// This is [`excluded`] under the name MySQL's documentation uses for the same thing: it
+/// reads the incoming row, not the stored one. Both spellings render the dialect's own
+/// syntax, so pick whichever reads better; `excluded` is the SQL standard's name.
+pub fn new_row<T: Table, S: SqlType, N: Nullability, RowSet>(
+    column: Column<T, S, N>,
+) -> Expr<RowSet, S> {
+    excluded(column)
+}
+
 // ---------------------------------------------------------------------------------------
 // Ordering
 // ---------------------------------------------------------------------------------------
@@ -1652,32 +1843,38 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     }
 
     /// `IN (values...)`.
+    ///
+    /// The values are checked against this column's SQL type, so `users.age.in_list(["a"])`
+    /// does not compile. An empty list renders as the false constant instead of the invalid
+    /// `IN ()`.
     pub fn in_list<RowSet, P, V>(self, values: impl IntoIterator<Item = V>) -> Expr<RowSet, Bool>
     where
         RowSet: Contains<P, T>,
-        V: Into<Value>,
+        V: IntoSqlValue<S>,
     {
         Expr::from_kind(ExprKind::InList {
             expr: Operand::new(self.into_expr_kind()),
             list: values
                 .into_iter()
-                .map(|v| ExprKind::Value(v.into()))
+                .map(|v| ExprKind::Value(v.into_sql_value()))
                 .collect(),
             negated: false,
         })
     }
 
     /// `NOT IN (values...)`.
+    ///
+    /// An empty list renders as the true constant: a value is not in nothing.
     pub fn not_in<RowSet, P, V>(self, values: impl IntoIterator<Item = V>) -> Expr<RowSet, Bool>
     where
         RowSet: Contains<P, T>,
-        V: Into<Value>,
+        V: IntoSqlValue<S>,
     {
         Expr::from_kind(ExprKind::InList {
             expr: Operand::new(self.into_expr_kind()),
             list: values
                 .into_iter()
-                .map(|v| ExprKind::Value(v.into()))
+                .map(|v| ExprKind::Value(v.into_sql_value()))
                 .collect(),
             negated: true,
         })

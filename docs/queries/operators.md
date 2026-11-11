@@ -117,7 +117,13 @@ SELECT ... FROM "users" WHERE ("users"."name" NOT IN (?))
 ```
 
 Every item is its own bound parameter, which is why a very large list can exceed the dialect's
-parameter limit. For a subquery, `in_query` and `not_in_query` take a `select` instead of a list.
+parameter limit. An empty list is not valid SQL — `IN ()` is a syntax error everywhere — so it
+renders the constant predicate `(1 = 0)` for `in_list` and `(1 = 1)` for `not_in`, which the
+database folds away and which keeps a dynamically built filter from producing broken SQL.
+
+The items are checked against the column's SQL type, so `users.age.in_list(["Alice"])` is a
+compile error rather than a runtime one. For a subquery, `in_query` and `not_in_query` take a
+`select` instead of a list.
 
 ## Arithmetic
 
@@ -168,6 +174,12 @@ SELECT COALESCE("users"."bio", ?), CAST("users"."age" AS TEXT) FROM "users"
 
 `COALESCE` is also a column method, `users.bio.coalesce("none")`. `CAST` is a method on `Expr`
 only; the target is a `SqlType` such as `besu::Text`, `besu::Int8` or `besu::Float8`.
+
+The type named in a cast is not always the type named in DDL: MySQL's `CAST` accepts `SIGNED`,
+`CHAR`, `DOUBLE`, `BINARY`, `DATETIME`, `DECIMAL(p,s)` and a few others, but not `INTEGER`,
+`TEXT` or `VARCHAR(n)`. The dialect renders the cast spelling itself, so `cast::<besu::Int8>()`
+becomes `CAST(... AS SIGNED)` on MySQL and `CAST(... AS BIGINT)` on PostgreSQL. A custom type is
+passed through verbatim, because only you know what the server accepts for it.
 
 ## Functions and aggregates
 
@@ -233,8 +245,8 @@ Compared with Drizzle's operators, none of the following exist yet — see
 
 ## Gotchas
 
-- **`in_list` and `between` are not type-checked against the column.** Both take values that
-  convert into `Value`, so `users.age.in_list(["Alice"])` compiles and fails in the database.
+- **`between` is not type-checked against the column.** It takes two values of one type, but
+  not the column's type, so a mismatched pair fails in the database.
 - **`not_between`, `is_true` and `is_false` are functions, not column methods.**
 - **`concat` takes typed expressions, not literals.** Literal text has no `SqlType`; pass a
   column, or `Expr::<_, besu::Text>::raw("'!'")` when it must be a constant.
