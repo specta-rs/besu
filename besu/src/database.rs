@@ -59,6 +59,27 @@ impl<Dr: Driver> Database<Dr> {
         Delete::new(self, T::DEF)
     }
 
+    /// Run a query and hand back its rows as they arrive.
+    ///
+    /// The statement is passed in rather than built here because a cursor borrows the SQL
+    /// text until it closes, and a value cannot borrow its own temporary:
+    ///
+    /// ```ignore
+    /// let sql = db.select(users).to_sql()?;
+    /// let mut rows = db.stream::<User>(&sql).await?;
+    /// while let Some(user) = rows.next().await { .. }
+    /// ```
+    pub async fn stream<'a, R: Decode<Dr>>(
+        &'a self,
+        sql: &'a besu_core::Sql<Dr::Dialect>,
+    ) -> Result<crate::Rows<'a, Dr, R>, Dr::Error> {
+        let inner = self.driver.query_stream(sql).await?;
+        Ok(crate::Rows {
+            inner,
+            phantom: PhantomData,
+        })
+    }
+
     /// Run a raw, parameterised statement.
     ///
     /// The fragment's `?` placeholders are rewritten to the dialect's own spelling, so the
@@ -97,6 +118,15 @@ impl<Dr: Driver> Executor for &Database<Dr> {
         sql: &besu_core::Sql<Dr::Dialect>,
     ) -> Result<Dr::Output, Dr::Error> {
         self.driver.execute(sql).await
+    }
+
+    fn query_stream<'c>(
+        &'c mut self,
+        sql: &'c besu_core::Sql<Dr::Dialect>,
+    ) -> impl core::future::Future<Output = Result<besu_core::RowStream<'c, Dr>, Dr::Error>> + Send + 'c
+    {
+        let driver: &'c Dr = &self.driver;
+        driver.query_stream(sql)
     }
 }
 
@@ -139,6 +169,18 @@ impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
         Delete::new(self, T::DEF)
     }
 
+    /// Run a query inside the transaction and hand back its rows as they arrive.
+    pub async fn stream<'c, R: Decode<Dr>>(
+        &'c mut self,
+        sql: &'c besu_core::Sql<Dr::Dialect>,
+    ) -> Result<crate::Rows<'c, Dr, R>, Dr::Error> {
+        let inner = Dr::txn_query_stream(&mut self.inner, sql).await?;
+        Ok(crate::Rows {
+            inner,
+            phantom: PhantomData,
+        })
+    }
+
     /// Run a raw, parameterised statement inside the transaction.
     pub fn execute(&mut self, fragment: Fragment) -> RawQuery<'_, &mut Self> {
         RawQuery {
@@ -175,6 +217,14 @@ impl<'a, Dr: TransactionDriver> Executor for &mut Transaction<'a, Dr> {
         sql: &besu_core::Sql<Dr::Dialect>,
     ) -> Result<Dr::Output, Dr::Error> {
         Dr::txn_execute(&mut self.inner, sql).await
+    }
+
+    fn query_stream<'c>(
+        &'c mut self,
+        sql: &'c besu_core::Sql<Dr::Dialect>,
+    ) -> impl core::future::Future<Output = Result<besu_core::RowStream<'c, Dr>, Dr::Error>> + Send + 'c
+    {
+        Dr::txn_query_stream(&mut self.inner, sql)
     }
 }
 

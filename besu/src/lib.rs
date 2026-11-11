@@ -88,6 +88,7 @@ pub mod migrate;
 pub mod prelude;
 mod query;
 mod selection;
+mod stream;
 mod table;
 
 pub mod types;
@@ -97,6 +98,7 @@ pub use besu_core::{
     self, Decode, Dialect, Driver, Error, Executor, Sql, TableDef, TransactionDriver, TypeDef,
     Value,
 };
+pub use besu_core::{RowStream, Stream, futures_stream};
 #[cfg(feature = "migrate")]
 pub use besu_schema as schema;
 pub use condition::{Contains, Literal, LiteralPath, SameType};
@@ -123,6 +125,7 @@ pub use query::{
     UpdateReturning,
 };
 pub use selection::Selection;
+pub use stream::Rows;
 pub use table::{Insertable, Set, Table};
 pub use types::{Column, NonNull, Nullability, Nullable, SqlType};
 

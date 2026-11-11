@@ -378,7 +378,9 @@ impl Column {
         let reference = match &attrs.references {
             Some(value) => {
                 let text = value.value();
-                let Some((table, column)) = text.split_once('.') else {
+                // Split at the last dot so `other.users.id` names a table in another schema
+                // as well as a column.
+                let Some((table, column)) = text.rsplit_once('.') else {
                     return Err(Error::new(
                         value.span(),
                         "besu: `references` must look like \"table.column\"",

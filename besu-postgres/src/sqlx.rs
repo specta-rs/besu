@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use sqlx::{
     Arguments, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
@@ -99,45 +97,6 @@ where
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
 
-/// The SQL text to send, suffixed with a comment recording the bound parameter types.
-///
-/// sqlx caches prepared statements by SQL string alone, while PostgreSQL fixes each
-/// parameter's type when the statement is *first* prepared. Running one statement with
-/// values of different types — easy with raw `sql!` fragments — would otherwise hand the
-/// server bytes for the wrong type, which it either rejects or, worse, reinterprets. The
-/// signature makes the cache key match the values actually being bound. `Sql::sql` is left
-/// untouched; only the string sent to the server carries the comment.
-fn query_text(sql: &Sql<Postgres>) -> Cow<'_, str> {
-    if sql.args().is_empty() {
-        return Cow::Borrowed(sql.sql());
-    }
-
-    let mut text = String::with_capacity(sql.sql().len() + sql.args().len() + 12);
-    text.push_str(sql.sql());
-    // A newline first, so a trailing `--` comment cannot swallow the signature.
-    text.push_str("\n/* besu:");
-    for value in sql.args() {
-        text.push(match value {
-            Value::Null => 'n',
-            Value::Bool(_) => 'b',
-            Value::Int(_) => 'i',
-            Value::UInt(_) => 'u',
-            Value::Float(_) => 'f',
-            Value::Text(_) => 't',
-            Value::Bytes(_) => 'x',
-            Value::Uuid(_) => 'd',
-            Value::Date(_) => 'e',
-            Value::Time(_) => 'm',
-            Value::Timestamp(_) => 's',
-            Value::TimestampTz(_) => 'z',
-            Value::Json(_) => 'j',
-            _ => '?',
-        });
-    }
-    text.push_str(" */");
-    Cow::Owned(text)
-}
-
 fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
     let mut arguments = PgArguments::default();
     for value in sql.args() {
@@ -197,17 +156,25 @@ impl Driver for Sqlx {
     }
 
     async fn query(&self, sql: &Sql<Postgres>) -> Result<Vec<Self::Row>, Self::Error> {
-        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(&text, arguments)
+        sqlx::query_with(sql.sql(), arguments)
             .fetch_all(&self.pool)
             .await
     }
 
     async fn execute(&self, sql: &Sql<Postgres>) -> Result<Self::Output, Self::Error> {
-        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(&text, arguments).execute(&self.pool).await
+        sqlx::query_with(sql.sql(), arguments)
+            .execute(&self.pool)
+            .await
+    }
+
+    async fn query_stream<'a>(
+        &'a self,
+        sql: &'a Sql<Postgres>,
+    ) -> Result<besu_core::RowStream<'a, Self>, Self::Error> {
+        let arguments = arguments(sql)?;
+        Ok(sqlx::query_with(sql.sql(), arguments).fetch(&self.pool))
     }
 }
 
@@ -239,9 +206,8 @@ impl TransactionDriver for Sqlx {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Postgres>,
     ) -> Result<Vec<Self::Row>, Self::Error> {
-        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(&text, arguments)
+        sqlx::query_with(sql.sql(), arguments)
             .fetch_all(&mut **tx)
             .await
     }
@@ -250,9 +216,18 @@ impl TransactionDriver for Sqlx {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Postgres>,
     ) -> Result<Self::Output, Self::Error> {
-        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(&text, arguments).execute(&mut **tx).await
+        sqlx::query_with(sql.sql(), arguments)
+            .execute(&mut **tx)
+            .await
+    }
+
+    async fn txn_query_stream<'c, 'a>(
+        tx: &'c mut Self::Transaction<'a>,
+        sql: &'c Sql<Postgres>,
+    ) -> Result<besu_core::RowStream<'c, Self>, Self::Error> {
+        let arguments = arguments(sql)?;
+        Ok(sqlx::query_with(sql.sql(), arguments).fetch(&mut **tx))
     }
 }
 

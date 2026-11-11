@@ -158,6 +158,15 @@ impl TransactionDriver for Fake {
         record(&tx.statements, sql);
         Ok(1)
     }
+
+    async fn txn_query_stream<'c, 'a>(
+        tx: &'c mut Self::Transaction<'a>,
+        sql: &'c Sql<Self::Dialect>,
+    ) -> Result<besu::RowStream<'c, Self>, Self::Error> {
+        record(&tx.statements, sql);
+        let rows: Vec<Result<i64, Error>> = vec![Ok(1), Ok(2), Ok(3)];
+        Ok(Box::pin(besu::futures_stream::iter(rows)))
+    }
 }
 
 // ---------------------------------------------------------------------------------------

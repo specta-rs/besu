@@ -24,6 +24,42 @@ impl Dialect for Postgres {
     const JSON_PATH: JsonPathStyle = JsonPathStyle::Postgres;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
 
+    /// Encode the bound values' shapes so the prepared-statement cache cannot confuse two
+    /// statements that share text but not parameter types.
+    ///
+    /// PostgreSQL fixes parameter types at prepare time, and sqlx caches by SQL string alone.
+    /// Without this, `sql!("SELECT ?::numeric", x)` executed once with an integer and once
+    /// with a numeric would reach the same cached statement with the wrong bytes.
+    fn statement_suffix(args: &[Self::Value]) -> Option<String> {
+        if args.is_empty() {
+            return None;
+        }
+
+        let mut suffix = String::with_capacity(args.len() + 14);
+        // A newline first, so a trailing `--` comment cannot swallow the signature.
+        suffix.push_str("\n/* besu:");
+        for value in args {
+            suffix.push(match value {
+                Value::Null => 'n',
+                Value::Bool(_) => 'b',
+                Value::Int(_) => 'i',
+                Value::UInt(_) => 'u',
+                Value::Float(_) => 'f',
+                Value::Text(_) => 't',
+                Value::Bytes(_) => 'x',
+                Value::Uuid(_) => 'd',
+                Value::Date(_) => 'e',
+                Value::Time(_) => 'm',
+                Value::Timestamp(_) => 's',
+                Value::TimestampTz(_) => 'z',
+                Value::Json(_) => 'j',
+                _ => '?',
+            });
+        }
+        suffix.push_str(" */");
+        Some(suffix)
+    }
+
     fn bind(value: Value) -> Result<Self::Value, Error> {
         // PostgreSQL has a native type for every value Besu can represent, and `NUMERIC`
         // covers integers that do not fit in an `i64`, so nothing is lossy.
@@ -57,6 +93,7 @@ impl Dialect for Postgres {
             TypeDef::Jsonb => Cow::Borrowed("JSONB"),
             TypeDef::Date => Cow::Borrowed("DATE"),
             TypeDef::Time => Cow::Borrowed("TIME"),
+            TypeDef::TimeTz => Cow::Borrowed("TIMETZ"),
             TypeDef::Timestamp => Cow::Borrowed("TIMESTAMP"),
             TypeDef::TimestampTz => Cow::Borrowed("TIMESTAMPTZ"),
             TypeDef::Decimal(p, s) => Cow::Owned(format!("NUMERIC({p},{s})")),

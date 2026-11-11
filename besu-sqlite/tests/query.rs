@@ -699,3 +699,64 @@ async fn too_many_parameters_is_a_clear_error() {
         "expected a parameter-limit error, got: {message}"
     );
 }
+
+#[tokio::test]
+async fn streaming_a_result_set() {
+    let db = setup().await;
+    let rows: Vec<_> = (0..200u32)
+        .map(|i| users.insert(format!("s{i}@example.com"), format!("S {i}"), 30))
+        .collect();
+    db.insert(users).values(rows).await.unwrap();
+
+    // A cursor borrows the SQL text, so the statement is rendered first and kept alive.
+    let sql = db
+        .select(users)
+        .filter(users.age.eq(30))
+        .order_by(users.id.asc())
+        .to_sql()
+        .unwrap();
+    let mut rows = db.stream::<User>(&sql).await.unwrap();
+
+    let mut count = 0;
+    while let Some(user) = rows.next().await {
+        let user = user.unwrap();
+        assert_eq!(user.age, 30);
+        count += 1;
+    }
+    assert_eq!(count, 200);
+
+    // And the stream is a real `Stream`, so `collect` is available for small result sets.
+    let sql = db.select(users).limit(5).to_sql().unwrap();
+    let collected = db
+        .stream::<User>(&sql)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(collected.len(), 5);
+}
+
+#[tokio::test]
+async fn streaming_inside_a_transaction() {
+    let db = setup().await;
+    db.insert(users)
+        .values([
+            users.insert("a@example.com", "Alice", 30),
+            users.insert("b@example.com", "Bob", 20),
+        ])
+        .await
+        .unwrap();
+
+    let mut tx = db.begin().await.unwrap();
+    let sql = tx.select(users).order_by(users.id.asc()).to_sql().unwrap();
+    let mut rows = tx.stream::<User>(&sql).await.unwrap();
+    let mut names = Vec::new();
+    while let Some(user) = rows.next().await {
+        names.push(user.unwrap().name);
+    }
+    drop(rows);
+    tx.commit().await.unwrap();
+
+    assert_eq!(names, ["Alice", "Bob"]);
+}

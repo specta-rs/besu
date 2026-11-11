@@ -65,6 +65,15 @@ impl Ddl for MySqlDdl {
         MySql::type_name(ty.clone()).into_owned()
     }
 
+    fn normalise_type(&self, ty: &TypeDef) -> TypeDef {
+        // MySQL stores a `TIMETZ` as a plain `TIME` and drops the offset, so a schema
+        // declaring `TIMETZ` must compare equal to the `TIME` the database reports back.
+        match ty {
+            TypeDef::TimeTz => TypeDef::Time,
+            other => other.clone(),
+        }
+    }
+
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
         let mut sql = format!(
             "{} {}",
@@ -144,7 +153,7 @@ impl Ddl for MySqlDdl {
     /// to be written by hand.
     fn create_table(&self, table: &Table) -> String {
         let mut sql = String::from("CREATE TABLE ");
-        sql.push_str(&self.quote_table(&table.name));
+        sql.push_str(&self.quote_table(&table.qualified_name()));
         sql.push_str(" (");
 
         let primary_key = table.primary_key();
@@ -180,6 +189,13 @@ impl Ddl for MySqlDdl {
                     sql.push_str(&format!("({prefix}))"));
                 }
             }
+        }
+
+        // Composite `UNIQUE` constraints. MySQL has no object distinct from the unique key
+        // that enforces them, so they are written as a named key.
+        for unique in &table.uniques {
+            sql.push_str(", ");
+            sql.push_str(&self.unique_clause(unique));
         }
 
         // Secondary indexes are inlined here because `create_schema` only runs
@@ -246,13 +262,71 @@ impl Ddl for MySqlDdl {
             Change::AlterColumn { table, from, to } => self.alter_column(table, from, to),
             Change::AddIndex { table, index } => vec![self.create_index(table, index)],
             Change::DropIndex { table, index } => vec![self.drop_index(table, index)],
+            Change::AddUnique { table, unique } => vec![self.add_unique(table, unique)],
+            Change::DropUnique { table, unique } => vec![self.drop_unique(table, unique)],
             Change::AddForeignKey { table, foreign_key } => {
                 vec![self.add_foreign_key(table, foreign_key)]
             }
             Change::DropForeignKey { table, foreign_key } => {
                 vec![self.drop_foreign_key(table, foreign_key)]
             }
+            // MySQL has no named enum types (an enum is spelled inline in the column) and
+            // SQLite has none either, so the enum changes render as nothing.
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use besu_schema::Unique;
+
+    fn table() -> Table {
+        Table {
+            name: "memberships".into(),
+            schema: None,
+            columns: vec![Column {
+                name: "user_id".into(),
+                ty: TypeDef::Int8,
+                nullable: false,
+                auto_increment: false,
+                primary_key: false,
+                unique: false,
+                default: None,
+                comment: None,
+                renamed_from: None,
+            }],
+            indexes: Vec::new(),
+            uniques: vec![Unique {
+                name: "memberships_user_key".into(),
+                columns: vec!["user_id".into()],
+            }],
+            foreign_keys: Vec::new(),
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn a_unique_is_a_named_key_in_create_table() {
+        assert_eq!(
+            MySqlDdl.create_table(&table()),
+            "CREATE TABLE `memberships` (`user_id` BIGINT NOT NULL, \
+             CONSTRAINT `memberships_user_key` UNIQUE (`user_id`)) \
+             ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+    }
+
+    #[test]
+    fn a_unique_is_added_and_dropped_with_alter_table() {
+        let unique = &table().uniques[0];
+        assert_eq!(
+            MySqlDdl.add_unique("memberships", unique),
+            "ALTER TABLE `memberships` ADD CONSTRAINT `memberships_user_key` UNIQUE (`user_id`)"
+        );
+        assert_eq!(
+            MySqlDdl.drop_unique("memberships", unique),
+            "ALTER TABLE `memberships` DROP CONSTRAINT `memberships_user_key`"
+        );
     }
 }

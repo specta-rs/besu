@@ -146,6 +146,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("-- {} user(s) older than 10 --", filtered.len());
 
+    // A stream decodes one row at a time instead of collecting the whole result set.
+    println!("-- streaming --");
+    let sql = db.select(users).order_by(users.id.asc()).to_sql()?;
+    let mut rows = db.stream::<User>(&sql).await?;
+    while let Some(user) = rows.next().await {
+        let user = user?;
+        println!("  {}", user.name);
+    }
+
     // Deleting without a filter does not compile; this is the explicit opt-in.
     db.delete(posts).filter(posts.published.eq(false)).await?;
 

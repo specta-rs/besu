@@ -143,7 +143,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
 
     /// Render the exact SQL this query will run, without running it.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build())
+        Ok(self.query.build().seal())
     }
 
     /// Render the SQL with its parameters inlined, for logging.

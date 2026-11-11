@@ -57,6 +57,8 @@ impl Dialect for SQLite {
             TypeDef::Json | TypeDef::Jsonb => "JSON",
             TypeDef::Date => "DATE",
             TypeDef::Time => "TIME",
+            // SQLite has no timezone-aware time, so the offset is dropped.
+            TypeDef::TimeTz => "TIME",
             TypeDef::Timestamp | TypeDef::TimestampTz => "TIMESTAMP",
             // A decimal in SQLite is text: `NUMERIC` affinity would try to turn the stored
             // string into a float and lose the exact value, which is the whole point of a

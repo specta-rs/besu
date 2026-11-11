@@ -137,4 +137,17 @@ pub trait Dialect: 'static + Sized {
 
     /// The dialect's name for a canonical type, used by `CAST` and as the basis of DDL.
     fn type_name(ty: TypeDef) -> Cow<'static, str>;
+
+    /// A comment appended to a finished statement that carries no meaning to the database.
+    ///
+    /// This exists for one reason: a driver caches prepared statements per SQL *string*, and
+    /// some databases fix the parameter types at prepare time. Two statements with identical
+    /// text but different bound types would then share a cache entry and the second would send
+    /// bytes for the wrong type. A suffix that encodes the type shape makes the cache key
+    /// match what is actually being bound.
+    ///
+    /// PostgreSQL needs this. Nothing else does, and the default returns `None`.
+    fn statement_suffix(_args: &[Self::Value]) -> Option<String> {
+        None
+    }
 }

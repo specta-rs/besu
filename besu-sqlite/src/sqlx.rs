@@ -145,6 +145,14 @@ impl Driver for Sqlx {
             .execute(&self.pool)
             .await
     }
+
+    async fn query_stream<'a>(
+        &'a self,
+        sql: &'a Sql<SQLite>,
+    ) -> Result<besu_core::RowStream<'a, Self>, Self::Error> {
+        let arguments = arguments(sql)?;
+        Ok(sqlx::query_with(sql.sql(), arguments).fetch(&self.pool))
+    }
 }
 
 impl besu::SchemaDriver for Sqlx {
@@ -202,6 +210,14 @@ impl TransactionDriver for Sqlx {
         sqlx::query_with(sql.sql(), arguments)
             .execute(&mut **tx)
             .await
+    }
+
+    async fn txn_query_stream<'c, 'a>(
+        tx: &'c mut Self::Transaction<'a>,
+        sql: &'c Sql<SQLite>,
+    ) -> Result<besu_core::RowStream<'c, Self>, Self::Error> {
+        let arguments = arguments(sql)?;
+        Ok(sqlx::query_with(sql.sql(), arguments).fetch(&mut **tx))
     }
 }
 

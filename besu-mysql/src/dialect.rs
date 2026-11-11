@@ -97,6 +97,8 @@ impl Dialect for MySql {
                 TypeDef::Json | TypeDef::Jsonb => "JSON",
                 TypeDef::Date => "DATE",
                 TypeDef::Time => "TIME",
+                // MySQL has no timezone-aware time; the offset is dropped.
+                TypeDef::TimeTz => "TIME",
                 // `DATETIME` rather than `TIMESTAMP`: MySQL's `TIMESTAMP` is range-limited
                 // to 2038 and silently converts through the session time zone.
                 TypeDef::Timestamp | TypeDef::TimestampTz => "DATETIME(6)",

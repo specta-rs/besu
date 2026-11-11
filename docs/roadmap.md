@@ -11,7 +11,7 @@ would actually require. The order is a judgement about impact versus cost, not a
 | 4 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
 | 5 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
 | 6 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
-| 7 | [wasm support](#wasm-support) | The builder could run in a browser; execution cannot | Large |
+| 7 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
 | 8 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
 | 9 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
 
@@ -67,7 +67,7 @@ Tracked as [#55](https://github.com/specta-rs/besu/issues/55).
 `DECIMAL` and a user-defined marker type can all be declared. What is still missing is a
 first-class decimal value type: `Decimal`'s Rust type is a `String`, which SQLite handles by
 storing text, but PostgreSQL and MySQL return `NUMERIC` and no driver decodes that into a
-string yet. Enum DDL and `CREATE TYPE` are also unwritten.
+string yet.
 
 `TypeDef::Custom(Cow<'static, str>)` already exists and introspection uses it for native types
 Besu does not model. The derive does not: a field type outside the built-in list is a compile
@@ -83,8 +83,6 @@ What it would take:
   most cases).
 - A `Decode` story: a user type still has to decode from a driver row, so either the user
   implements `Decode` per driver or the mapping goes through an existing primitive.
-- Enum DDL: `Schema::enums` is stored but there is no `CREATE TYPE` step and the diff ignores
-  enums. Custom types make this more urgent.
 
 ## Runtime driver switching
 
@@ -143,23 +141,27 @@ What it would take:
 
 ## wasm support
 
-Tracked as [#60](https://github.com/specta-rs/besu/issues/60).
+The builder half is done: `besu-core` and `besu` compile for `wasm32-unknown-unknown`, so a
+web front end can build a query and render the exact SQL a server will run. The `wasm` CI job
+keeps it that way and `besu/tests/dry.rs` pins the SQL. See
+[Compiling for wasm32](architecture.md#compiling-for-wasm32) for what does and does not work.
 
-The query builder is mostly `alloc`-only: `Dialect`, `Sql`, `Value`, `ExprKind` and the
-builders do not need a filesystem or a socket. Execution is the problem: the drivers are
-built on sqlx and tokio, which do not target `wasm32-unknown-unknown`.
+Executing a query in a browser is still open, and it is not a matter of a flag. The drivers
+are built on sqlx, which is built on tokio, which reaches for sockets this target does not
+have. What it would take:
 
-What it would take:
+- A new driver for a browser storage API (IndexedDB, OPFS) or an HTTP bridge to a server. It
+  has to supply its own `Decode` impls, because decoding a row is the driver's job, and a
+  `Dialect` that spells SQL the other end understands.
+- A decision about blocking: browser storage is async but has no connection pool, while the
+  `Driver` trait assumes a `Send` future and a `Send + Sync` driver. On a single-threaded wasm
+  module those bounds are vacuous rather than wrong, but a driver holding JS handles is not
+  `Send` in any useful sense.
+- A story for the clock. `besu::logged` reads `Instant::now()` once a subscriber enables it,
+  and that traps in a browser; migrations would need a timestamp that does not.
 
-- Make `besu-core` `no_std + alloc`. `Error` currently implements `std::error::Error`; that
-  impl would need a `std` feature.
-- Verify `chrono`, `uuid` and `serde_json` with the wasm target.
-- A new driver for a browser storage API (IndexedDB, OPFS) or an HTTP bridge to a server. That
-  driver has to supply `Decode` impls and a `Dialect` whose SQL a remote endpoint understands.
-- A decision about blocking: browser storage is async but not a database connection pool; the
-  `Driver` trait assumes a `Send` future and a `Send + Sync` driver, which may not fit.
-
-Building and rendering SQL in the browser is achievable much sooner than executing it.
+Ship the same query builder to the client and execute it on the server in the meantime; that
+is the shape this half of the work was for.
 
 ## Table name prefixes
 
@@ -209,18 +211,15 @@ These are not large enough for their own section, but they are real. Each is a t
   transactions.** One level only.
 - **[#68](https://github.com/specta-rs/besu/issues/68) — down migrations.** The runner is
   append-only by design.
-- **[#71](https://github.com/specta-rs/besu/issues/71) — PostgreSQL composite `UNIQUE`.**
-  Represented as an index, which `DROP INDEX` cannot remove.
-- **[#72](https://github.com/specta-rs/besu/issues/72) — schema-qualified tables are diffed
-  by name only.**
-- **[#73](https://github.com/specta-rs/besu/issues/73) — `TimeTz`, enums and other native
-  types** come back as `TypeDef::Custom`, and a `DECIMAL` cannot decode into a `String` on
-  PostgreSQL or MySQL yet.
 
 ## Recently closed
 
 Kept here so the history is visible rather than deleted:
 
+- **#60, the builder on wasm32.** `besu-core` and `besu` compile for
+  `wasm32-unknown-unknown`, so SQL can be generated in a browser and executed on a server.
+  Execution in the browser still needs a driver of its own; see
+  [wasm support](#wasm-support).
 - **#63, two-sided containment.** Both operands of a comparison, every aggregate argument and
   every helper-function argument are checked now.
 - **#64, SQLite column changes.** `push` rebuilds the table instead of refusing.
@@ -232,6 +231,14 @@ Kept here so the history is visible rather than deleted:
 - **#75, publish metadata.** Every crate has a README, keywords and categories, and the
   publish order is written down in `CONTRIBUTING.md`.
 - **#76, update from model.** `Update::set_model`.
+- **#71, PostgreSQL composite `UNIQUE`.** A multi-column constraint is `Table::uniques`,
+  added and dropped with `ALTER TABLE`, instead of an index that `DROP INDEX` could not
+  remove.
+- **#72, schema-qualified tables.** A table's identity is `(schema, name)`; introspection
+  reports every non-system schema and the differ pairs tables by both.
+- **#73, `TimeTz` and enum types.** `TypeDef::TimeTz` for PostgreSQL's `TIMETZ`, and
+  `Schema::enums` is introspected, diffed and rendered as `CREATE TYPE` / `ALTER TYPE`. A
+  `DECIMAL` still cannot decode into a `String` on PostgreSQL or MySQL.
 - **#58, JSON path operators.** `json_get` and `json_text` with a dotted path, rendered per
   dialect.
 - **#54, rename detection.** `#[besu(renamed_from = "...")]` turns a drop plus an add into one

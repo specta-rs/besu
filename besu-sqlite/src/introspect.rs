@@ -1,6 +1,6 @@
 use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
-use besu_schema::{Column, ForeignKey, Index, Schema, Table};
+use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique};
 
 use crate::Sqlx;
 
@@ -60,6 +60,7 @@ async fn introspect_table(
             )
             .collect(),
         indexes: Vec::new(),
+        uniques: Vec::new(),
         foreign_keys: Vec::new(),
         comment: None,
     };
@@ -102,6 +103,11 @@ async fn introspect_indexes(
                     column.unique = true;
                 }
             }
+            // A multi-column `UNIQUE` is reported as an automatic index too. SQLite gives
+            // that index a generated name (`sqlite_autoindex_<table>_<n>`) and does not
+            // expose the constraint's own name, which is why the differ matches uniques by
+            // their columns rather than by name.
+            "u" if unique != 0 => table.uniques.push(Unique { name, columns }),
             // `PRIMARY KEY` automatic indexes.
             "pk" => {}
             _ => table.indexes.push(Index {

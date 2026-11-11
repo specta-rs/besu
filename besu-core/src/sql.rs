@@ -241,6 +241,18 @@ impl<D: Dialect> Sql<D> {
         }
     }
 
+    /// Append the dialect's statement suffix, if it has one.
+    ///
+    /// Called once, at the end of building a statement, so the suffix is part of the text that
+    /// `to_sql` shows and part of the string the driver sends. See
+    /// [`Dialect::statement_suffix`] for why it exists.
+    pub fn seal(mut self) -> Self {
+        if let Some(suffix) = D::statement_suffix(&self.args) {
+            self.sql.to_mut().push_str(&suffix);
+        }
+        self
+    }
+
     /// Render the statement for a driver.
     pub fn render(&self) -> Result<Rendered<'_, D>, Error> {
         self.check()?;

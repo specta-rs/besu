@@ -94,9 +94,14 @@ async fn generated_sql() {
         .to_sql()
         .unwrap();
 
+    // The trailing comment is the PostgreSQL driver's cache key: sqlx caches a prepared
+    // statement per SQL string and PostgreSQL fixes parameter types when it is prepared.
     assert_eq!(
         sql.sql(),
-        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio" FROM "users" WHERE ("users"."age" > $1) AND ("users"."bio" IS NULL) ORDER BY "users"."name" ASC LIMIT $2"#
+        concat!(
+            r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio" FROM "users" WHERE ("users"."age" > $1) AND ("users"."bio" IS NULL) ORDER BY "users"."name" ASC LIMIT $2"#,
+            "\n/* besu:ii */"
+        )
     );
     assert_eq!(sql.args().len(), 2);
 }
@@ -281,7 +286,10 @@ async fn raw_sql() {
         .execute(sql!("SELECT * FROM users WHERE age > ?", 18))
         .to_sql()
         .unwrap();
-    assert_eq!(rendered.sql(), "SELECT * FROM users WHERE age > $1");
+    assert_eq!(
+        rendered.sql(),
+        "SELECT * FROM users WHERE age > $1\n/* besu:i */"
+    );
 
     let rows: Vec<User> = db
         .execute(sql!("SELECT * FROM users WHERE age > ?", 18))

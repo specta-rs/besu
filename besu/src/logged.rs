@@ -61,10 +61,17 @@
 //! which is the one worth logging, but it is not the database's own execution time. Use
 //! the database's `EXPLAIN` for that.
 
-use core::time::Duration;
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 use std::time::Instant;
 
-use besu_core::{Dialect, Driver, Error, Sql, TransactionDriver};
+use alloc::string::String;
+
+use besu_core::{Dialect, Driver, Error, RowStream, Sql, Stream, TransactionDriver};
 
 use crate::Database;
 #[cfg(feature = "migrate")]
@@ -207,6 +214,26 @@ impl Policy {
             || (self.slow.is_some() && tracing::enabled!(target: TARGET, tracing::Level::WARN))
     }
 
+    /// Report a stream that has finished, from the SQL text captured when it started.
+    fn report_text(&self, kind: &'static str, sql: &str, elapsed: Duration) {
+        if self.log_queries && tracing::enabled!(target: TARGET, tracing::Level::DEBUG) {
+            tracing::debug!(target: TARGET, kind, elapsed = ?elapsed, sql, "statement");
+        }
+
+        if let Some(threshold) = self.slow {
+            if elapsed >= threshold && tracing::enabled!(target: TARGET, tracing::Level::WARN) {
+                tracing::warn!(
+                    target: TARGET,
+                    kind,
+                    elapsed = ?elapsed,
+                    threshold = ?threshold,
+                    sql,
+                    "slow statement"
+                );
+            }
+        }
+    }
+
     /// Report one finished statement.
     fn report<D: Dialect>(&self, kind: &'static str, sql: &Sql<D>, elapsed: Duration) {
         if self.log_queries && tracing::enabled!(target: TARGET, tracing::Level::DEBUG) {
@@ -296,6 +323,57 @@ impl<Dr: Driver> Driver for Logged<Dr> {
         }
         result
     }
+
+    // The `'a` bound is stronger than the trait's, which is deliberate: `Logged` never
+    // shortens a stream's borrow, and stating that lets callers keep the stream after the
+    // future has been awaited.
+    #[allow(refining_impl_trait)]
+    fn query_stream<'a>(
+        &'a self,
+        sql: &'a Sql<Dr::Dialect>,
+    ) -> impl Future<Output = Result<RowStream<'a, Dr>, Self::Error>> + Send + 'a {
+        // A cursor outlives this call, so the event is emitted when the stream ends rather
+        // than around it. That is the only honest place to measure it.
+        let started = self.policy.reporting().then(Instant::now);
+        let summary = started.map(|_| alloc::string::ToString::to_string(&sql.inspect()));
+        let policy = self.policy;
+        let inner = self.inner.query_stream(sql);
+
+        async move {
+            let inner = inner.await?;
+            match started {
+                Some(started) => Ok(Box::pin(LoggedStream::<Dr> {
+                    inner,
+                    started,
+                    policy,
+                    summary: summary.unwrap_or_default(),
+                }) as RowStream<'a, Dr>),
+                None => Ok(inner),
+            }
+        }
+    }
+}
+
+/// A row stream that reports when it finishes.
+struct LoggedStream<'a, Dr: Driver> {
+    inner: RowStream<'a, Dr>,
+    started: Instant,
+    policy: Policy,
+    summary: String,
+}
+
+impl<Dr: Driver> Stream for LoggedStream<'_, Dr> {
+    type Item = Result<Dr::Row, Dr::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        let next = Pin::new(&mut this.inner).poll_next(cx);
+        if let Poll::Ready(None) = next {
+            this.policy
+                .report_text("stream", &this.summary, this.started.elapsed());
+        }
+        next
+    }
 }
 
 /// The transaction handle of a [`Logged`] driver.
@@ -363,6 +441,25 @@ impl<Dr: TransactionDriver> TransactionDriver for Logged<Dr> {
             tx.policy.report("execute", sql, started.elapsed());
         }
         result
+    }
+
+    async fn txn_query_stream<'c, 'a>(
+        tx: &'c mut Self::Transaction<'a>,
+        sql: &'c Sql<Self::Dialect>,
+    ) -> Result<RowStream<'c, Self>, Self::Error> {
+        let started = tx.policy.reporting().then(Instant::now);
+        let summary = started.map(|_| alloc::string::ToString::to_string(&sql.inspect()));
+        let policy = tx.policy;
+        let inner = Dr::txn_query_stream(&mut tx.inner, sql).await?;
+        match started {
+            Some(started) => Ok(Box::pin(LoggedStream::<Dr> {
+                inner,
+                started,
+                policy,
+                summary: summary.unwrap_or_default(),
+            }) as RowStream<'c, Dr>),
+            None => Ok(inner),
+        }
     }
 }
 
