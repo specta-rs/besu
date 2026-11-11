@@ -332,9 +332,11 @@ besu migrate --database postgres://user:pass@host/db --dir migrations
 
 ## Gotchas
 
-- **Renames are drop plus add.** `diff` deliberately refuses to guess. Renaming a column or a
-  table looks exactly like dropping one and creating another, so `push` treats it as
-  destructive and `generate` writes a `DROP`/`ADD` pair. Write the rename by hand.
+- **Renames are only detected when declared.** A rename looks exactly like a drop plus an
+  add, so `diff` refuses to guess. Add `#[besu(renamed_from = "old_name")]` to the field and
+  the migration becomes one `ALTER TABLE ... RENAME COLUMN`, which keeps the data. Without the
+  attribute, `push` treats it as destructive and stops. Renaming a *table* has no such
+  attribute yet.
 - **`push` is not transactional.** Statements are executed one at a time. A failure halfway
   leaves the earlier ones applied. Use `generate` plus `migrate` for anything that matters.
 - **Type widening is invisible on a dialect that folds types.** SQLite folds every integer

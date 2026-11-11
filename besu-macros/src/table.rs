@@ -171,6 +171,7 @@ struct FieldAttrs {
     skip: bool,
     default: Option<Default>,
     sql_type: Option<LitStr>,
+    renamed_from: Option<LitStr>,
     references: Option<LitStr>,
     on_delete: Option<String>,
     on_update: Option<String>,
@@ -223,6 +224,10 @@ impl FieldAttrs {
                     this.default = Some(Default::Now);
                     return Ok(());
                 }
+                if meta.path.is_ident("renamed_from") {
+                    this.renamed_from = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
                 if meta.path.is_ident("sql_type") {
                     this.sql_type = Some(meta.value()?.parse()?);
                     return Ok(());
@@ -244,7 +249,8 @@ impl FieldAttrs {
                 Err(meta.error(
                     "unrecognised column attribute; expected one of `column`, `primary_key`, \
                      `auto_increment`, `unique`, `index`, `skip`, `default`, `default_sql`, \
-                     `default_now`, `sql_type`, `references`, `on_delete`, `on_update`",
+                     `default_now`, `sql_type`, `renamed_from`, `references`, `on_delete`, \
+                     `on_update`",
                 ))
             })?;
         }
@@ -298,6 +304,7 @@ struct Column {
     unique: bool,
     index: bool,
     default: Option<Default>,
+    renamed_from: Option<LitStr>,
     reference: Option<Reference>,
 }
 
@@ -400,6 +407,7 @@ impl Column {
             unique: attrs.unique,
             index: attrs.index,
             default: attrs.default,
+            renamed_from: attrs.renamed_from,
             reference,
         })))
     }
@@ -542,6 +550,10 @@ impl Codegen {
             let auto_increment = column.auto_increment;
             let primary_key = column.primary_key;
             let unique = column.unique;
+            let renamed_from = match &column.renamed_from {
+                Some(previous) => quote!(Some(#previous)),
+                None => quote!(None),
+            };
             let default = match &column.default {
                 Some(Default::Literal(literal)) => {
                     quote!(Some(#besu::DefaultValue::#literal))
@@ -559,6 +571,7 @@ impl Codegen {
                     primary_key: #primary_key,
                     unique: #unique,
                     default: #default,
+                    renamed_from: #renamed_from,
                 }
             }
         });

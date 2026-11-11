@@ -104,6 +104,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
                         unique: false,
                         default: parse_default(default.as_deref(), &extra),
                         comment: None,
+                        renamed_from: None,
                     }
                 },
             )

@@ -211,6 +211,9 @@ pub struct Column {
     /// An optional comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The column's previous name, if the declaration says it was renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 impl Column {
@@ -225,6 +228,7 @@ impl Column {
             unique: def.unique,
             default: def.default.map(default_to_sql),
             comment: None,
+            renamed_from: def.renamed_from.map(Into::into),
         }
     }
 

@@ -105,6 +105,16 @@ pub trait Ddl {
         )
     }
 
+    /// `ALTER TABLE ... RENAME COLUMN`.
+    fn rename_column(&self, table: &str, from: &str, to: &str) -> String {
+        format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            self.quote_table(table),
+            self.quote(from),
+            self.quote(to)
+        )
+    }
+
     /// `ALTER TABLE ... DROP COLUMN`.
     fn drop_column(&self, table: &str, column: &str) -> String {
         format!(
@@ -232,6 +242,9 @@ pub trait Ddl {
             }
             Change::DropTable { name } => vec![self.drop_table(name)],
             Change::AddColumn { table, column } => vec![self.add_column(table, column)],
+            Change::RenameColumn { table, from, to } => {
+                vec![self.rename_column(table, from, to)]
+            }
             Change::DropColumn { table, column } => vec![self.drop_column(table, column)],
             Change::AlterColumn { table, from, to } => self.alter_column(table, from, to),
             Change::AddIndex { table, index } => vec![self.create_index(table, index)],

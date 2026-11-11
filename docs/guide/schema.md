@@ -104,6 +104,7 @@ identifier and collide; that is a compile error rather than a silent merge.
 | `#[besu(default = <literal>)]` | A literal default: string, integer, float or boolean |
 | `#[besu(default_sql = "expr")]` | A raw SQL default expression, inserted verbatim |
 | `#[besu(default_now)]` | `DEFAULT CURRENT_TIMESTAMP` |
+| `#[besu(renamed_from = "old_name")]` | Declares that this column used to be called something else, so a migration renames it instead of dropping and recreating it |
 | `#[besu(references = "table.column")]` | A foreign key to one column of another table |
 | `#[besu(on_delete = "cascade")]` | The foreign key's `ON DELETE` action |
 | `#[besu(on_update = "restrict")]` | The foreign key's `ON UPDATE` action |

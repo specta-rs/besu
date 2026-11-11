@@ -218,6 +218,7 @@ async fn generated_ddl() {
         unique: false,
         default: None,
         comment: None,
+        renamed_from: None,
     };
     let to = besu::schema::Column {
         ty: TypeDef::Int8,

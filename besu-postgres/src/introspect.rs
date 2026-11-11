@@ -121,6 +121,7 @@ async fn introspect_columns(
                 default.as_deref().and_then(normalise_default)
             },
             comment: None,
+            renamed_from: None,
         });
     }
 
