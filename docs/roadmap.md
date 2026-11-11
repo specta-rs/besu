@@ -19,6 +19,8 @@ would actually require. The order is a judgement about impact versus cost, not a
 
 ## Eager loading / relations
 
+Tracked as [#52](https://github.com/specta-rs/besu/issues/52).
+
 Today a join returns a tuple: `(User, Option<Post>)`. There is no `User::posts`, no
 `find_with_related`, and no way to load a graph without writing the join and grouping by hand.
 That is the main reason to pick SeaORM over Besu for an object-shaped application.
@@ -40,6 +42,8 @@ What it would take:
 
 ## Streaming results
 
+Tracked as [#53](https://github.com/specta-rs/besu/issues/53).
+
 `Driver::query` returns `Vec<Row>`, and every builder collects before decoding. A million-row
 scan is a million rows in memory.
 
@@ -59,6 +63,8 @@ What it would take:
 
 ## Rename detection in migrations
 
+Tracked as [#54](https://github.com/specta-rs/besu/issues/54).
+
 `diff` cannot tell a rename from a drop plus an add, so it deliberately refuses to guess. The
 consequence is that renaming a column is classified as `Destructive` and a generated migration
 drops the data.
@@ -74,6 +80,8 @@ What it would take:
 - CLI support so `besu generate` can consume the declaration from the snapshot.
 
 ## Custom column types
+
+Tracked as [#55](https://github.com/specta-rs/besu/issues/55).
 
 `TypeDef::Custom(Cow<'static, str>)` already exists and introspection uses it for native types
 Besu does not model. The derive does not: a field type outside the built-in list is a compile
@@ -94,6 +102,8 @@ What it would take:
 
 ## Runtime driver switching
 
+Tracked as [#56](https://github.com/specta-rs/besu/issues/56).
+
 `Database<Dr>` is generic, so the backend is chosen at compile time. The CLI works around this
 with `AnyDatabase`, a hand-written enum over the three drivers. Application code that reads a
 URL from configuration cannot do the same without writing that enum itself.
@@ -113,6 +123,8 @@ Until then, pick the driver at compile time or copy the CLI's enum pattern.
 
 ## Full text search
 
+Tracked as [#57](https://github.com/specta-rs/besu/issues/57).
+
 There is no typed `MATCH`, `tsquery` or `to_tsvector`. PostgreSQL users can write
 `filter(raw("search_vector @@ to_tsquery('rust')"))`; SQLite users can query an FTS5 table with
 `sql!`, but the schema layer does not create virtual tables.
@@ -127,6 +139,8 @@ What it would take:
 - Ranking (`ts_rank`) and highlighting are separate functions.
 
 ## JSON path operators
+
+Tracked as [#58](https://github.com/specta-rs/besu/issues/58).
 
 `serde_json::Value` columns are stored and decoded, but there is no typed `->`, `->>`, `#>`,
 `#>>` or `@>`. A query has to use `raw`, which loses the type check and cannot contain a
@@ -144,6 +158,8 @@ What it would take:
 
 ## u128 support
 
+Tracked as [#59](https://github.com/specta-rs/besu/issues/59).
+
 `Value` has `Int(i64)`, `UInt(u64)` and no 128-bit variant; `TypeDef::UInt(u8)` describes a
 width but the derive has no `u128` mapping, and `i128` is absent entirely.
 
@@ -158,6 +174,8 @@ What it would take:
   still happen in the database, not in Rust.
 
 ## wasm support
+
+Tracked as [#60](https://github.com/specta-rs/besu/issues/60).
 
 The query builder is mostly `alloc`-only: `Dialect`, `Sql`, `Value`, `ExprKind` and the
 builders do not need a filesystem or a socket. Execution is the problem: the drivers are
@@ -177,6 +195,8 @@ Building and rendering SQL in the browser is achievable much sooner than executi
 
 ## Table name prefixes
 
+Tracked as [#61](https://github.com/specta-rs/besu/issues/61).
+
 Multi-tenant deployments often prefix every table (`tenant_42_users`). `TableDef.name` is a
 `&'static str`, so a runtime prefix cannot be applied today, and the derive's
 `#[besu(table = "...")]` is compile-time.
@@ -193,6 +213,8 @@ What it would take:
   separate databases.
 
 ## Studio UI
+
+Tracked as [#62](https://github.com/specta-rs/besu/issues/62).
 
 There is no visual tool. Drizzle Studio is the model: browse tables, inspect rows, run a query
 and see the SQL.
@@ -211,21 +233,34 @@ This is deliberately last: it is useful, but it is not on the path to a dependab
 
 ## Smaller items
 
-These are not large enough for their own section, but they are real:
+These are not large enough for their own section, but they are real. Each is a tracking issue.
 
-- **Prepared statement caching and `EXPLAIN`.** Delegated to the driver today; a
-  dialect-level helper that renders `EXPLAIN` for a query would make the "same SQL" claim
-  easier to verify.
-- **Savepoints and nested transactions.** One level only.
-- **Down migrations.** The runner is append-only by design; a `down` file convention would
-  need a journal that records direction and a policy for partial rollback.
-- **Partial and expression indexes, check constraints, views.** `TableDef` models plain
-  indexes and foreign keys; the rest needs new IR and DDL.
-- **`IN` list limits.** `MAX_PARAMS` is checked for bulk inserts but not for a huge `IN`
-  list; the check belongs in more builders.
-- **A literal `?` escape.** The placeholder scanner has no way to emit a question mark
-  outside quotes, which blocks some PostgreSQL operators.
-- **Observability.** No tracing spans, no query timing, no slow-query hook.
+- **[#63](https://github.com/specta-rs/besu/issues/63) — the right-hand side of a comparison
+  is not checked.** `eq(users.id, posts.author_id)` checks `users` but not `posts`; column
+  method syntax is always checked. This is the most valuable typesafety work left.
+- **[#64](https://github.com/specta-rs/besu/issues/64) — SQLite cannot alter a column in
+  place.** `push` refuses and `generate` warns; the table rebuild is unwritten.
+- **[#65](https://github.com/specta-rs/besu/issues/65) — observability.** No tracing spans,
+  query timing or slow-query hook. A `Logged<Dr>` wrapper would demonstrate the `Driver` seam.
+- **[#66](https://github.com/specta-rs/besu/issues/66) — partial and expression indexes,
+  check constraints, views.** `TableDef` models plain indexes and foreign keys.
+- **[#67](https://github.com/specta-rs/besu/issues/67) — savepoints and nested
+  transactions.** One level only.
+- **[#68](https://github.com/specta-rs/besu/issues/68) — down migrations.** The runner is
+  append-only by design.
+- **[#69](https://github.com/specta-rs/besu/issues/69) — parameter limits for `IN` lists.**
+  `MAX_PARAMS` is checked for bulk inserts but not elsewhere.
+- **[#70](https://github.com/specta-rs/besu/issues/70) — batch insert chunking.** The error
+  message names the batch size; splitting the work is yours.
+- **[#71](https://github.com/specta-rs/besu/issues/71) — PostgreSQL composite `UNIQUE`.**
+  Represented as an index, which `DROP INDEX` cannot remove.
+- **[#72](https://github.com/specta-rs/besu/issues/72) — schema-qualified tables are diffed
+  by name only.**
+- **[#73](https://github.com/specta-rs/besu/issues/73) — `TimeTz`, enums and other native
+  types** come back as `TypeDef::Custom`.
+- **[#74](https://github.com/specta-rs/besu/issues/74) — a literal `?` escape** for `sql!`.
+- **[#75](https://github.com/specta-rs/besu/issues/75) — publish-ready crate metadata.**
+- **[#76](https://github.com/specta-rs/besu/issues/76) — update from model.**
 
 ## Contributing
 
