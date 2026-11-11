@@ -6,14 +6,13 @@ would actually require. The order is a judgement about impact versus cost, not a
 | # | Item | Why it matters | Rough size |
 | --- | --- | --- | --- |
 | 1 | [Eager loading / relations](#eager-loading--relations) | The biggest functional gap versus an ORM | Large |
-| 2 | [Streaming results](#streaming-results) | Large result sets are fully buffered | Medium, breaking |
-| 3 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
-| 4 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
-| 5 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
-| 6 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
-| 7 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
-| 8 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
-| 9 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
+| 2 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
+| 3 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
+| 4 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
+| 5 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
+| 6 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 7 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
+| 8 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
 
 ## Eager loading / relations
 
@@ -37,27 +36,6 @@ What it would take:
   — argues for batched, explicit second queries that are visible in the API.
 - A `with(..)` method on `Select` that returns a nested row type, plus a way to spell the
   expected shape without a hand-written `Decode`.
-
-## Streaming results
-
-Tracked as [#53](https://github.com/specta-rs/besu/issues/53).
-
-`Driver::query` returns `Vec<Row>`, and every builder collects before decoding. A million-row
-scan is a million rows in memory.
-
-What it would take:
-
-- A streaming method on `Driver` (for example `query_stream` returning
-  `impl Stream<Item = Result<Row, Error>> + Send`) and on `Executor`. sqlx already exposes
-  `fetch`, so the drivers can implement it without new dependencies.
-- A builder terminal such as `.stream()` that decodes row by row. `Decode` already works one
-  row at a time; the missing piece is the stream type and the lifetime.
-- A breaking change to the traits. This is the main reason it has not been done: a major
-  version is the honest place for it.
-- A policy for errors that occur mid-stream, after rows have already been handed to the
-  caller.
-
-`RawQuery` is buffered too, so it needs the same treatment.
 
 ## Custom column types
 
@@ -239,6 +217,8 @@ Kept here so the history is visible rather than deleted:
 - **#73, `TimeTz` and enum types.** `TypeDef::TimeTz` for PostgreSQL's `TIMETZ`, and
   `Schema::enums` is introspected, diffed and rendered as `CREATE TYPE` / `ALTER TYPE`. A
   `DECIMAL` still cannot decode into a `String` on PostgreSQL or MySQL.
+- **#53, streaming.** `Database::stream` / `Transaction::stream` decode row by row.
+- **#67, savepoints.** `Transaction::transaction` and `savepoint(name, ..)`.
 - **#58, JSON path operators.** `json_get` and `json_text` with a dotted path, rendered per
   dialect.
 - **#54, rename detection.** `#[besu(renamed_from = "...")]` turns a drop plus an add into one

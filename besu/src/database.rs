@@ -146,6 +146,9 @@ pub fn dry<D: Dialect>() -> Database<DryDriver<D>> {
 /// is committed once you ask it to be. Dropping it without committing rolls back.
 pub struct Transaction<'a, Dr: TransactionDriver> {
     inner: Dr::Transaction<'a>,
+    /// The number of savepoints opened through [`Transaction::transaction`], so each gets a
+    /// name of its own.
+    savepoints: u32,
 }
 
 impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
@@ -188,6 +191,78 @@ impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
             fragment,
             phantom: PhantomData,
         }
+    }
+
+    /// Run a closure inside a savepoint, releasing it on success and rolling back to it on
+    /// error.
+    ///
+    /// The closure receives the same transaction, so nothing about the type changes: a
+    /// savepoint is a named point in the transaction, not a different handle.
+    ///
+    /// ```ignore
+    /// db.transaction(async |tx| {
+    ///     tx.insert(users).value(..).await?;
+    ///     // A failure here leaves the insert above in place.
+    ///     let _ = tx.transaction(async |tx| {
+    ///         tx.insert(audit).value(..).await?;
+    ///         Err::<(), _>(error)
+    ///     }).await;
+    ///     Ok(())
+    /// })
+    /// .await?;
+    /// ```
+    pub async fn transaction<T, F>(&mut self, f: F) -> Result<T, Dr::Error>
+    where
+        F: AsyncFnOnce(&mut Self) -> Result<T, Dr::Error>,
+    {
+        let name = alloc::format!("besu_savepoint_{}", self.savepoints);
+        self.savepoints = self.savepoints.wrapping_add(1);
+        self.savepoint(&name, f).await
+    }
+
+    /// Run a closure inside a savepoint with a name you choose.
+    ///
+    /// The name is used verbatim in `SAVEPOINT`, `RELEASE SAVEPOINT` and `ROLLBACK TO
+    /// SAVEPOINT`, so it is restricted to ASCII letters, digits and underscores. Anything else
+    /// is an [`Error::InvalidQuery`](besu_core::Error::InvalidQuery) before a statement runs.
+    ///
+    /// A savepoint that is neither released nor rolled back is released when the enclosing
+    /// transaction commits, which is what you want, so there is no guard to forget to drop.
+    pub async fn savepoint<T, F>(&mut self, name: &str, f: F) -> Result<T, Dr::Error>
+    where
+        F: AsyncFnOnce(&mut Self) -> Result<T, Dr::Error>,
+    {
+        if !is_valid_savepoint_name(name) {
+            return Err(<Dr as Driver>::error(besu_core::Error::invalid_query(
+                alloc::format!(
+                    "`{name}` is not a valid savepoint name; use ASCII letters, digits and \
+                     underscores"
+                ),
+            )));
+        }
+
+        self.run_control(alloc::format!("SAVEPOINT {name}")).await?;
+        match f(self).await {
+            Ok(value) => {
+                self.run_control(alloc::format!("RELEASE SAVEPOINT {name}"))
+                    .await?;
+                Ok(value)
+            }
+            Err(err) => {
+                // Best effort: the original error is what the caller cares about.
+                let _ = self
+                    .run_control(alloc::format!("ROLLBACK TO SAVEPOINT {name}"))
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn run_control(&mut self, statement: alloc::string::String) -> Result<(), Dr::Error> {
+        let sql = besu_core::Sql::<Dr::Dialect>::raw(statement)
+            .finish()
+            .map_err(<Dr as Driver>::error)?;
+        Dr::txn_execute(&mut self.inner, &sql).await.map(|_| ())
     }
 
     /// Commit the transaction.
@@ -233,6 +308,7 @@ impl<Dr: TransactionDriver> Database<Dr> {
     pub async fn begin(&self) -> Result<Transaction<'_, Dr>, Dr::Error> {
         Ok(Transaction {
             inner: Dr::begin(&self.driver).await?,
+            savepoints: 0,
         })
     }
 
@@ -321,4 +397,17 @@ impl<'a, E: Executor + Send + 'a> IntoFuture for RawQuery<'a, E> {
             exec.execute(&sql).await
         })
     }
+}
+
+/// Savepoint names are written into SQL, so they are checked rather than escaped.
+///
+/// Quoting an identifier is not enough here: `SAVEPOINT` takes a name, not a string, and not
+/// every dialect accepts a quoted one. Restricting the character set is the honest fix.
+fn is_valid_savepoint_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.as_bytes()[0].is_ascii_alphabetic()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
