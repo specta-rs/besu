@@ -61,6 +61,20 @@ impl InsertQuery {
             return out;
         }
 
+        if let Some(bad) = self
+            .rows
+            .iter()
+            .find(|row| row.len() != self.table.columns.len())
+        {
+            out.set_error(Error::invalid_query(alloc::format!(
+                "`insert` produced {} value(s) for a table with {} column(s); \
+                 `Insertable` must return one entry per column",
+                bad.len(),
+                self.table.columns.len()
+            )));
+            return out;
+        }
+
         // Columns that at least one row provides. Everything else is left to the database's
         // default, which is why a never-provided column simply disappears from the column
         // list instead of being written as `NULL`.
