@@ -21,7 +21,7 @@ use crate::types::{
     VarChar,
 };
 
-use crate::condition::{Contains, Literal};
+use crate::condition::Contains;
 
 macro_rules! expr_comparisons {
     ($( $(#[$attr:meta])* fn $name:ident => $op:literal ),* $(,)?) => {

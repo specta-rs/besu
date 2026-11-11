@@ -58,7 +58,10 @@ impl Dialect for SQLite {
             TypeDef::Date => "DATE",
             TypeDef::Time => "TIME",
             TypeDef::Timestamp | TypeDef::TimestampTz => "TIMESTAMP",
-            TypeDef::Decimal(_, _) => "NUMERIC",
+            // A decimal in SQLite is text: `NUMERIC` affinity would try to turn the stored
+            // string into a float and lose the exact value, which is the whole point of a
+            // decimal. `Decimal`'s Rust type is a string, so text is the honest mapping.
+            TypeDef::Decimal(_, _) => "TEXT",
             TypeDef::Custom(ref name) => return name.clone(),
             _ => "TEXT",
         })

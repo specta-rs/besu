@@ -7,8 +7,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+categories = ["database"]
 documentation = "https://docs.rs/besu-postgres/latest/besu-postgres"
-keywords = ["database", "postgres", "query-builder", "typesafe"]
+keywords = ["database", "postgresql", "query-builder", "typesafe"]
 
 [package.metadata."docs.rs"]
 all-features = true

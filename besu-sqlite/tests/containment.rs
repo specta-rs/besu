@@ -1,5 +1,6 @@
 //! Every operand of a comparison and every aggregate argument is checked against the query's
 //! tables, not just the left-hand side.
+#![allow(missing_docs, clippy::unwrap_used, clippy::too_many_arguments)]
 //!
 //! The failing cases are `compile_fail` doc tests in `besu-sqlite/src/lib.rs`; these are the
 //! cases that must keep working.

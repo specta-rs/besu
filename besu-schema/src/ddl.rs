@@ -123,9 +123,10 @@ pub trait Ddl {
 
     /// Whether `ALTER TABLE ... ALTER COLUMN` is available at all.
     ///
-    /// SQLite has no such statement: changing a column means rebuilding the table. When
-    /// this is `false`, `push` refuses to alter a column and asks for an explicit
-    /// migration instead of quietly dropping data.
+    /// SQLite has no such statement: changing a column means rebuilding the table, which it
+    /// does in [`Ddl::apply_with`]. A dialect that cannot do either returns `false`, and
+    /// `push` refuses to alter a column and asks for an explicit migration instead of
+    /// quietly dropping data.
     fn can_alter_column(&self) -> bool {
         true
     }
@@ -133,7 +134,8 @@ pub trait Ddl {
     /// Statements that migrate a column's definition.
     ///
     /// The default is portable and deliberately blunt: drop the old column and add the new
-    /// one. Dialects that can do better override this.
+    /// one. Dialects that can do better override this. SQLite does not, because it needs
+    /// the rest of the table and so rebuilds it in [`Ddl::apply_with`] instead.
     fn alter_column(&self, table: &str, from: &Column, to: &Column) -> Vec<String> {
         vec![
             self.drop_column(table, &from.name),
@@ -261,6 +263,17 @@ pub trait Ddl {
             .iter()
             .flat_map(|change| self.change(change))
             .collect()
+    }
+
+    /// Render a diff as statements, with the schemas it was computed from in reach.
+    ///
+    /// [`Ddl::apply`] sees only the changes, which is enough for a dialect with a real
+    /// `ALTER TABLE ... ALTER COLUMN`: the change carries both the old and the new column.
+    /// A dialect that has to rebuild the whole table also needs the table's other columns,
+    /// and no [`Change`] carries those, so it overrides this instead. The default ignores
+    /// the schemas and defers to [`Ddl::apply`].
+    fn apply_with(&self, changes: &[Change], _current: &Schema, _desired: &Schema) -> Vec<String> {
+        self.apply(changes)
     }
 }
 

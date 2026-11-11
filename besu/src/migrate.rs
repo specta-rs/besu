@@ -202,7 +202,8 @@ impl<Dr: SchemaDriver> Database<Dr> {
             ))));
         }
 
-        let statements = <Dr::Ddl as Ddl>::apply(&Dr::Ddl::default(), &changes);
+        let statements =
+            <Dr::Ddl as Ddl>::apply_with(&Dr::Ddl::default(), &changes, &current, desired);
         for statement in &statements {
             self.execute_statement(statement.clone())
                 .await

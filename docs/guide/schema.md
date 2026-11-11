@@ -55,6 +55,31 @@ assert!(!users.id.nullable());
 assert!(users.bio.nullable());
 ```
 
+## Naming a SQL type directly
+
+The built-in mapping covers the portable types. When you need a specific one — a sized
+`VARCHAR`, an exact `DECIMAL`, or a `SqlType` of your own — name it with `sql_type`:
+
+```rust
+#[derive(Table)]
+pub struct Price {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(sql_type = "besu::Decimal<10, 2>")]
+    pub amount: String,
+    #[besu(sql_type = "besu::VarChar<64>")]
+    pub label: String,
+}
+```
+
+The field's Rust type must be the `Rust` type of the named `SqlType` — `String` for
+`Decimal`, `Char` and `VarChar`. A type of your own is a marker that implements `SqlType`,
+`IntoSqlValue` and `Decode`.
+
+One caveat: SQLite has no decimal type, and `NUMERIC` affinity would round an exact value, so
+a `Decimal` column is declared `TEXT` there. On PostgreSQL and MySQL it is `NUMERIC`/`DECIMAL`,
+but decoding one into a `String` is not implemented yet — see #73.
+
 ## Struct-level attributes
 
 | Attribute | Meaning | Default |

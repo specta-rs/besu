@@ -93,6 +93,20 @@ db.update(users)
     .await?;
 ```
 
+## Writing a whole row
+
+`set_model` sets every column from a model, skipping the primary key and any generated column:
+
+```rust
+db.update(users)
+    .set_model(&changed_user)
+    .filter(users.id.eq(changed_user.id))
+    .await?;
+```
+
+The filter is still yours to write, because `set_model` has no opinion about which rows you
+meant — and the type-state that requires a `WHERE` clause is what keeps that honest.
+
 ## `RETURNING`
 
 `returning` is available only once the statement is safe, which keeps the unsafe case from

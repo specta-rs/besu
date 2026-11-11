@@ -396,6 +396,15 @@ every integer width, and a database without unsigned integers must fold each `UI
 signed type that holds it. The default is the identity, which is right for a database that
 keeps the declared types faithfully.
 
+## A worked example of the seam
+
+`besu::logged(driver)` wraps any driver and reports every statement through `tracing`, with
+timing and a slow-query warning. It implements `Driver`, `TransactionDriver` and `SchemaDriver`
+by delegation, which is the whole point of the split: a middleware is a plain wrapper and the
+query layer never learns it exists. Read `besu/src/logged.rs` after `besu-sqlite` — it is the
+smallest way to see what a driver actually has to provide, and the cost design (check
+`tracing::enabled!` before formatting anything) is worth copying.
+
 ## Testing a new driver
 
 1. **SQL without a database.** `besu::dry::<MyDialect>()` builds every query and never

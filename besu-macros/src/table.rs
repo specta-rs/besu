@@ -170,6 +170,7 @@ struct FieldAttrs {
     index: bool,
     skip: bool,
     default: Option<Default>,
+    sql_type: Option<LitStr>,
     references: Option<LitStr>,
     on_delete: Option<String>,
     on_update: Option<String>,
@@ -222,6 +223,10 @@ impl FieldAttrs {
                     this.default = Some(Default::Now);
                     return Ok(());
                 }
+                if meta.path.is_ident("sql_type") {
+                    this.sql_type = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
                 if meta.path.is_ident("references") {
                     this.references = Some(meta.value()?.parse()?);
                     return Ok(());
@@ -239,7 +244,7 @@ impl FieldAttrs {
                 Err(meta.error(
                     "unrecognised column attribute; expected one of `column`, `primary_key`, \
                      `auto_increment`, `unique`, `index`, `skip`, `default`, `default_sql`, \
-                     `default_now`, `references`, `on_delete`, `on_update`",
+                     `default_now`, `sql_type`, `references`, `on_delete`, `on_update`",
                 ))
             })?;
         }
@@ -320,18 +325,34 @@ impl Column {
             .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
 
         let (nullable, inner) = unwrap_option(&field.ty);
-        let (sql_ty, type_def) = sql_type(inner, besu).map_err(|err| {
-            Error::new(
-                err.span(),
-                format!(
-                    "besu: `{}` is not a supported column type. Supported types are signed \
+
+        // An explicit `sql_type` names a `SqlType` implementation directly, which is how a
+        // `DECIMAL(10,2)`, a `VARCHAR(255)` or a user-defined type gets declared.
+        let explicit = match &attrs.sql_type {
+            Some(lit) => {
+                let ty: Type = syn::parse_str(&lit.value()).map_err(|err| {
+                    Error::new(lit.span(), format!("besu: `sql_type` is not a type: {err}"))
+                })?;
+                Some((quote!(#ty), quote!(<#ty as #besu::SqlType>::DEF)))
+            }
+            None => None,
+        };
+
+        let (sql_ty, type_def) = match explicit {
+            Some(explicit) => explicit,
+            None => sql_type(inner, besu).map_err(|err| {
+                Error::new(
+                    err.span(),
+                    format!(
+                        "besu: `{}` is not a supported column type. Supported types are signed \
                      and unsigned integers, f32/f64, bool, String, Vec<u8>, uuid::Uuid, \
                      chrono::NaiveDate/NaiveTime/NaiveDateTime/DateTime<Utc> and \
                      serde_json::Value, each optionally wrapped in Option.",
-                    quote!(#inner)
-                ),
-            )
-        })?;
+                        quote!(#inner)
+                    ),
+                )
+            })?,
+        };
 
         if attrs.primary_key && nullable {
             return Err(Error::new(

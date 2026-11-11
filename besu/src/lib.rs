@@ -80,7 +80,8 @@ mod condition;
 mod database;
 pub mod expr;
 #[cfg(feature = "tracing")]
-mod logged;
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
+pub mod logged;
 mod macros;
 #[cfg(feature = "migrate")]
 pub mod migrate;

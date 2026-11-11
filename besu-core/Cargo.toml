@@ -7,8 +7,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 documentation = "https://docs.rs/besu-core/latest/besu-core"
-keywords = ["async", "database", "query-builder", "typesafe", "sql"]
+keywords = ["sql", "query-builder", "database", "typesafe", "async"]
 categories = ["database", "asynchronous"]
 
 [package.metadata."docs.rs"]

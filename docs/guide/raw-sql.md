@@ -65,6 +65,17 @@ sql!("SELECT * FROM posts WHERE title LIKE ?", "%why?%")
 There is no escape for a `?` *outside* quotes. That is a real limitation for operators such as
 PostgreSQL's JSON `?`; see the [roadmap](../roadmap.md).
 
+## A literal question mark
+
+`??` is an escaped question mark, which binds nothing. It exists for operators such as
+PostgreSQL's `jsonb ? 'key'` that would otherwise look like a parameter:
+
+```rust
+db.execute(sql!("SELECT ?::jsonb ?? 'a'", r#"{"a": 1}"#))
+```
+
+The compile-time arity check understands the escape, so the count still matches.
+
 ## Running a fragment
 
 `Database::execute` wraps a fragment in a `RawQuery`:

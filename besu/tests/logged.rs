@@ -108,6 +108,9 @@ impl Driver for Fake {
 
     async fn query(&self, sql: &Sql<Self::Dialect>) -> Result<Vec<Self::Row>, Self::Error> {
         record(&self.statements, sql);
+        if sql.sql().contains("FAIL") {
+            return Err(Error::unsupported("the fake driver was asked to fail"));
+        }
         Ok(vec![1, 2, 3])
     }
 
@@ -259,8 +262,8 @@ fn a_query_still_returns_the_right_rows_and_runs_once() {
     let db = Database::new(Logged::new(driver.clone()));
     let recorder = Recorder::default();
 
-    let rows = run(&recorder, db.driver().query(&find_user(42)))
-        .expect("the fake driver never fails");
+    let rows =
+        run(&recorder, db.driver().query(&find_user(42))).expect("the fake driver never fails");
 
     assert_eq!(rows, vec![1, 2, 3]);
     assert_eq!(
@@ -292,8 +295,8 @@ fn execute_is_logged_with_its_result() {
     let db = Database::new(Logged::new(driver.clone()));
     let recorder = Recorder::default();
 
-    let affected = run(&recorder, db.driver().execute(&find_user(7)))
-        .expect("the fake driver never fails");
+    let affected =
+        run(&recorder, db.driver().execute(&find_user(7))).expect("the fake driver never fails");
 
     assert_eq!(affected, 1);
     assert_eq!(driver.statements().len(), 1, "exactly one execution");
@@ -327,10 +330,7 @@ fn a_zero_threshold_turns_every_statement_into_a_warning() {
     assert_eq!(event.field("message"), Some("slow statement"));
     assert_eq!(event.field("args"), Some("1"));
     assert_eq!(event.field("threshold"), Some("0ns"));
-    assert_eq!(
-        event.field("sql"),
-        Some("SELECT * FROM users WHERE id = 3")
-    );
+    assert_eq!(event.field("sql"), Some("SELECT * FROM users WHERE id = 3"));
 }
 
 #[test]
@@ -372,10 +372,9 @@ fn statements_inside_a_transaction_are_logged() {
         let rows = <Logged<Fake> as TransactionDriver>::txn_query(&mut tx, &find_user(11))
             .await
             .expect("txn_query");
-        let affected =
-            <Logged<Fake> as TransactionDriver>::txn_execute(&mut tx, &find_user(12))
-                .await
-                .expect("txn_execute");
+        let affected = <Logged<Fake> as TransactionDriver>::txn_execute(&mut tx, &find_user(12))
+            .await
+            .expect("txn_execute");
         <Logged<Fake> as TransactionDriver>::commit(tx)
             .await
             .expect("commit");
@@ -399,6 +398,33 @@ fn statements_inside_a_transaction_are_logged() {
     assert_eq!(events[0].field("args"), Some("1"));
     assert_eq!(events[1].field("kind"), Some("execute"));
     assert!(events.iter().all(|event| event.level == Level::DEBUG));
+}
+
+#[test]
+fn a_failing_statement_is_reported_and_the_error_is_unchanged() {
+    let driver = Fake::default();
+    let db = Database::new(Logged::new(driver.clone()));
+    let recorder = Recorder::default();
+
+    let err = run(
+        &recorder,
+        db.driver().query(&Sql::<TestDialect>::raw("SELECT FAIL")),
+    )
+    .expect_err("the fake driver fails on FAIL");
+
+    assert_eq!(
+        err.to_string(),
+        "unsupported: the fake driver was asked to fail"
+    );
+    assert_eq!(driver.statements().len(), 1, "exactly one execution");
+
+    let events = recorder.take();
+    assert_eq!(
+        events.len(),
+        1,
+        "a failed statement is still reported: {events:?}"
+    );
+    assert_eq!(events[0].level, Level::DEBUG);
 }
 
 #[test]
