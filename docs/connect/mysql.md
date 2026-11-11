@@ -58,6 +58,25 @@ let db = besu::Database::new(besu_mysql::Sqlx::from_pool(pool));
 
 `Sqlx::new` does exactly this, minus the connection limit and the timeout.
 
+### Two options worth knowing
+
+`test_before_acquire` defaults to `true`, which sends a `COM_PING` round trip on every
+acquire. That is by far the largest per-call cost in this driver: switching it off measured
+18% off a 1,000-row select and 15% off a single insert. It is left on because a connection
+dropped while idle then surfaces as a transparent reconnect instead of a failed query — but if
+you would rather have the 18%, `from_pool` is the way:
+
+```rust
+let pool = MySqlPoolOptions::new()
+    .test_before_acquire(false)
+    .connect(url)
+    .await?;
+```
+
+`statement_cache_capacity` is sqlx's default of 100 prepared statements per connection. Besu
+builds a distinct SQL string per query shape, so an application with many shapes will evict;
+raise it on the pool if that shows up in `SHOW GLOBAL STATUS LIKE 'Prepared_stmt%'`.
+
 ## The pool underneath
 
 ```rust
