@@ -175,31 +175,52 @@ execution always calls `finish()`.
 
 ## The allocation story
 
-The design goal is: one SQL string per query, one encode per parameter, no per-row maps.
+The design goal is: one SQL string per query, one encode per parameter, one allocation per
+row of *result*, and nothing per row of *work*.
 
-| Stage | Allocation |
+| Stage | What it costs |
 | --- | --- |
 | Table handle | None. A `const` struct of `Column`s, each a `&'static str`; `Copy` |
 | Column reference | None. Copying a `Column` copies a pointer and a length |
-| Expression node | Two `Box`es for a binary node, one for prefix/postfix; one `Vec` per function or `IN` list |
-| Building | None per builder step; vectors grow as clauses are added |
-| Rendering | One `Sql`, whose text starts as a borrowed `&'static str` and becomes an owned `String` on the first append |
-| Identifier quoting | `Dialect::quote` returns a `String`; `push_table` currently allocates one per table name. `write_ident` is the allocation-free path |
-| Parameter binding | One `Value` clone per parameter (an owned `String` for text), stored once in `Sql::args` |
-| `sql!` | One `String` for the rendered text, one `Vec<Value>` for the arguments |
-| Execution | `Driver::query` collects `Vec<Row>`; results are buffered, not streamed |
-| Decoding | One `Vec<R>::with_capacity(rows.len())`; no lookup table, no per-column map |
-| Awaiting | One `Box<dyn Future + Send>` per `IntoFuture` call |
+| Expression node | One node in the enclosing vector. The operands of a comparison — a column and a literal — are stored inline, so `users.age.gt(18)` allocates nothing at all |
+| Building | Clause vectors grow as clauses are added. A bulk insert reserves its whole row buffer from the iterator's size hint, so it allocates once |
+| Rendering | One `Sql`: the text is pre-sized from a per-query estimate and the argument vector is sized exactly for an insert |
+| Identifier quoting | `Dialect::write_ident` writes into the statement buffer. No `String` per identifier |
+| Placeholders | Written into the same buffer; PostgreSQL's `$N` is built from digits, not `to_string` |
+| Parameter binding | The value is *moved* into `Sql::args`. Nothing is cloned on an execution path |
+| `to_sql` | One clone of the query, because `to_sql` takes `&self` and leaves the builder usable |
+| Execution | `query` collects `Vec<Row>`; `stream` yields one row at a time instead |
+| Decoding | One `Vec<R>` sized to the row count, and one `try_get` per column |
+| Awaiting | One boxed future per `IntoFuture`, which is how an `async` body gets a nameable type |
 | Driverless build | No database, no connection, no I/O |
 
-Two honest caveats:
+`cargo bench -p besu` measures the builder. It uses a dry database and a hand-written
+dialect, so no server is needed and the numbers are exactly the cost Besu adds on top of a
+driver. On a Ryzen-class machine, release build:
+
+| Query | Time |
+| --- | --- |
+| `select` with one filter | 157 ns |
+| `select` with three filters, `ORDER BY` and `LIMIT` | 318 ns |
+| `select` with a projection and `COUNT(*)` | 152 ns |
+| `insert` one row | 193 ns |
+| `insert` one hundred rows | 10.5 µs |
+| `update ... set ... where` | 246 ns |
+
+Those numbers include `to_sql`, and therefore include the query clone described above. A
+query that runs moves its values instead and pays less. The bulk insert is dominated by
+cloning a hundred pre-built rows for the same reason; executing one moves them.
+
+Three honest caveats:
 
 - The table handle is not literally zero-sized: each `Column` stores its name as a
   `&'static str`, which is 16 bytes on a 64-bit target. A five-column handle is 80 bytes,
   all `Copy`. It is small and free to pass around, not a ZST.
-- `push_table` uses `Dialect::quote`, which allocates. It is two short allocations per table
-  reference, and it is the obvious next thing to remove by writing through `write_ident`
-  directly into the `Sql` buffer.
+- Storing operands inline makes an `ExprKind` node larger (about 104 bytes rather than 32)
+  so that a `WHERE` clause costs no allocations. A query holds tens of nodes, not millions,
+  so the trade is a few hundred bytes of vector space against two allocations per condition.
+- The capacity estimate is an estimate. It errs high, so a statement can carry a few hundred
+  spare bytes of `String` capacity; it is sized to avoid copies, not to be exact.
 
 What is deliberately absent is just as important: there is no query cache, no lazy loading, no
 identity map, no N+1 machinery and no hidden second statement. A query is a value, and running
