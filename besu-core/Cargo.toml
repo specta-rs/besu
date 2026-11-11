@@ -1,0 +1,31 @@
+[package]
+name = "besu-core"
+description = "Core traits and SQL primitives for Besu, a typesafe SQL query builder for Rust."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/besu-core/latest/besu-core"
+keywords = ["async", "database", "query-builder", "typesafe", "sql"]
+categories = ["database", "asynchronous"]
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+uuid = []
+chrono = []
+json = []
+
+[lints]
+workspace = true
+
+[dependencies]
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }

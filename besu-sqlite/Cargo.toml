@@ -1,0 +1,36 @@
+[package]
+name = "besu-sqlite"
+description = "SQLite dialect and driver for Besu."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/besu-sqlite/latest/besu-sqlite"
+keywords = ["database", "sqlite", "query-builder", "typesafe"]
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["sqlx", "runtime-tokio"]
+sqlx = ["dep:sqlx"]
+runtime-tokio = ["sqlx/runtime-tokio"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+besu = { workspace = true, features = ["derive", "migrate"] }
+
+[dependencies]
+besu-core = { workspace = true }
+besu-schema = { workspace = true }
+besu = { workspace = true, features = ["derive", "migrate"] }
+sqlx = { workspace = true, optional = true, features = ["sqlite", "chrono", "uuid", "json"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
