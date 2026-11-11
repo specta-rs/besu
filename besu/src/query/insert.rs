@@ -196,6 +196,13 @@ impl InsertQuery {
             return;
         }
 
+        if conflict.target.is_empty() {
+            out.set_error(Error::invalid_query(
+                "`ON CONFLICT` needs a target column; call `.on_conflict(column)` first",
+            ));
+            return;
+        }
+
         out.push_raw(" ON CONFLICT (");
         for (i, column) in conflict.target.iter().enumerate() {
             if i != 0 {
