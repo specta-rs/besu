@@ -696,6 +696,13 @@ impl Codegen {
             let ident = &column.ident;
             quote!(self.#ident.to_value())
         });
+        // The same values, written straight into the statement's buffer. `self` is consumed
+        // either way, so a derived row never materialises the intermediate `Vec` that
+        // `into_values` returns.
+        let insert_values_sink = columns.iter().map(|column| {
+            let ident = &column.ident;
+            quote!(out.push(self.#ident.to_value());)
+        });
 
         let from_model = columns.iter().map(|column| {
             let ident = &column.ident;
@@ -776,6 +783,14 @@ impl Codegen {
 
                     fn into_values(self) -> ::std::vec::Vec<::core::option::Option<#besu::Value>> {
                         ::std::vec![#(#insert_values),*]
+                    }
+
+                    fn write_values(
+                        self,
+                        out: &mut ::std::vec::Vec<::core::option::Option<#besu::Value>>,
+                    ) {
+                        out.reserve(#column_count);
+                        #(#insert_values_sink)*
                     }
                 }
 

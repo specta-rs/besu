@@ -123,7 +123,13 @@ pub enum ExprKind {
 
 impl ExprKind {
     /// Render this expression into `out`.
-    pub(crate) fn render<D: Dialect>(&self, out: &mut Sql<D>) {
+    ///
+    /// Takes `&mut self` because rendering *moves* the bound values into the statement
+    /// instead of cloning them: a text parameter is a `String`, and the clone was an
+    /// allocation per parameter on the hot path. A builder that only has a borrow (such as
+    /// `to_sql`, which is meant to leave the query usable) clones the query once and then
+    /// moves out of the copy.
+    pub(crate) fn render<D: Dialect>(&mut self, out: &mut Sql<D>) {
         match self {
             Self::Column { table, column } => {
                 if table.is_empty() {
@@ -132,7 +138,7 @@ impl ExprKind {
                     out.push_qualified(table, column);
                 }
             }
-            Self::Value(value) => out.bind(value.clone()),
+            Self::Value(value) => out.bind_value(core::mem::replace(value, Value::Null)),
             Self::Star => out.push_raw("*"),
             Self::Raw(sql) => out.push_raw(sql),
             Self::Binary { op, left, right } => {
@@ -174,7 +180,7 @@ impl ExprKind {
                 if *distinct {
                     out.push_raw("DISTINCT ");
                 }
-                for (i, arg) in args.iter().enumerate() {
+                for (i, arg) in args.iter_mut().enumerate() {
                     if i != 0 {
                         out.push_raw(", ");
                     }
@@ -208,7 +214,7 @@ impl ExprKind {
                 out.push_raw("(");
                 expr.render(out);
                 out.push_raw(if *negated { " NOT IN (" } else { " IN (" });
-                for (i, item) in list.iter().enumerate() {
+                for (i, item) in list.iter_mut().enumerate() {
                     if i != 0 {
                         out.push_raw(", ");
                     }
@@ -226,7 +232,7 @@ impl ExprKind {
                     out.push_raw(" ");
                     operand.render(out);
                 }
-                for (when, then) in branches {
+                for (when, then) in branches.iter_mut() {
                     out.push_raw(" WHEN ");
                     when.render(out);
                     out.push_raw(" THEN ");
@@ -297,20 +303,20 @@ impl ExprKind {
                         out.push_raw("to_tsvector('english', ");
                         column.render(out);
                         out.push_raw(") @@ plainto_tsquery('english', ");
-                        out.bind(query.clone());
+                        out.bind_value(core::mem::replace(query, Value::Null));
                         out.push_raw(")");
                     }
                     FullTextStyle::Mysql => {
                         out.push_raw("MATCH(");
                         column.render(out);
                         out.push_raw(") AGAINST (");
-                        out.bind(query.clone());
+                        out.bind_value(core::mem::replace(query, Value::Null));
                         out.push_raw(" IN BOOLEAN MODE)");
                     }
                     FullTextStyle::Sqlite => {
                         column.render(out);
                         out.push_raw(" MATCH ");
-                        out.bind(query.clone());
+                        out.bind_value(core::mem::replace(query, Value::Null));
                     }
                     FullTextStyle::Unsupported => {
                         // The error is what the caller sees; the text still has to be
@@ -322,7 +328,7 @@ impl ExprKind {
                         )));
                         column.render(out);
                         out.push_raw(" MATCH ");
-                        out.bind(query.clone());
+                        out.bind_value(core::mem::replace(query, Value::Null));
                     }
                 }
             }

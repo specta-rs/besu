@@ -32,7 +32,12 @@ pub struct OnConflict {
 #[derive(Debug, Clone)]
 pub(crate) struct InsertQuery {
     pub(crate) table: &'static TableDef,
-    pub(crate) rows: Vec<Vec<Option<Value>>>,
+    /// Every row's values, row after row, with one entry per column.
+    ///
+    /// Flat rather than a `Vec` of rows: a bulk insert used to be one allocation per row,
+    /// each sized to a power of two for a handful of entries, and rendering walked the heap
+    /// to find them. One buffer holds the lot and the values stay next to each other.
+    pub(crate) values: Vec<Option<Value>>,
     pub(crate) conflict: Option<OnConflict>,
     pub(crate) returning: Option<Vec<ExprKind>>,
 }
@@ -41,40 +46,57 @@ impl InsertQuery {
     pub(crate) fn new(table: &'static TableDef) -> Self {
         Self {
             table,
-            rows: Vec::new(),
+            values: Vec::new(),
             conflict: None,
             returning: None,
         }
     }
 
-    pub(crate) fn push_row(&mut self, values: Vec<Option<Value>>) {
-        self.rows.push(values);
+    /// The number of entries each row contributes.
+    fn stride(&self) -> usize {
+        self.table.columns.len()
+    }
+
+    /// How many rows have been added.
+    fn row_count(&self) -> usize {
+        match self.stride() {
+            0 => 0,
+            stride => self.values.len() / stride,
+        }
+    }
+
+    /// Append one row.
+    pub(crate) fn push_row(&mut self, values: impl IntoIterator<Item = Option<Value>>) {
+        self.values.extend(values);
     }
 
     pub(crate) fn build<D: besu_core::Dialect>(
-        &self,
+        mut self,
         prefix: Option<alloc::sync::Arc<str>>,
     ) -> besu_core::Sql<D> {
-        let mut out = besu_core::Sql::new();
+        let stride = self.stride();
+        let rows = self.row_count();
+
+        // Size the output once. The estimate is per row and per kept column, both of which
+        // are known from the table and the number of values, so a bulk insert never grows
+        // the string: it writes into exactly the space it needs.
+        let bytes = 32 + self.table.name.len() + stride * 8 + rows * (stride * 4 + 4);
+        let mut out = besu_core::Sql::with_capacity(bytes);
         out.set_table_prefix(prefix);
 
-        if self.rows.is_empty() {
+        if self.values.is_empty() {
             out.set_error(Error::invalid_query(
                 "`insert` requires at least one value; call `.value(..)` or `.values(..)`",
             ));
             return out;
         }
 
-        if let Some(bad) = self
-            .rows
-            .iter()
-            .find(|row| row.len() != self.table.columns.len())
-        {
+        if stride == 0 || self.values.len() % stride != 0 {
             out.set_error(Error::invalid_query(alloc::format!(
                 "`insert` produced {} value(s) for a table with {} column(s); \
                  `Insertable` must return one entry per column",
-                bad.len(),
-                self.table.columns.len()
+                self.values.len(),
+                stride
             )));
             return out;
         }
@@ -82,12 +104,15 @@ impl InsertQuery {
         // Columns that at least one row provides. Everything else is left to the database's
         // default, which is why a never-provided column simply disappears from the column
         // list instead of being written as `NULL`.
-        let mut kept = Vec::new();
-        for (index, _column) in self.table.columns.iter().enumerate() {
-            if self.rows.iter().any(|row| row[index].is_some()) {
-                kept.push(index);
-            }
-        }
+        let kept: Vec<usize> = (0..stride)
+            .filter(|index| {
+                self.values
+                    .iter()
+                    .skip(*index)
+                    .step_by(stride)
+                    .any(Option::is_some)
+            })
+            .collect();
 
         if kept.is_empty() {
             out.set_error(Error::invalid_query(
@@ -107,11 +132,11 @@ impl InsertQuery {
         }
         out.push_raw(") VALUES ");
 
-        if kept.len().saturating_mul(self.rows.len()) > D::MAX_PARAMS {
+        if kept.len().saturating_mul(rows) > D::MAX_PARAMS {
             out.set_error(Error::invalid_query(alloc::format!(
                 "this insert binds {} parameters but `{}` accepts at most {}; split it into \
                  batches of {} row(s) or fewer",
-                kept.len() * self.rows.len(),
+                kept.len() * rows,
                 D::NAME,
                 D::MAX_PARAMS,
                 D::MAX_PARAMS / kept.len().max(1)
@@ -119,7 +144,9 @@ impl InsertQuery {
             return out;
         }
 
-        for (row_index, row) in self.rows.iter().enumerate() {
+        out.reserve_args(kept.len() * rows);
+
+        for (row_index, row) in self.values.chunks_exact_mut(stride).enumerate() {
             if row_index != 0 {
                 out.push_raw(", ");
             }
@@ -128,8 +155,8 @@ impl InsertQuery {
                 if i != 0 {
                     out.push_raw(", ");
                 }
-                match &row[*index] {
-                    Some(value) => out.bind(value.clone()),
+                match &mut row[*index] {
+                    Some(value) => out.bind_value(core::mem::replace(value, Value::Null)),
                     None => {
                         if D::SUPPORTS_DEFAULT_IN_VALUES {
                             out.push_raw("DEFAULT");
@@ -147,11 +174,11 @@ impl InsertQuery {
             out.push_raw(")");
         }
 
-        if let Some(conflict) = &self.conflict {
-            self.render_conflict(&mut out, conflict);
+        if let Some(conflict) = &mut self.conflict {
+            render_conflict(&mut out, conflict);
         }
 
-        if let Some(returning) = &self.returning {
+        if let Some(returning) = &mut self.returning {
             if !D::SUPPORTS_RETURNING {
                 out.set_error(Error::unsupported(alloc::format!(
                     "`{}` does not support `RETURNING`",
@@ -160,7 +187,7 @@ impl InsertQuery {
                 return out;
             }
             out.push_raw(" RETURNING ");
-            for (i, expr) in returning.iter().enumerate() {
+            for (i, expr) in returning.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(", ");
                 }
@@ -170,64 +197,61 @@ impl InsertQuery {
 
         out
     }
+}
 
-    fn render_conflict<D: besu_core::Dialect>(
-        &self,
-        out: &mut besu_core::Sql<D>,
-        conflict: &OnConflict,
-    ) {
-        if D::UPSERT.is_mysql() {
-            if !matches!(conflict.action, ConflictAction::Update(_)) {
-                // MySQL has no equivalent of `ON CONFLICT DO NOTHING` that is safe to
-                // emulate here (`INSERT IGNORE` also swallows other errors).
-                out.set_error(Error::unsupported(alloc::format!(
-                    "`{}` has no `ON CONFLICT DO NOTHING`; use `do_update` instead",
-                    D::NAME
-                )));
-                return;
-            }
-            out.push_raw(" ON DUPLICATE KEY UPDATE ");
-            if let ConflictAction::Update(sets) = &conflict.action {
-                for (i, (column, value)) in sets.iter().enumerate() {
-                    if i != 0 {
-                        out.push_raw(", ");
-                    }
-                    out.push_ident(column);
-                    out.push_raw(" = ");
-                    out.bind(value.clone());
-                }
-            }
+/// Render an `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` clause.
+fn render_conflict<D: besu_core::Dialect>(out: &mut besu_core::Sql<D>, conflict: &mut OnConflict) {
+    if D::UPSERT.is_mysql() {
+        if !matches!(conflict.action, ConflictAction::Update(_)) {
+            // MySQL has no equivalent of `ON CONFLICT DO NOTHING` that is safe to
+            // emulate here (`INSERT IGNORE` also swallows other errors).
+            out.set_error(Error::unsupported(alloc::format!(
+                "`{}` has no `ON CONFLICT DO NOTHING`; use `do_update` instead",
+                D::NAME
+            )));
             return;
         }
-
-        if conflict.target.is_empty() {
-            out.set_error(Error::invalid_query(
-                "`ON CONFLICT` needs a target column; call `.on_conflict(column)` first",
-            ));
-            return;
-        }
-
-        out.push_raw(" ON CONFLICT (");
-        for (i, column) in conflict.target.iter().enumerate() {
-            if i != 0 {
-                out.push_raw(", ");
-            }
-            out.push_ident(column);
-        }
-        out.push_raw(") ");
-
-        match &conflict.action {
-            ConflictAction::Nothing => out.push_raw("DO NOTHING"),
-            ConflictAction::Update(sets) => {
-                out.push_raw("DO UPDATE SET ");
-                for (i, (column, value)) in sets.iter().enumerate() {
-                    if i != 0 {
-                        out.push_raw(", ");
-                    }
-                    out.push_ident(column);
-                    out.push_raw(" = ");
-                    out.bind(value.clone());
+        out.push_raw(" ON DUPLICATE KEY UPDATE ");
+        if let ConflictAction::Update(sets) = &mut conflict.action {
+            for (i, (column, value)) in sets.iter_mut().enumerate() {
+                if i != 0 {
+                    out.push_raw(", ");
                 }
+                out.push_ident(column);
+                out.push_raw(" = ");
+                out.bind_value(core::mem::replace(value, Value::Null));
+            }
+        }
+        return;
+    }
+
+    if conflict.target.is_empty() {
+        out.set_error(Error::invalid_query(
+            "`ON CONFLICT` needs a target column; call `.on_conflict(column)` first",
+        ));
+        return;
+    }
+
+    out.push_raw(" ON CONFLICT (");
+    for (i, column) in conflict.target.iter().enumerate() {
+        if i != 0 {
+            out.push_raw(", ");
+        }
+        out.push_ident(column);
+    }
+    out.push_raw(") ");
+
+    match &mut conflict.action {
+        ConflictAction::Nothing => out.push_raw("DO NOTHING"),
+        ConflictAction::Update(sets) => {
+            out.push_raw("DO UPDATE SET ");
+            for (i, (column, value)) in sets.iter_mut().enumerate() {
+                if i != 0 {
+                    out.push_raw(", ");
+                }
+                out.push_ident(column);
+                out.push_raw(" = ");
+                out.bind_value(core::mem::replace(value, Value::Null));
             }
         }
     }
@@ -251,14 +275,14 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
 
     /// Insert one row.
     pub fn value(mut self, value: I) -> Self {
-        self.query.push_row(value.into_values());
+        value.write_values(&mut self.query.values);
         self
     }
 
     /// Insert many rows in a single statement.
     pub fn values(mut self, values: impl IntoIterator<Item = I>) -> Self {
         for value in values {
-            self.query.push_row(value.into_values());
+            value.write_values(&mut self.query.values);
         }
         self
     }
@@ -320,23 +344,32 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
     ) -> Result<Vec<E::Output>, ErrorOf<E>> {
         let prefix = self.exec.table_prefix();
         let mut exec = self.exec;
-        let mut pending: alloc::collections::VecDeque<Option<alloc::vec::Vec<Option<Value>>>> =
-            values
-                .into_iter()
-                .map(|value| Some(value.into_values()))
-                .collect();
+        let stride = self.query.table.columns.len();
+        // One flat buffer for the whole iterator, drained one statement at a time. Building
+        // a row at a time and pushing it into a `VecDeque` allocated per row for no reason:
+        // nothing here needs to revisit a value.
+        let mut pending = Vec::new();
+        for value in values {
+            value.write_values(&mut pending);
+        }
+        let mut pending = pending.into_iter();
 
-        let batch_size = rows_per_statement.max(1);
+        let per_statement = rows_per_statement.max(1).saturating_mul(stride.max(1));
         let mut outputs = Vec::new();
-        while !pending.is_empty() {
+        loop {
             let mut query = InsertQuery::new(self.query.table);
             query.conflict = self.query.conflict.clone();
-            for _ in 0..batch_size {
-                match pending.pop_front().flatten() {
-                    Some(row) => query.rows.push(row),
+            query.values.reserve(per_statement);
+            for _ in 0..per_statement {
+                match pending.next() {
+                    Some(value) => query.values.push(value),
                     None => break,
                 }
             }
+            if query.values.is_empty() {
+                break;
+            }
+
             let sql = query
                 .build::<DialectOf<E>>(prefix.clone())
                 .finish()
@@ -367,7 +400,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build(self.exec.table_prefix()).seal())
+        Ok(self.query.clone().build(self.exec.table_prefix()).seal())
     }
 
     fn into_parts(self) -> (E, InsertQuery) {

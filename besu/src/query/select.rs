@@ -143,7 +143,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
 
     /// Render the exact SQL this query will run, without running it.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build(self.exec.table_prefix()).seal())
+        Ok(self.query.clone().build(self.exec.table_prefix()).seal())
     }
 
     /// Render the SQL with its parameters inlined, for logging.
@@ -151,6 +151,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
         Ok(alloc::string::ToString::to_string(
             &self
                 .query
+                .clone()
                 .build::<DialectOf<E>>(self.exec.table_prefix())
                 .inspect(),
         ))

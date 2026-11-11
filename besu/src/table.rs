@@ -47,6 +47,20 @@ pub trait Insertable {
 
     /// One entry per column: `None` means "not provided".
     fn into_values(self) -> Vec<Option<Value>>;
+
+    /// Append this row's values to `out`, one entry per column.
+    ///
+    /// This exists because a bulk insert used to allocate a `Vec` per row solely to hand it
+    /// straight to another `Vec`. The derive writes its fields directly into the statement's
+    /// buffer, so inserting a thousand rows allocates like inserting one. The default keeps
+    /// every hand-written implementation working, at the cost of the allocation it always
+    /// paid.
+    fn write_values(self, out: &mut Vec<Option<Value>>)
+    where
+        Self: Sized,
+    {
+        out.extend(self.into_values());
+    }
 }
 
 /// A column value in an `INSERT` or `UPDATE`.

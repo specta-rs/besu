@@ -35,12 +35,11 @@ impl Dialect for Postgres {
     /// PostgreSQL fixes parameter types at prepare time, and sqlx caches by SQL string alone.
     /// Without this, `sql!("SELECT ?::numeric", x)` executed once with an integer and once
     /// with a numeric would reach the same cached statement with the wrong bytes.
-    fn statement_suffix(args: &[Self::Value]) -> Option<String> {
+    fn write_statement_suffix(suffix: &mut String, args: &[Self::Value]) {
         if args.is_empty() {
-            return None;
+            return;
         }
 
-        let mut suffix = String::with_capacity(args.len() + 14);
         // A newline first, so a trailing `--` comment cannot swallow the signature.
         suffix.push_str("\n/* besu:");
         for value in args {
@@ -64,7 +63,6 @@ impl Dialect for Postgres {
             });
         }
         suffix.push_str(" */");
-        Some(suffix)
     }
 
     fn bind(value: Value) -> Result<Self::Value, Error> {
@@ -75,7 +73,7 @@ impl Dialect for Postgres {
 
     fn write_placeholder(out: &mut String, index: usize) {
         out.push('$');
-        out.push_str(&(index + 1).to_string());
+        besu_core::dialect::write_index(out, index + 1);
     }
 
     fn type_name(ty: TypeDef) -> Cow<'static, str> {

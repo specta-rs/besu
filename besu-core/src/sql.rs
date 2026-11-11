@@ -87,6 +87,26 @@ impl<D: Dialect> Sql<D> {
         }
     }
 
+    /// An empty statement with room for `bytes` of SQL.
+    ///
+    /// Rendering a statement appends to a single `String`, and every growth copies
+    /// everything written so far. A builder that knows roughly how large the finished
+    /// statement will be can start at that size and never copy at all; guessing slightly
+    /// high wastes a few hundred bytes, which is the cheaper mistake.
+    pub fn with_capacity(bytes: usize) -> Self {
+        Self {
+            sql: Cow::Owned(String::with_capacity(bytes)),
+            args: Vec::new(),
+            error: None,
+            prefix: None,
+        }
+    }
+
+    /// Reserve room for `count` bound parameters.
+    pub fn reserve_args(&mut self, count: usize) {
+        self.args.reserve(count);
+    }
+
     /// A statement starting with raw SQL. The string is used verbatim, so never pass it
     /// anything derived from user input.
     pub fn raw(sql: impl Into<Cow<'static, str>>) -> Self {
@@ -111,12 +131,15 @@ impl<D: Dialect> Sql<D> {
     /// Write a table name, prefixed and schema-qualified.
     pub fn push_table(&mut self, schema: Option<&str>, table: &str) {
         if let Some(schema) = schema {
-            self.push_raw(&D::quote(schema));
+            self.push_ident(schema);
             self.push_raw(".");
         }
         match &self.prefix {
+            // The prefixed path concatenates because a quoted identifier is one unit; the
+            // unprefixed path, which is every statement in a database without prefixes,
+            // writes straight into the buffer.
             Some(prefix) => self.push_raw(&D::quote(&alloc::format!("{prefix}{table}"))),
-            None => self.push_raw(&D::quote(table)),
+            None => self.push_ident(table),
         }
     }
 
@@ -288,9 +311,7 @@ impl<D: Dialect> Sql<D> {
     /// `to_sql` shows and part of the string the driver sends. See
     /// [`Dialect::statement_suffix`] for why it exists.
     pub fn seal(mut self) -> Self {
-        if let Some(suffix) = D::statement_suffix(&self.args) {
-            self.sql.to_mut().push_str(&suffix);
-        }
+        D::write_statement_suffix(self.sql.to_mut(), &self.args);
         self
     }
 

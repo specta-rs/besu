@@ -251,7 +251,9 @@ where
 
 /// Render the parent half of a relation load.
 fn render_parent<D: Dialect>(query: &SelectQuery, prefix: Option<Arc<str>>) -> Sql<D> {
-    query.build::<D>(prefix)
+    // Cloned because `to_sql` leaves the relation usable, and because rendering moves the
+    // bound values into the statement.
+    query.clone().build::<D>(prefix)
 }
 
 /// Render the child half of a relation load.
