@@ -213,14 +213,6 @@ This is deliberately last: it is useful, but it is not on the path to a dependab
 
 These are not large enough for their own section, but they are real:
 
-- **A `CASE` builder.** `ExprKind::Case` renders correctly, but there is no public constructor;
-  `Expr::from_kind` is crate-private. A `case().when(..).then(..).otherwise(..)` builder is
-  mostly mechanical.
-- **`RawQuery::first` returns the last row.** It collects and calls `Vec::pop`. It should
-  either `LIMIT 1` or take the first element.
-- **`Option`-aware `pick` for outer joins.** `pick((users, posts))` after a `left_join` is
-  typed `(User, Post)` even though the right side may be absent. The selection trait needs a
-  nullability-aware wrapper for table handles.
 - **Prepared statement caching and `EXPLAIN`.** Delegated to the driver today; a
   dialect-level helper that renders `EXPLAIN` for a query would make the "same SQL" claim
   easier to verify.

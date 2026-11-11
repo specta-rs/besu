@@ -10,7 +10,7 @@ particular dependency is absent.
 flowchart TD
     core["besu-core<br/>Dialect · Driver · Sql · Value · Decode"]
     schema["besu-schema<br/>Schema IR · diff · DDL · Migrator"]
-    macros["besu-macros<br/>#[derive(Table)]"]
+    macros["besu-macros<br/>derive(Table)"]
     besu["besu<br/>builders · expression DSL · Database"]
     sqlite["besu-sqlite<br/>SQLite dialect · driver · DDL"]
     postgres["besu-postgres<br/>PostgreSQL dialect · driver · DDL"]
@@ -127,16 +127,16 @@ until the end.
 ```mermaid
 flowchart LR
     A["builder<br/>Select / Insert / Update / Delete"] -->|"filter · pick · join · order_by"| A
-    A -->|"build::&lt;D&gt;()"| B["query data<br/>Vec&lt;ExprKind&gt; · OrderClause · joins"]
-    B -->|"ExprKind::render + Dialect"| C["Sql&lt;D&gt;<br/>text · bound args · first error"]
-    C -->|"finish()"| D["Executor<br/>&amp;Database or &amp;mut Transaction"]
-    D -->|"Driver::query / execute"| E["Vec&lt;Row&gt; or Output"]
-    E -->|"Decode::decode(row, &amp;mut offset)"| F["Vec&lt;R&gt;"]
+    A -->|"build()"| B["query data<br/>Vec of ExprKind · OrderClause · joins"]
+    B -->|"ExprKind::render + Dialect"| C["Sql<br/>text · bound args · first error"]
+    C -->|"finish()"| D["Executor<br/>Database or Transaction"]
+    D -->|"Driver::query / execute"| E["Vec of Row or Output"]
+    E -->|"Decode::decode(row, offset)"| F["Vec of R"]
 ```
 
 Step by step, for a select:
 
-1. **Builder.** `db.select(users)` creates `Select` with `from = users.def()` and an empty
+1. **Builder.** `db.select(users)` creates `Select` with `from = T::DEF` and an empty
    `SelectQuery`. `.filter(users.age.gt(18))` converts the condition to an `ExprKind` and
    pushes it. The type parameters `M` and `R` track the row set and the result type; they are
    erased at runtime.
@@ -152,9 +152,9 @@ Step by step, for a select:
 4. **Finish.** `Sql::finish()` returns the statement if no error was recorded, or the first
    error if one was. Capability failures — `RETURNING` on MySQL, `FULL OUTER JOIN` on MySQL,
    `FOR UPDATE` on SQLite — are recorded here, before the driver sees anything.
-5. **Execute.** `Executor::query` hands the rendered `Sql` to `Driver::query`, which binds
-   each `Value` with the driver's own argument type and runs it. `execute` is the same path
-   for statements that return no rows.
+5. **Execute.** `Executor::query` hands the rendered `Sql` to `Driver::query`, which converts
+   each already-bound value into the driver's argument type and runs it. `execute` is the same
+   path for statements that return no rows.
 6. **Decode.** For a query, `Decode::decode` walks the row with a `usize` offset. A model
    consumes one column per field in declaration order; a tuple consumes one per element;
    `Option<T>` peeks for `NULL` before deciding.
@@ -181,7 +181,7 @@ The design goal is: one SQL string per query, one encode per parameter, no per-r
 | --- | --- |
 | Table handle | None. A `const` struct of `Column`s, each a `&'static str`; `Copy` |
 | Column reference | None. Copying a `Column` copies a pointer and a length |
-| Expression node | One `Box` per binary/prefix/postfix node, one `Vec` per function/in-list |
+| Expression node | Two `Box`es for a binary node, one for prefix/postfix; one `Vec` per function or `IN` list |
 | Building | None per builder step; vectors grow as clauses are added |
 | Rendering | One `Sql`, whose text starts as a borrowed `&'static str` and becomes an owned `String` on the first append |
 | Identifier quoting | `Dialect::quote` returns a `String`; `push_table` currently allocates one per table name. `write_ident` is the allocation-free path |

@@ -64,8 +64,8 @@ assert!(users.bio.nullable());
 | `#[besu(schema = "public")]` | An optional schema/namespace, stored on `TableDef` | `None` |
 
 The handle identifier is derived from the table name: `table = "user_profiles"` generates the
-const `user_profiles`. Two tables with the same SQL name generate the same identifier and
-collide; that is a compile error rather than a silent merge.
+const `user_profiles`. Two tables with the same SQL name in the same module generate the same
+identifier and collide; that is a compile error rather than a silent merge.
 
 ## Field attributes
 
@@ -121,7 +121,7 @@ a separate `Index` named `{table}_{column}_idx`:
 
 ```rust
 // Index { name: "users_email_address_idx", columns: &["email_address"], unique: false }
-#[besu(index)]
+#[besu(index, column = "email_address")]
 pub email: String,
 ```
 
@@ -208,8 +208,9 @@ Three details are easy to get wrong:
   the driver encodes the whole `u64` range into it; MySQL uses `BIGINT UNSIGNED`; SQLite has
   only signed 64-bit integers, so binding a `u64` above `i64::MAX` is an encode error at
   runtime rather than a wrapped value.
-- `DateTime` is matched by name, not by its full type. `chrono::DateTime<Local>` compiles and
-  is declared as `TimestampTz`, then fails to decode at runtime. Use `DateTime<Utc>`.
+- `DateTime` is matched by name, not by its full type. `chrono::DateTime<Local>` is declared
+  as `TimestampTz`, but no driver implements `Decode` for it, so a query that returns the
+  model does not compile. Use `DateTime<Utc>`.
 
 ### Types the derive cannot produce
 
@@ -246,7 +247,7 @@ helpers for filtering on it.
 | A nullable primary key or auto-increment column | Compile error |
 | A malformed `references` string | Compile error |
 | An unknown or misspelled `#[besu(..)]` key | Compile error listing the accepted keys |
-| Two tables with the same SQL name | Compile error at the generated handle |
+| Two tables with the same SQL name in one module | Compile error at the generated handle |
 | A database whose schema drifted from the struct | Runtime, caught by `push` unless destructive |
 
 ## Gotchas

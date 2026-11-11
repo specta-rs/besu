@@ -77,7 +77,7 @@ db.execute(sql!("DELETE FROM sessions WHERE expires_at < ?", cutoff))
 // `.all()` decodes every row into the type you name.
 let rows: Vec<User> = db.execute(sql!("SELECT * FROM users")).all().await?;
 
-// `.first()` returns Option<R>.
+// `.first()` returns the first row, if any.
 let row: Option<User> = db.execute(sql!("SELECT * FROM users")).first().await?;
 ```
 
@@ -173,9 +173,6 @@ enters the query path. Keep it literal.
 - **The macro only accepts a literal.** For a runtime string, use `Fragment::with_args` and
   accept that the arity check moves to render time.
 - **`SELECT *` is order-sensitive.** The model decodes by position, not by name.
-- **`RawQuery::first` currently returns the last row.** Its implementation collects all rows
-  and calls `Vec::pop`, so with more than one result it gives you the final row. Use `.all()`
-  and take the element you want until this is fixed.
 - **Awaiting a `RawQuery` does not decode anything.** It returns the driver output. You need
   `.all()` or `.first()` to get rows.
 - **`sql!` does not validate the dialect.** A statement valid on SQLite may be a syntax error

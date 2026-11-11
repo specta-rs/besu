@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use sqlx::{
     Arguments, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
@@ -84,57 +86,10 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedNull {
 /// A `u64` bound as `NUMERIC`, which is how PostgreSQL spells integers above `i64::MAX`.
 ///
 /// sqlx ships no `u64` support for PostgreSQL because the type system has no unsigned
-/// integers, so the handful of bytes of the `NUMERIC` wire format are written here.
-struct NumericU64(u64);
-
-impl sqlx::Type<SqlxPostgres> for NumericU64 {
-    fn type_info() -> PgTypeInfo {
-        // `NUMERIC` is a built-in type, so its OID is stable across servers.
-        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(NUMERIC_OID))
-    }
-}
-
-impl sqlx::Encode<'_, SqlxPostgres> for NumericU64 {
-    fn encode_by_ref(
-        &self,
-        buffer: &mut PgArgumentBuffer,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        // A `NUMERIC` begins with `ndigits`, `weight`, the sign and the scale, followed by
-        // `ndigits` base-10000 digits. A `u64` needs at most five of them.
-        let mut digits = [0_i16; 5];
-        let mut count = 0;
-        let mut remaining = self.0;
-        while remaining != 0 {
-            digits[count] = i16::try_from(remaining % 10_000).unwrap_or(0);
-            remaining /= 10_000;
-            count += 1;
-        }
-
-        let ndigits = i16::try_from(count).unwrap_or(i16::MAX);
-        buffer.extend(&ndigits.to_be_bytes());
-        // `weight` is the exponent of the most significant digit, so it is one less than the
-        // number of digits. Zero has no digits and a weight of zero.
-        let weight = if count == 0 {
-            0
-        } else {
-            ndigits.saturating_sub(1)
-        };
-        buffer.extend(&weight.to_be_bytes());
-        buffer.extend(&0_i16.to_be_bytes()); // positive
-        buffer.extend(&0_i16.to_be_bytes()); // no fractional digits
-        for digit in digits[..count].iter().rev() {
-            buffer.extend(&digit.to_be_bytes());
-        }
-        eprintln!(
-            "numeric encode: value={} ndigits={} weight={} bytes={:02x?}",
-            self.0,
-            ndigits,
-            weight,
-            &buffer[..]
-        );
-
-        Ok(sqlx::encode::IsNull::No)
-    }
+/// integers. `BigDecimal` is the type sqlx does implement `NUMERIC` for, and it converts from
+/// `u64` without going through a string.
+fn numeric_u64(value: u64) -> sqlx::types::BigDecimal {
+    sqlx::types::BigDecimal::from(value)
 }
 
 fn add<'q, T>(arguments: &mut PgArguments, value: T) -> Result<(), sqlx::Error>
@@ -144,6 +99,45 @@ where
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
 
+/// The SQL text to send, suffixed with a comment recording the bound parameter types.
+///
+/// sqlx caches prepared statements by SQL string alone, while PostgreSQL fixes each
+/// parameter's type when the statement is *first* prepared. Running one statement with
+/// values of different types — easy with raw `sql!` fragments — would otherwise hand the
+/// server bytes for the wrong type, which it either rejects or, worse, reinterprets. The
+/// signature makes the cache key match the values actually being bound. `Sql::sql` is left
+/// untouched; only the string sent to the server carries the comment.
+fn query_text(sql: &Sql<Postgres>) -> Cow<'_, str> {
+    if sql.args().is_empty() {
+        return Cow::Borrowed(sql.sql());
+    }
+
+    let mut text = String::with_capacity(sql.sql().len() + sql.args().len() + 12);
+    text.push_str(sql.sql());
+    // A newline first, so a trailing `--` comment cannot swallow the signature.
+    text.push_str("\n/* besu:");
+    for value in sql.args() {
+        text.push(match value {
+            Value::Null => 'n',
+            Value::Bool(_) => 'b',
+            Value::Int(_) => 'i',
+            Value::UInt(_) => 'u',
+            Value::Float(_) => 'f',
+            Value::Text(_) => 't',
+            Value::Bytes(_) => 'x',
+            Value::Uuid(_) => 'd',
+            Value::Date(_) => 'e',
+            Value::Time(_) => 'm',
+            Value::Timestamp(_) => 's',
+            Value::TimestampTz(_) => 'z',
+            Value::Json(_) => 'j',
+            _ => '?',
+        });
+    }
+    text.push_str(" */");
+    Cow::Owned(text)
+}
+
 fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
     let mut arguments = PgArguments::default();
     for value in sql.args() {
@@ -151,13 +145,10 @@ fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Null => add(&mut arguments, None::<UntypedNull>)?,
             Value::Bool(v) => add(&mut arguments, *v)?,
             Value::Int(v) => add(&mut arguments, *v)?,
-            Value::UInt(v) => match i64::try_from(*v) {
-                // Everything that fits keeps PostgreSQL's native `BIGINT`, which is faster
-                // and matches the common case.
-                Ok(v) => add(&mut arguments, v)?,
-                // Above `i64::MAX` the value needs `NUMERIC`, exactly as DDL declares it.
-                Err(_) => add(&mut arguments, NumericU64(*v))?,
-            },
+            // A `u64` column is `NUMERIC(20,0)`, so the parameter is always `NUMERIC`, even
+            // when the value happens to fit in an `i64`. That keeps one SQL type for every
+            // value the column can hold.
+            Value::UInt(v) => add(&mut arguments, numeric_u64(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -206,17 +197,17 @@ impl Driver for Sqlx {
     }
 
     async fn query(&self, sql: &Sql<Postgres>) -> Result<Vec<Self::Row>, Self::Error> {
+        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments)
+        sqlx::query_with(&text, arguments)
             .fetch_all(&self.pool)
             .await
     }
 
     async fn execute(&self, sql: &Sql<Postgres>) -> Result<Self::Output, Self::Error> {
+        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments)
-            .execute(&self.pool)
-            .await
+        sqlx::query_with(&text, arguments).execute(&self.pool).await
     }
 }
 
@@ -248,8 +239,9 @@ impl TransactionDriver for Sqlx {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Postgres>,
     ) -> Result<Vec<Self::Row>, Self::Error> {
+        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments)
+        sqlx::query_with(&text, arguments)
             .fetch_all(&mut **tx)
             .await
     }
@@ -258,10 +250,9 @@ impl TransactionDriver for Sqlx {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Postgres>,
     ) -> Result<Self::Output, Self::Error> {
+        let text = query_text(sql);
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments)
-            .execute(&mut **tx)
-            .await
+        sqlx::query_with(&text, arguments).execute(&mut **tx).await
     }
 }
 
@@ -344,8 +335,8 @@ impl Decode<Sqlx> for u64 {
 
         let value = row.try_get_raw(index)?;
         if type_is(&value, NUMERIC_OID) {
-            // `UInt(64)` is declared `NUMERIC(20,0)`, and sqlx has no `NUMERIC` decoder
-            // without a decimal feature, so read the wire format directly.
+            // `UInt(64)` is declared `NUMERIC(20,0)`. Read its wire format directly so the
+            // decode path does not depend on a decimal type beyond what encoding needs.
             return decode_numeric(value, index);
         }
 

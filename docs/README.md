@@ -16,7 +16,7 @@ cover the schema IR that powers migrations and the traits you implement to add a
 
 ## Guide
 
-- [Selecting data](guide/select.md) — filtering, ordering, paging, projections, joins, grouping and aggregates
+- [Selecting data](guide/select.md) — filtering, ordering, paging, row locking, projections, joins, grouping and aggregates
 - [Inserting data](guide/insert.md) — `value`/`values`, the generated insert struct, `Set`, `RETURNING` and upserts
 - [Updating and deleting](guide/update-delete.md) — the `all_rows()` safety mechanism, `set` versus `set_expr`, `RETURNING`
 - [Raw SQL](guide/raw-sql.md) — the `sql!` macro, placeholder rewriting, compile-time arity checking and escape hatches

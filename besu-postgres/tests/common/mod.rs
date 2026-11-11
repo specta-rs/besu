@@ -33,7 +33,7 @@ pub async fn database() -> besu::Database<Sqlx> {
 /// Remove every table the suite creates, so each test starts from a known schema.
 pub async fn reset(db: &besu::Database<Sqlx>) {
     db.execute(sql!(
-        "DROP TABLE IF EXISTS posts, users, things, null_probe, \"_besu_migrations\" CASCADE"
+        "DROP TABLE IF EXISTS posts, users, things, numbers, null_probe, \"_besu_migrations\" CASCADE"
     ))
     .await
     .expect("the test tables must be droppable");

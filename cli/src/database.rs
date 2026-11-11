@@ -1,4 +1,4 @@
-use besu::schema::{AppliedMigration, Migrator, Schema};
+use besu::schema::{AppliedMigration, Change, Ddl, Migrator, Schema, diff_with};
 use besu::{PushResult, SchemaError};
 
 /// A database of any supported kind.
@@ -46,6 +46,24 @@ impl AnyDatabase {
             Self::Sqlite(_) => "sqlite",
             Self::Postgres(_) => "postgres",
             Self::MySql(_) => "mysql",
+        }
+    }
+
+    /// Diff two schemas the way this database would, folding types it cannot tell apart.
+    ///
+    /// `push` uses the same rule, so `--dry-run` and `generate` report exactly what `push`
+    /// would do.
+    pub fn diff(&self, current: &Schema, desired: &Schema) -> Vec<Change> {
+        match self {
+            Self::Sqlite(_) => diff_with(current, desired, &|ty| {
+                besu_sqlite::SQLiteDdl.normalise_type(ty)
+            }),
+            Self::Postgres(_) => diff_with(current, desired, &|ty| {
+                besu_postgres::PostgresDdl.normalise_type(ty)
+            }),
+            Self::MySql(_) => diff_with(current, desired, &|ty| {
+                besu_mysql::MySqlDdl.normalise_type(ty)
+            }),
         }
     }
 

@@ -22,7 +22,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let db = super::database::AnyDatabase::connect(&args.database).await?;
     let current = db.introspect().await?;
 
-    let changes = besu::schema::diff::diff(&current, &desired);
+    let changes = db.diff(&current, &desired);
     if changes.is_empty() {
         println!("schema is up to date; nothing to generate");
         return Ok(());

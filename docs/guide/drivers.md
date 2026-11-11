@@ -55,8 +55,11 @@ pub trait Dialect: 'static + Sized {
 ```
 
 A dialect is a type, not a value: it has no state and exactly one instance. Every method must
-be total. When the database genuinely cannot express something, the capability constants let
-the builder reject the query with a clear error before it is sent.
+be total with respect to *expression*: it never fails because it cannot spell a construct.
+`bind` is the exception in form — it returns `Result` so a value the database cannot represent
+(such as a `u64` above `i64::MAX` on SQLite) is an encode error rather than a truncation. When
+the database genuinely cannot express a construct (MySQL has no `RETURNING`), the capability
+constants let the builder reject the query with a clear error before it is sent.
 
 | Constant | What the query layer does with it |
 | --- | --- |
@@ -334,6 +337,8 @@ pub trait Ddl {
     fn type_name(&self, ty: &TypeDef) -> String;
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String;
 
+    fn normalise_type(&self, ty: &TypeDef) -> TypeDef { ty.clone() }
+
     const INLINE_INDEXES: bool = false;
     const CREATE_INDEX_NEEDS_TYPES: bool = false;
 
@@ -384,6 +389,12 @@ Introspection must produce the same normalised IR that `diff` expects: canonical
 normalised defaults, primary-key-first columns, sorted indexes and foreign keys. If it does
 not, `push` will report a change on every run. The SQLite driver reads `PRAGMA table_info`,
 `PRAGMA index_list` and `PRAGMA foreign_key_list`; MySQL reads `information_schema`.
+
+`normalise_type` is the dialect's answer to "which canonical types does the database store
+identically?". `push` passes it to `diff_with`, so a database with one integer type must fold
+every integer width, and a database without unsigned integers must fold each `UInt` onto the
+signed type that holds it. The default is the identity, which is right for a database that
+keeps the declared types faithfully.
 
 ## Testing a new driver
 

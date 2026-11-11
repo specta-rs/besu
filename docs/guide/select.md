@@ -62,7 +62,7 @@ A boolean column can be used directly, because `Column<T, Bool, N>` implements
 
 ```rust
 db.select(posts).filter(posts.published).await?;
-// WHERE ("posts"."published")
+// WHERE "posts"."published"
 ```
 
 `like` takes a pattern as a value, so `%` and `_` keep their SQL meaning without any string
@@ -102,7 +102,7 @@ build the `OrderClause` and adjust it: `users.bio.asc().nulls_last()` or
 `some_expression.desc().nulls_first()`.
 
 SQLite and PostgreSQL render `NULLS FIRST` / `NULLS LAST`. MySQL has no such syntax, so Besu
-emulates it by sorting on `(expr IS NULL)` first:
+emulates it by sorting on `(expr IS NULL)` first. `users.bio.asc().nulls_last()` becomes:
 
 ```sql
 ORDER BY ("users"."bio" IS NULL) ASC, "users"."bio" ASC
@@ -375,6 +375,32 @@ db.select(users).filter(raw("age * 2 > 40")).await?;
 
 The string is not checked and not escaped, and the query's row set is inferred from the call
 site. It is the expression-level escape hatch; see [Raw SQL](raw-sql.md).
+
+### `CASE`
+
+`case` builds a conditional expression. The SQL type is explicit because a bare literal could
+equally be `TEXT`, `VARCHAR(n)` or `CHAR(n)`:
+
+```rust
+use besu::prelude::*;
+
+let labels: Vec<String> = db
+    .select(users)
+    .pick(
+        case::<_, besu::Text>()
+            .when(users.age.gte(18), "adult")
+            .otherwise("minor"),
+    )
+    .await?;
+```
+
+```sql
+SELECT (CASE WHEN ("users"."age" >= ?) THEN ? ELSE ? END) FROM "users"
+```
+
+`when` can be called repeatedly and `otherwise` finishes the expression. A `CASE` with no
+`otherwise` is not expressible: the builder always writes `ELSE`, which keeps the SQL type
+non-nullable and matches what most callers mean.
 
 ## Looking at the SQL
 

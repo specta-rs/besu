@@ -150,7 +150,8 @@ pub const fn count_placeholders(sql: &str) -> usize {
 /// Build a [`Fragment`] from raw SQL and bound parameters.
 ///
 /// The SQL must be a string literal so the placeholder count can be checked at compile time.
-/// Every `?` is a parameter, and `??` is a literal question mark.
+/// Every `?` outside a quoted string or a `--` comment is a parameter; there is no escape for
+/// a literal question mark.
 ///
 /// ```ignore
 /// let sql = besu::sql!(

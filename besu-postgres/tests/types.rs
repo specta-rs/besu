@@ -127,18 +127,39 @@ async fn every_type_round_trips() {
     assert_eq!(stored.maybe, original.maybe);
 }
 
+/// A table whose only job is to hold a `u64` at its extremes.
+///
+/// The values round-trip through a real `NUMERIC(20,0)` column, which is the type the derive
+/// declares for `u64`, rather than through a cast in a `SELECT`.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "numbers")]
+pub struct Number {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub value: u64,
+}
+
 #[tokio::test]
 async fn unsigned_big_round_trips_at_the_extremes() {
     let db = common::database().await;
+    common::reset(&db).await;
+    db.push([numbers.def()]).await.unwrap();
 
-    for value in [0, 1, i64::MAX as u64 + 1, u64::MAX] {
-        eprintln!("trying {value}");
-        let rows: Vec<(u64,)> = db
-            .execute(sql!("SELECT ?::numeric", value))
-            .all()
+    for (id, value) in [0, 1, i64::MAX as u64 + 1, u64::MAX]
+        .into_iter()
+        .enumerate()
+    {
+        db.insert(numbers)
+            .value(numbers.insert(id as i64, value))
             .await
             .unwrap();
-        assert_eq!(rows[0].0, value);
+
+        let stored: Vec<Number> = db
+            .select(numbers)
+            .filter(numbers.id.eq(id as i64))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].value, value);
     }
 }
 
