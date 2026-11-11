@@ -126,7 +126,7 @@ tx.commit().await?;
 
 | Claim | Checked by |
 | --- | --- |
-| The rendered SQL is what runs | `to_sql()` and the driver both receive the same `Sql` |
+| The rendered SQL is what runs | `to_sql()` and execution both call `SelectQuery::build` |
 | Parameters are encoded once | `Dialect::bind` runs when the value is bound, not per row |
 | A bulk insert allocates one row buffer | `Insert::values` reserves from the size hint |
 | Streaming does not collect | `Rows::next` decodes one row per poll |
@@ -135,6 +135,9 @@ tx.commit().await?;
 
 - **`to_sql()` clones the query.** It takes `&self` so the builder stays usable; if you do not
   need it afterwards, awaiting the builder avoids the clone.
+- **`to_sql()` and execution have different error types.** `to_sql()` returns `besu::Error`;
+  awaiting the query returns the driver's error. A function that does both needs a boxed error
+  or a mapped one.
 - **`inspect()` is for humans.** It inlines the parameters into a new `String` and must never
   be executed.
 - **The bench numbers are the builder, not the database.** They tell you Besu is not the

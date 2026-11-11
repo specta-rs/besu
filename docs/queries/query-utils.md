@@ -1,8 +1,8 @@
 # Query utilities
 
-Every builder can render its SQL without running it, every select can inline its parameters for
-logging, and every statement can be streamed instead of collected. This page is the toolbox
-around the builders themselves.
+Every statement builder can render its SQL without running it, every select can inline its
+parameters for logging, and every statement can be streamed instead of collected. This page is
+the toolbox around the builders themselves.
 
 ## `to_sql`
 
@@ -150,8 +150,8 @@ See [Drizzle parity](../parity.md) for the full list.
 
 ## Gotchas
 
-- **`to_sql()` does not run or check anything.** Read `sql.error()` when the builder may have
-  rejected the query.
+- **`to_sql()` does not run anything.** Read `sql.error()` when the builder may have rejected
+  the query.
 - **`args()` is dialect-specific.** Every shipped driver uses `Value`, but the signature is
   `&[D::Value]`, so an assertion is written against the dialect's type.
 - **`inspect()` inlines values, `to_sql()` does not.** Never log the parameters and the

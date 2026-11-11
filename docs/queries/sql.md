@@ -28,8 +28,8 @@ number of `?` outside quoted text must equal the number of arguments; a mismatch
 error:
 
 ```text
-error[E0080]: evaluation of constant value failed
-besu::sql!: the SQL has a different number of `?` placeholders than arguments
+error[E0080]: evaluation panicked: besu::sql!: the SQL has a different number of `?`
+placeholders than arguments
 ```
 
 The arguments themselves may be runtime values. The macro stringifies them without evaluating
@@ -54,8 +54,8 @@ a doubled quote is an escape rather than the end of the literal.
 sql!("SELECT * FROM posts WHERE title LIKE ?", "%why?%")
 ```
 
-A `?` in a `--` comment is **not** ignored; it is counted as a placeholder. Write comments
-without question marks, or move them into a fragment built at runtime.
+A `?` in a `--` comment is **not** ignored; it is counted as a placeholder, so keep comments
+free of question marks.
 
 ## A literal question mark
 
@@ -127,7 +127,7 @@ let ranked: Vec<(String, i64)> = db
 ```
 
 ```rust
-// A CTE. There is no `with` for a named subquery.
+// A CTE. There is no builder for a named subquery.
 let counts: Vec<(String, i64)> = db
     .execute(sql!(
         r#"WITH "counts" AS (

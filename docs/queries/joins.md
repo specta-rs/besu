@@ -32,9 +32,9 @@ another join.
 
 ## Why the outer side is `Option`
 
-A left join produces at most one row per left row, but it may produce *no* matching right row.
-The result still has a row, with every right-hand column `NULL`. `Option<Post>` is the only
-honest type for that, and it forces you to handle the missing case.
+A left join keeps every left row even when no right row matches, and a row with no match has
+every right-hand column `NULL`. `Option<Post>` is the only honest type for that, and it forces
+you to handle the missing case.
 
 The widening follows the join path rather than the column, so a `NOT NULL` column from the
 outer side still decodes as `Option`:
@@ -99,7 +99,8 @@ ON (("users"."id" = "posts"."author_id") AND ("posts"."title" <> ?))
 
 ## Chaining joins
 
-Each join adds one element to the row set and one to the row type, so a third table nests:
+Each join adds one element to the row set and one to the row type, so a third table — here
+`comments` with `id`, `post_id` and `text` — nests:
 
 ```rust
 let rows: Vec<((User, Option<Post>), Comment)> = db

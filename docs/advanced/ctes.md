@@ -73,6 +73,9 @@ there is no seam where a raw subquery could be attached to a typed query. The st
 therefore raw from `WITH` to the final `SELECT`, and the result is decoded positionally into
 whatever type you name.
 
+The [parity scoreboard](../parity.md) calls the query-layer gaps — aliases, CTEs and derived
+tables — the ones that bite first, though no issue tracks them yet.
+
 That is also why the row type has to be spelled out. `sql!` produces a `Fragment`, and
 `Database::execute` wraps it in a `RawQuery`, which decodes only through `all::<T>()` or
 `first::<T>()`. The macro cannot infer the row type from the SQL text, so name it at the

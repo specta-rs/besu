@@ -182,7 +182,7 @@ already gives the release point a scope. A `Drop` guard could not release it any
   connection and cannot see uncommitted data. On SQLite in-memory, `Sqlx::memory()` pins the
   pool to one connection, so the two may accidentally work — do not rely on it.
 - **`commit` can fail.** A deferred constraint or a lost connection surfaces there, after
-  every statement succeeded. Handle the error from `commit`, not just the ones inside the
+  every statement succeeded. Handle the error from `commit`, not only the ones inside the
   transaction.
 - **Rollback on drop is best-effort.** If you care whether the rollback succeeded, call
   `rollback().await` and handle the error.

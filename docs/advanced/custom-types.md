@@ -8,7 +8,7 @@ parameters are made of.
 
 `#[besu(sql_type = "..")]` takes a path to a `SqlType` implementation and uses its `DEF` for
 DDL, casts and migration diffing. The field type should be that marker's `Rust` type; the
-derive does not check it, which matters for reading rows. The built-in markers are listed in
+derive does not check it, which matters for reading rows. The attribute is described in
 [Declaring a schema](../schema/declaration.md#sql_type).
 
 ```rust

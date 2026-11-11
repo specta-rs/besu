@@ -45,8 +45,8 @@ not implemented. **N/A** — no meaning in a Rust library.
 | `sql` operator | **Yes** | `sql!`, with compile-time arity checking |
 | SQL comments | **No** | Use `sql!` — [#87](https://github.com/specta-rs/besu/issues/87) |
 | Query utils | **Partial** | `to_sql`, `inspect`, `stream`. No `$dynamic`, `$count`, or subquery as a table — [#79](https://github.com/specta-rs/besu/issues/79) |
-| Set operations | **Yes** | `union`, `union_all`, `intersect`, `except`, … |
-| Subqueries | **Partial** | `EXISTS`, `NOT EXISTS`, `IN (SELECT …)`. No derived table in `FROM`, no scalar subquery in a projection — [#79](https://github.com/specta-rs/besu/issues/79) |
+| Set operations | **Yes** | `union`, `union_all`, `intersect`, `intersect_all`, `except`, `except_all`, chainable, with the compound's own ordering and paging |
+| Subqueries | **Partial** | `EXISTS`, `NOT EXISTS` and `IN (SELECT …)`, correlated with `correlate(..)`. No derived table in `FROM`, no scalar subquery in a projection, and a set operation cannot be used as a subquery — [#79](https://github.com/specta-rs/besu/issues/79) |
 | CTEs | **No** | `WITH` and `WITH RECURSIVE` are not expressible — [#78](https://github.com/specta-rs/besu/issues/78) |
 | Transactions | **Yes** | `begin`/`commit`/`rollback`, `transaction()`, savepoints |
 | Batch API | **No** | Await each statement, or use one transaction — [#84](https://github.com/specta-rs/besu/issues/84) |

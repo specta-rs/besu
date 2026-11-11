@@ -30,7 +30,7 @@ db.delete(users).await?;
 ```
 
 ```text
-error[E0277]: `Delete<'_, &Database<Sqlx>, UserTable, false>` is not a future
+error[E0277]: `Delete<'_, &Database<Sqlx>, UserTable>` is not a future
 ```
 
 The two ways to make it runnable:
@@ -107,7 +107,7 @@ db.delete(users).filter(users.age.gt(18)).await?;
 db.delete(users).filter(users.id.gt(0)).await?;
 ```
 
-Read the filter as a claim about the schema, not just about the type. During a migration or a
+Read the filter as a claim about the schema, not only about the type. During a migration or a
 backfill, run the same predicate as a `select` first, inside the same transaction, and check the
 count before the `delete` runs. `all_rows()` is the honest spelling for "all of them"; a filter
 that happens to match all of them is the version that reaches production.
