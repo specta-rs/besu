@@ -35,8 +35,8 @@ A single-column `UNIQUE` is a flag on the column, rendered inline as `"email" TE
 pub email: String,
 ```
 
-Anything wider is a `Unique` — a name and a column list — because a constraint over several columns
-has no per-column spelling, and the derive has no attribute for one:
+Anything wider is a `Unique` — a name and a column list — because a constraint over
+several columns has no per-column spelling, and the derive has no attribute for one:
 
 ```rust
 use besu::schema::Unique;

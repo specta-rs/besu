@@ -114,6 +114,7 @@ idempotence already express a seed without new surface.
 - **A seed migration is forever.** It runs once per database, and editing an applied file is
   refused because the journal checksums it. Fix data with a new migration.
 - **`values` is one statement and one round trip.** For a few thousand rows that is fine; for
-  more, `values_chunked` or a `COPY`/`LOAD DATA` written with `sql!` is the practical route.
+  more, `values_chunked` is the practical route, and beyond that use the database's own bulk
+  loader (`COPY`, `LOAD DATA`) outside Besu.
 - **A seed row that references another row needs its id.** With `RETURNING`, take the id from
   the insert; without it (MySQL), select the row back by a unique column.

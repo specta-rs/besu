@@ -108,7 +108,7 @@ pub id: uuid::Uuid,
 `Decimal<PRECISION, SCALE>` renders `NUMERIC(p,s)`. Its Rust type is `String`, and that is where
 the gap is: no driver decodes a `NUMERIC` into a `String` yet, so a decimal column can be
 declared and diffed but not read into the model. Use `sql!` with an explicit `::text` cast, or
-keep the column out of the model until the decoder lands on the [roadmap](../roadmap.md).
+keep the column out of the model until the decoder lands on the [roadmap](../../roadmap.md).
 
 ## 128-bit integers
 

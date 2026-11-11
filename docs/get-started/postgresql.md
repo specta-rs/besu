@@ -146,7 +146,7 @@ the builder compiles for `wasm32`. Awaiting a query built this way returns an er
 
 - [Schema declaration](../schema/declaration.md) — every `#[besu(...)]` attribute.
 - [PostgreSQL column types](../schema/column-types/postgresql.md) — `NUMERIC`, `JSONB`, `UUID`.
-- [Indexes and constraints](../schema/indexes-constraints.md) — partial indexes, composite uniques, checks.
+- [Indexes and constraints](../schema/indexes-constraints.md) — partial indexes and checks.
 - [Connecting to PostgreSQL](../connect/postgresql.md) — pools and transactions.
 - [Get started with SQLite](sqlite.md) or [MySQL](mysql.md).
 

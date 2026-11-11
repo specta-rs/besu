@@ -238,5 +238,8 @@ Compared with Drizzle's operators, none of the following exist yet — see
 - **`not_between`, `is_true` and `is_false` are functions, not column methods.**
 - **`concat` takes typed expressions, not literals.** Literal text has no `SqlType`; pass a
   column, or `Expr::<_, besu::Text>::raw("'!'")` when it must be a constant.
+- **MySQL JSON paths are malformed in this revision.** `json_get` and `json_text` render
+  `JSON_EXTRACT(col, '$.a.b)` with no closing quote, which is a syntax error; use `sql!` on
+  MySQL until that is fixed.
 - **`sum` and `avg` return `f64`.** Annotate `Vec<f64>` when you pick one, and note that
   `json_get` paths use dots — a key containing one cannot be expressed, so write it with `raw`.

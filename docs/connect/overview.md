@@ -40,11 +40,11 @@ The dialect comes back as soon as you name a driver, which is why one binary can
 
 | Crate | What it gives you |
 | --- | --- |
-| [`besu`](../besu) | The builders, the expression DSL, `sql!`, and `#[derive(Table)]` |
-| [`besu-sqlite`](../besu-sqlite) · [`besu-postgres`](../besu-postgres) · [`besu-mysql`](../besu-mysql) | A dialect, a sqlx driver, DDL generation and introspection |
-| [`besu-core`](../besu-core) | `Dialect`, `Driver`, `Sql`, `Value`, `Decode`; no builder and no database |
-| [`besu-schema`](../besu-schema) | The schema IR, the differ, the DDL trait and the migrator |
-| [`besu-any`](../besu-any) | `AnyDatabase`: one enum over all three backends |
+| [`besu`](../../besu) | The builders, the expression DSL, `sql!`, and `#[derive(Table)]` |
+| [`besu-sqlite`](../../besu-sqlite) · [`besu-postgres`](../../besu-postgres) · [`besu-mysql`](../../besu-mysql) | A dialect, a sqlx driver, DDL generation and introspection |
+| [`besu-core`](../../besu-core) | `Dialect`, `Driver`, `Sql`, `Value`, `Decode`; no builder and no database |
+| [`besu-schema`](../../besu-schema) | The schema IR, the differ, the DDL trait and the migrator |
+| [`besu-any`](../../besu-any) | `AnyDatabase`: one enum over all three backends |
 
 Depend on `besu` plus exactly one driver crate. `besu-core` is for writing a driver or a
 dialect of your own; `besu-schema` arrives automatically with `besu`'s `migrate` feature, which

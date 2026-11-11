@@ -149,7 +149,7 @@ this way returns an error rather than a fake result.
 ## Next steps
 
 - [Schema declaration](../schema/declaration.md) — every `#[besu(...)]` attribute.
-- [MySQL column types](../schema/column-types/mysql.md) — unsigned integers, `DECIMAL(39,0)`, `BINARY(16)`.
+- [MySQL column types](../schema/column-types/mysql.md) — unsigned integers and wide decimals.
 - [Indexes and constraints](../schema/indexes-constraints.md) — prefix keys and foreign keys.
 - [Connecting to MySQL](../connect/mysql.md) — charset, timezone and pools.
 - [Get started with SQLite](sqlite.md) or [PostgreSQL](postgresql.md).
