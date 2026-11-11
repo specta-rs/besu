@@ -91,13 +91,42 @@ On `Ok`, the helper commits and returns the value. On `Err`, it rolls back and r
 original error. If the rollback itself fails, that failure is discarded — the error you asked
 about is the one you get, which is the useful one.
 
+## Nested transactions
+
+Every supported database spells a nested transaction as a *savepoint*, and so does Besu.
+`Transaction::transaction` opens one with a generated name and releases it on success; on
+error it rolls back to the savepoint and returns the error, leaving everything before it in
+place:
+
+```rust
+db.transaction(async |tx| {
+    tx.insert(users).value(users.insert(..)).await?;
+
+    // Swallowing the error keeps the insert above and discards this one.
+    let _ = tx
+        .transaction(async |tx| {
+            tx.insert(audit).value(audit.insert(..)).await?;
+            Err::<(), _>(some_error)
+        })
+        .await;
+
+    Ok(())
+})
+.await?;
+```
+
+`Transaction::savepoint(name, ..)` is the same with a name you choose, which is what you want
+when several nest. The name is written into `SAVEPOINT`, so it is checked for ASCII letters,
+digits and underscores rather than quoted; an invalid name is an error before a statement
+runs.
+
+A savepoint needs no guard object and nothing to drop. One that is neither released nor
+rolled back is released when the enclosing transaction commits.
+
 ## What is not here
 
-- **No nesting and no savepoints.** `Transaction` has no `begin`; the API has exactly one
-  level. Use the driver's own connection handle (`db.driver()`, `Sqlx::pool`) for anything
-  beyond that.
-- **No isolation-level API.** `begin()` uses the driver's default. Set it in the connection
-  options or execute `SET TRANSACTION` yourself with `tx.execute(sql!(..))`.
+- **No isolation-level API of its own.** `begin()` uses the driver's default. Set it in the
+  connection options or execute `SET TRANSACTION` yourself with `tx.execute(sql!(..))`.
 - **No implicit retry.** A serialisation failure is returned as the driver's error; retrying
   is the application's decision.
 - **Migrations are already transactional.** `Database::migrate` begins a transaction, runs the

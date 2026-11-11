@@ -24,6 +24,27 @@ pub enum JsonPathStyle {
     Mysql,
 }
 
+/// How a dialect spells a full-text match.
+///
+/// There is no portable syntax for this at all, so the styles differ in more than wording:
+/// PostgreSQL matches a `tsquery` against a `tsvector`, MySQL needs a `FULLTEXT` index over
+/// exactly the matched columns, and SQLite matches an FTS5 virtual table. The expression
+/// layer hides the difference, but creating whatever the database needs is the caller's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullTextStyle {
+    /// `to_tsvector('english', col) @@ plainto_tsquery('english', $1)`, as in PostgreSQL.
+    Postgres,
+    /// `MATCH(col) AGAINST ($1 IN BOOLEAN MODE)`, as in MySQL.
+    Mysql,
+    /// `col MATCH $1`, as in SQLite against an FTS5 virtual table.
+    Sqlite,
+    /// A dialect that has not said how it spells a match.
+    ///
+    /// Using a match on such a dialect records an `unsupported` error rather than emitting
+    /// another database's syntax, which would fail in a way that points at the wrong place.
+    Unsupported,
+}
+
 /// How a dialect spells an upsert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsertStyle {
@@ -94,6 +115,13 @@ pub trait Dialect: 'static + Sized {
 
     /// How the dialect spells access to a value inside a JSON document.
     const JSON_PATH: JsonPathStyle = JsonPathStyle::Sqlite;
+
+    /// How the dialect spells a full-text match.
+    ///
+    /// Defaulted to [`FullTextStyle::Unsupported`] so that a dialect only emits a match once
+    /// it has stated its spelling: each spelling is specific enough that emitting another
+    /// database's would be silently wrong.
+    const FULL_TEXT: FullTextStyle = FullTextStyle::Unsupported;
 
     /// Whether `DELETE ... LIMIT n` is available. PostgreSQL has no such statement.
     const SUPPORTS_DELETE_LIMIT: bool = true;

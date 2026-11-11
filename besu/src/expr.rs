@@ -113,6 +113,12 @@ pub enum ExprKind {
         /// `true` for the text form (`->>`), `false` for the JSON form (`->`).
         as_text: bool,
     },
+    /// A full-text match, spelled however the dialect spells one.
+    FullText {
+        column: Box<ExprKind>,
+        /// The search text, bound as a parameter so it never becomes SQL.
+        query: Value,
+    },
 }
 
 impl ExprKind {
@@ -278,6 +284,45 @@ impl ExprKind {
                         if *as_text {
                             out.push_raw(")");
                         }
+                    }
+                }
+            }
+            Self::FullText { column, query } => {
+                use besu_core::dialect::FullTextStyle;
+                match D::FULL_TEXT {
+                    FullTextStyle::Postgres => {
+                        // `plainto_tsquery` takes the search text rather than a `tsquery`
+                        // literal, so the query parses from a plain bound string and there is
+                        // no syntax for the caller to get wrong.
+                        out.push_raw("to_tsvector('english', ");
+                        column.render(out);
+                        out.push_raw(") @@ plainto_tsquery('english', ");
+                        out.bind(query.clone());
+                        out.push_raw(")");
+                    }
+                    FullTextStyle::Mysql => {
+                        out.push_raw("MATCH(");
+                        column.render(out);
+                        out.push_raw(") AGAINST (");
+                        out.bind(query.clone());
+                        out.push_raw(" IN BOOLEAN MODE)");
+                    }
+                    FullTextStyle::Sqlite => {
+                        column.render(out);
+                        out.push_raw(" MATCH ");
+                        out.bind(query.clone());
+                    }
+                    FullTextStyle::Unsupported => {
+                        // The error is what the caller sees; the text still has to be
+                        // well-formed so `inspect` and the query log stay readable.
+                        out.set_error(besu_core::Error::unsupported(alloc::format!(
+                            "`{}` has no full-text match; write it with `raw`, or query a \
+                             dialect that does",
+                            D::NAME
+                        )));
+                        column.render(out);
+                        out.push_raw(" MATCH ");
+                        out.bind(query.clone());
                     }
                 }
             }
