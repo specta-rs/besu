@@ -33,8 +33,8 @@ macro_rules! expr_comparisons {
             {
                 Expr::from_kind(ExprKind::Binary {
                     op: $op,
-                    left: Box::new(self.into_kind()),
-                    right: Box::new(other.into_expr().into_kind()),
+                    left: Operand::new(self.into_kind()),
+                    right: Operand::new(other.into_expr().into_kind()),
                 })
             }
         )*
@@ -66,19 +66,13 @@ pub enum ExprKind {
     /// `left op right`, always parenthesised so precedence is never surprising.
     Binary {
         op: &'static str,
-        left: Box<ExprKind>,
-        right: Box<ExprKind>,
+        left: Operand,
+        right: Operand,
     },
     /// `op expr`, as in `NOT x` or `-x`.
-    Prefix {
-        op: &'static str,
-        expr: Box<ExprKind>,
-    },
+    Prefix { op: &'static str, expr: Operand },
     /// `expr op`, as in `x IS NULL`.
-    Postfix {
-        op: &'static str,
-        expr: Box<ExprKind>,
-    },
+    Postfix { op: &'static str, expr: Operand },
     /// `NAME(args...)`.
     Function {
         name: &'static str,
@@ -87,38 +81,86 @@ pub enum ExprKind {
     },
     /// `expr [NOT] BETWEEN low AND high`.
     Between {
-        expr: Box<ExprKind>,
-        low: Box<ExprKind>,
-        high: Box<ExprKind>,
+        expr: Operand,
+        low: Operand,
+        high: Operand,
         negated: bool,
     },
     /// `expr [NOT] IN (list)`.
     InList {
-        expr: Box<ExprKind>,
+        expr: Operand,
         list: Vec<ExprKind>,
         negated: bool,
     },
     /// `CASE ... WHEN ... THEN ... ELSE ... END`.
     Case {
-        operand: Option<Box<ExprKind>>,
+        operand: Option<Operand>,
         branches: Vec<(ExprKind, ExprKind)>,
-        fallback: Option<Box<ExprKind>>,
+        fallback: Option<Operand>,
     },
     /// `CAST(expr AS type)`.
-    Cast { expr: Box<ExprKind>, ty: TypeDef },
+    Cast { expr: Operand, ty: TypeDef },
     /// A value inside a JSON document, reached by a dotted path.
     JsonPath {
-        expr: Box<ExprKind>,
+        expr: Operand,
         path: &'static str,
         /// `true` for the text form (`->>`), `false` for the JSON form (`->`).
         as_text: bool,
     },
     /// A full-text match, spelled however the dialect spells one.
     FullText {
-        column: Box<ExprKind>,
+        column: Operand,
         /// The search text, bound as a parameter so it never becomes SQL.
         query: Value,
     },
+}
+
+/// A child of an expression node.
+///
+/// Almost every expression in a real query is a column compared with a literal, and a
+/// `Box<ExprKind>` for each side of that comparison was two heap allocations per `WHERE`
+/// clause purely to hold a table name and a `Value`. The two common cases are stored inline
+/// and only anything genuinely nested is boxed.
+#[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
+pub enum Operand {
+    /// A plain column reference.
+    Column {
+        /// The table the column belongs to, or `""` when it is unqualified.
+        table: &'static str,
+        /// The column name.
+        column: &'static str,
+    },
+    /// A bound parameter.
+    Value(Value),
+    /// Anything else, boxed because the node is larger than the pointer that holds it.
+    Expr(Box<ExprKind>),
+}
+
+impl Operand {
+    /// Wrap an expression node, keeping the two common shapes inline.
+    pub(crate) fn new(kind: ExprKind) -> Self {
+        match kind {
+            ExprKind::Column { table, column } => Self::Column { table, column },
+            ExprKind::Value(value) => Self::Value(value),
+            other => Self::Expr(Box::new(other)),
+        }
+    }
+
+    /// Render this operand into `out`.
+    pub(crate) fn render<D: Dialect>(&mut self, out: &mut Sql<D>) {
+        match self {
+            Self::Column { table, column } => {
+                if table.is_empty() {
+                    out.push_ident(column);
+                } else {
+                    out.push_qualified(table, column);
+                }
+            }
+            Self::Value(value) => out.bind_value(core::mem::replace(value, Value::Null)),
+            Self::Expr(kind) => kind.render(out),
+        }
+    }
 }
 
 impl ExprKind {
@@ -367,7 +409,7 @@ impl<T, S: SqlType> Expr<T, S> {
     /// `CAST(this AS S2)`.
     pub fn cast<S2: SqlType>(self) -> Expr<T, S2> {
         Expr::from_kind(ExprKind::Cast {
-            expr: Box::new(self.into_kind()),
+            expr: Operand::new(self.into_kind()),
             ty: S2::DEF,
         })
     }
@@ -438,8 +480,8 @@ impl<T, S: SqlType> Expr<T, S> {
     fn binary(self, op: &'static str, right: ExprKind) -> Self {
         Expr::from_kind(ExprKind::Binary {
             op,
-            left: Box::new(self.into_kind()),
-            right: Box::new(right),
+            left: Operand::new(self.into_kind()),
+            right: Operand::new(right),
         })
     }
 
@@ -716,8 +758,8 @@ macro_rules! comparisons {
             {
                 Expr::from_kind(ExprKind::Binary {
                     op: $op,
-                    left: Box::new(a.into_expr().into_kind()),
-                    right: Box::new(b.into_expr().into_kind()),
+                    left: Operand::new(a.into_expr().into_kind()),
+                    right: Operand::new(b.into_expr().into_kind()),
                 })
             }
         )*
@@ -755,7 +797,7 @@ where
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS NULL",
-        expr: Box::new(a.into_typed().into_kind()),
+        expr: Operand::new(a.into_typed().into_kind()),
     })
 }
 
@@ -766,7 +808,7 @@ where
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS NOT NULL",
-        expr: Box::new(a.into_typed().into_kind()),
+        expr: Operand::new(a.into_typed().into_kind()),
     })
 }
 
@@ -777,7 +819,7 @@ where
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS TRUE",
-        expr: Box::new(a.into_typed().into_kind()),
+        expr: Operand::new(a.into_typed().into_kind()),
     })
 }
 
@@ -788,7 +830,7 @@ where
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS FALSE",
-        expr: Box::new(a.into_typed().into_kind()),
+        expr: Operand::new(a.into_typed().into_kind()),
     })
 }
 
@@ -800,7 +842,7 @@ where
     V: Into<Value>,
 {
     Expr::from_kind(ExprKind::InList {
-        expr: Box::new(a.into_typed().into_kind()),
+        expr: Operand::new(a.into_typed().into_kind()),
         list: values
             .into_iter()
             .map(|v| ExprKind::Value(v.into()))
@@ -817,7 +859,7 @@ where
     V: Into<Value>,
 {
     Expr::from_kind(ExprKind::InList {
-        expr: Box::new(a.into_typed().into_kind()),
+        expr: Operand::new(a.into_typed().into_kind()),
         list: values
             .into_iter()
             .map(|v| ExprKind::Value(v.into()))
@@ -833,9 +875,9 @@ where
     V: Into<Value>,
 {
     Expr::from_kind(ExprKind::Between {
-        expr: Box::new(a.into_typed().into_kind()),
-        low: Box::new(ExprKind::Value(low.into())),
-        high: Box::new(ExprKind::Value(high.into())),
+        expr: Operand::new(a.into_typed().into_kind()),
+        low: Operand::new(ExprKind::Value(low.into())),
+        high: Operand::new(ExprKind::Value(high.into())),
         negated: false,
     })
 }
@@ -847,9 +889,9 @@ where
     V: Into<Value>,
 {
     Expr::from_kind(ExprKind::Between {
-        expr: Box::new(a.into_typed().into_kind()),
-        low: Box::new(ExprKind::Value(low.into())),
-        high: Box::new(ExprKind::Value(high.into())),
+        expr: Operand::new(a.into_typed().into_kind()),
+        low: Operand::new(ExprKind::Value(low.into())),
+        high: Operand::new(ExprKind::Value(high.into())),
         negated: true,
     })
 }
@@ -894,8 +936,8 @@ where
 {
     Expr::from_kind(ExprKind::Binary {
         op: "AND",
-        left: Box::new(a.into_condition()),
-        right: Box::new(b.into_condition()),
+        left: Operand::new(a.into_condition()),
+        right: Operand::new(b.into_condition()),
     })
 }
 
@@ -907,8 +949,8 @@ where
 {
     Expr::from_kind(ExprKind::Binary {
         op: "OR",
-        left: Box::new(a.into_condition()),
-        right: Box::new(b.into_condition()),
+        left: Operand::new(a.into_condition()),
+        right: Operand::new(b.into_condition()),
     })
 }
 
@@ -919,7 +961,7 @@ where
 {
     Expr::from_kind(ExprKind::Prefix {
         op: "NOT",
-        expr: Box::new(a.into_condition()),
+        expr: Operand::new(a.into_condition()),
     })
 }
 
@@ -1041,7 +1083,7 @@ where
 
 fn cast_to_float<T, S: SqlType>(expr: Expr<T, S>) -> Expr<T, Float8> {
     Expr::from_kind(ExprKind::Cast {
-        expr: Box::new(expr.into_kind()),
+        expr: Operand::new(expr.into_kind()),
         ty: Float8::DEF,
     })
 }
@@ -1147,7 +1189,7 @@ impl<T, S: SqlType> CaseBuilder<T, S> {
         Expr::from_kind(ExprKind::Case {
             operand: None,
             branches: self.branches,
-            fallback: Some(Box::new(value.into_expr().into_kind())),
+            fallback: Some(Operand::new(value.into_expr().into_kind())),
         })
     }
 }
@@ -1162,7 +1204,7 @@ where
     A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::JsonPath {
-        expr: Box::new(document.into_typed().into_kind()),
+        expr: Operand::new(document.into_typed().into_kind()),
         path,
         as_text: false,
     })
@@ -1177,7 +1219,7 @@ where
     A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::JsonPath {
-        expr: Box::new(document.into_typed().into_kind()),
+        expr: Operand::new(document.into_typed().into_kind()),
         path,
         as_text: true,
     })
@@ -1209,7 +1251,7 @@ where
     A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::FullText {
-        column: Box::new(column.into_typed().into_kind()),
+        column: Operand::new(column.into_typed().into_kind()),
         query: Value::Text(query.into()),
     })
 }
@@ -1329,11 +1371,11 @@ macro_rules! column_comparisons {
                 let _ = PhantomData::<P1>;
                 Expr::from_kind(ExprKind::Binary {
                     op: $op,
-                    left: Box::new(ExprKind::Column {
+                    left: Operand::new(ExprKind::Column {
                         table: T::DEF.name,
                         column: self.name(),
                     }),
-                    right: Box::new(other.into_expr().into_kind()),
+                    right: Operand::new(other.into_expr().into_kind()),
                 })
             }
         )*
@@ -1386,7 +1428,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     {
         Expr::from_kind(ExprKind::Postfix {
             op: "IS NULL",
-            expr: Box::new(self.into_expr_kind()),
+            expr: Operand::new(self.into_expr_kind()),
         })
     }
 
@@ -1397,7 +1439,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     {
         Expr::from_kind(ExprKind::Postfix {
             op: "IS NOT NULL",
-            expr: Box::new(self.into_expr_kind()),
+            expr: Operand::new(self.into_expr_kind()),
         })
     }
 
@@ -1408,7 +1450,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         V: Into<Value>,
     {
         Expr::from_kind(ExprKind::InList {
-            expr: Box::new(self.into_expr_kind()),
+            expr: Operand::new(self.into_expr_kind()),
             list: values
                 .into_iter()
                 .map(|v| ExprKind::Value(v.into()))
@@ -1424,7 +1466,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         V: Into<Value>,
     {
         Expr::from_kind(ExprKind::InList {
-            expr: Box::new(self.into_expr_kind()),
+            expr: Operand::new(self.into_expr_kind()),
             list: values
                 .into_iter()
                 .map(|v| ExprKind::Value(v.into()))
@@ -1440,9 +1482,9 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         V: Into<Value>,
     {
         Expr::from_kind(ExprKind::Between {
-            expr: Box::new(self.into_expr_kind()),
-            low: Box::new(ExprKind::Value(low.into())),
-            high: Box::new(ExprKind::Value(high.into())),
+            expr: Operand::new(self.into_expr_kind()),
+            low: Operand::new(ExprKind::Value(low.into())),
+            high: Operand::new(ExprKind::Value(high.into())),
             negated: false,
         })
     }
@@ -1509,8 +1551,8 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     {
         Expr::from_kind(ExprKind::Binary {
             op,
-            left: Box::new(self.into_expr_kind()),
-            right: Box::new(other.into_expr().into_kind()),
+            left: Operand::new(self.into_expr_kind()),
+            right: Operand::new(other.into_expr().into_kind()),
         })
     }
 

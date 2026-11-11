@@ -65,11 +65,6 @@ impl InsertQuery {
         }
     }
 
-    /// Append one row.
-    pub(crate) fn push_row(&mut self, values: impl IntoIterator<Item = Option<Value>>) {
-        self.values.extend(values);
-    }
-
     pub(crate) fn build<D: besu_core::Dialect>(
         mut self,
         prefix: Option<alloc::sync::Arc<str>>,
