@@ -47,20 +47,15 @@ pub trait Insertable {
 ///
 /// The three states matter: [`Set::Unset`] lets the database apply its default,
 /// [`Set::Null`] writes an explicit `NULL`, and [`Set::Value`] writes a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Set<T> {
     /// The column was not provided.
+    #[default]
     Unset,
     /// The column was explicitly set to `NULL`.
     Null,
     /// The column was set to a value.
     Value(T),
-}
-
-impl<T> Default for Set<T> {
-    fn default() -> Self {
-        Self::Unset
-    }
 }
 
 impl<T> Set<T> {

@@ -97,7 +97,7 @@ pub struct DryDriver<D: Dialect>(core::marker::PhantomData<fn() -> D>);
 
 impl<D: Dialect> Clone for DryDriver<D> {
     fn clone(&self) -> Self {
-        Self(core::marker::PhantomData)
+        *self
     }
 }
 

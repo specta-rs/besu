@@ -276,8 +276,8 @@ where
     }
 }
 
-fn decode_rows<'a, E: Executor, R: Decode<E::Driver>>(
-    rows: &'a [<E::Driver as Driver>::Row],
+fn decode_rows<E: Executor, R: Decode<E::Driver>>(
+    rows: &[<E::Driver as Driver>::Row],
 ) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
     let mut out = alloc::vec::Vec::with_capacity(rows.len());
     for row in rows {

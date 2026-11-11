@@ -185,25 +185,20 @@ impl Migrator {
         // 1. Make sure the journal exists. This statement is portable across the three
         //    supported databases on purpose: the journal must be readable before any
         //    dialect-specific machinery is involved.
-        let mut create = Sql::raw(concat!(
-            "CREATE TABLE IF NOT EXISTS _besu_migrations (",
-            "version BIGINT PRIMARY KEY, ",
-            "name VARCHAR(255) NOT NULL, ",
-            "checksum VARCHAR(64) NOT NULL",
-            ")"
-        ));
-        exec.execute(&mut create)
+        let create = Sql::raw(
+            "CREATE TABLE IF NOT EXISTS _besu_migrations (\
+             version BIGINT PRIMARY KEY, \
+             name VARCHAR(255) NOT NULL, \
+             checksum VARCHAR(64) NOT NULL)",
+        );
+        exec.execute(&create)
             .await
             .map_err(MigrationError::Driver)?;
 
         // 2. Read what has already run.
-        let mut select = Sql::raw(concat!(
-            "SELECT version, name, checksum FROM _besu_migrations ORDER BY version"
-        ));
-        let rows = exec
-            .query(&mut select)
-            .await
-            .map_err(MigrationError::Driver)?;
+        let select =
+            Sql::raw("SELECT version, name, checksum FROM _besu_migrations ORDER BY version");
+        let rows = exec.query(&select).await.map_err(MigrationError::Driver)?;
 
         let mut applied: Vec<AppliedMigration> = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -247,23 +242,23 @@ impl Migrator {
             }
 
             for statement in &migration.statements {
-                let mut sql = Sql::<besu_core::executor::DialectOf<E>>::raw(statement.clone());
-                match exec.execute(&mut sql).await {
+                let sql = Sql::<besu_core::executor::DialectOf<E>>::raw(statement.clone());
+                match exec.execute(&sql).await {
                     Ok(_) => {}
                     Err(err) => return Err(MigrationError::Driver(err)),
                 }
             }
 
-            let mut insert = Sql::<besu_core::executor::DialectOf<E>>::raw(concat!(
-                "INSERT INTO _besu_migrations (version, name, checksum) VALUES ("
-            ));
+            let mut insert = Sql::<besu_core::executor::DialectOf<E>>::raw(
+                "INSERT INTO _besu_migrations (version, name, checksum) VALUES (",
+            );
             insert.bind(migration.version);
             insert.push_raw(", ");
             insert.bind(migration.name.clone());
             insert.push_raw(", ");
             insert.bind(migration.checksum());
             insert.push_raw(")");
-            exec.execute(&mut insert)
+            exec.execute(&insert)
                 .await
                 .map_err(MigrationError::Driver)?;
 

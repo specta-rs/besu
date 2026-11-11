@@ -69,6 +69,10 @@
 //! - [`besu-mysql`](https://docs.rs/besu-mysql) for [MySQL](https://www.mysql.com).
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
+// Builders carry `PhantomData<(&'a (), fn() -> T)>` to make their lifetimes and type
+// parameters invariant without inventing a dozen marker structs; clippy reads that as
+// needless complexity.
+#![allow(clippy::type_complexity)]
 
 extern crate alloc;
 

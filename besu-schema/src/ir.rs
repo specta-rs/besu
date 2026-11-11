@@ -152,8 +152,8 @@ impl Table {
                     columns: fk.columns.iter().map(|c| (*c).into()).collect(),
                     references_table: fk.references_table.into(),
                     references_columns: fk.references_columns.iter().map(|c| (*c).into()).collect(),
-                    on_delete: fk.on_delete.into(),
-                    on_update: fk.on_update.into(),
+                    on_delete: fk.on_delete,
+                    on_update: fk.on_update,
                 })
                 .collect(),
             comment: None,
