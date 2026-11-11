@@ -279,10 +279,12 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
     let unsigned = lower.contains("unsigned");
 
     match data_type.as_str() {
-        // `BOOLEAN` is an alias for `TINYINT(1)`, which is what MySQL reports back.
+        // `BOOLEAN` is an alias for `TINYINT(1)`, which is what MySQL reports back. The
+        // `unsigned` test comes first: a legacy `tinyint(1) unsigned` is a `u8` column, not a
+        // boolean, and matching the width first would decode it as one.
         "bool" | "boolean" => TypeDef::Bool,
-        "tinyint" if lower.starts_with("tinyint(1)") => TypeDef::Bool,
         "tinyint" if unsigned => TypeDef::UInt(8),
+        "tinyint" if lower.starts_with("tinyint(1)") => TypeDef::Bool,
         "tinyint" => TypeDef::Int2,
         "smallint" if unsigned => TypeDef::UInt(16),
         "smallint" => TypeDef::Int2,

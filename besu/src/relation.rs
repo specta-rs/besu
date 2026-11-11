@@ -235,7 +235,7 @@ where
         &self,
         keys: impl IntoIterator<Item = S::Rust>,
     ) -> (Sql<DialectOf<E>>, Sql<DialectOf<E>>) {
-        (self.parent_sql().seal(), self.child_sql(keys).seal())
+        (self.parent_sql(), self.child_sql(keys))
     }
 
     /// The parent statement, with the key appended to the projection.

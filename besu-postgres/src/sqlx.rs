@@ -81,16 +81,111 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedNull {
     }
 }
 
-/// An integer bound as `NUMERIC`, which is how PostgreSQL spells integers above `i64::MAX`.
+/// An integer bound as `NUMERIC`, encoded directly into PostgreSQL's binary wire format.
 ///
 /// sqlx ships no `u64`/`u128` support for PostgreSQL because the type system has no
-/// unsigned integers. `BigDecimal` is the type sqlx does implement `NUMERIC` for, and it
-/// converts from every 64- and 128-bit integer without going through a string.
-fn numeric<T>(value: T) -> sqlx::types::BigDecimal
-where
-    sqlx::types::BigDecimal: From<T>,
-{
-    sqlx::types::BigDecimal::from(value)
+/// unsigned integers, and the type it does implement `NUMERIC` for is `BigDecimal`. Going
+/// through `BigDecimal` allocates two decimal-digit vectors per parameter and then walks
+/// them again to write the wire format, for a value that is at most ten base-10,000 digits
+/// wide. Writing those digits straight into the argument buffer keeps the encode path
+/// allocation-free and leaves the parameter's SQL type exactly what it was.
+#[derive(Debug, Clone, Copy)]
+struct Numeric {
+    /// Whether the value is below zero.
+    negative: bool,
+    /// The absolute value. `u128` is wide enough for every `i128` and `u128`.
+    magnitude: u128,
+}
+
+/// The number of base-10,000 digits in the widest `NUMERIC` this driver sends.
+///
+/// `u128::MAX` has 39 decimal digits, which is ten groups of four.
+const NUMERIC_GROUPS: usize = 10;
+
+/// PostgreSQL's `NUMERIC` sign for a negative value; zero means positive.
+const NUMERIC_SIGN_NEGATIVE: u16 = 0x4000;
+
+impl Numeric {
+    /// Build a `NUMERIC` from a signed integer.
+    fn signed(value: i128) -> Self {
+        Self {
+            negative: value < 0,
+            magnitude: value.unsigned_abs(),
+        }
+    }
+
+    /// Build a `NUMERIC` from an unsigned integer.
+    fn unsigned(value: u128) -> Self {
+        Self {
+            negative: false,
+            magnitude: value,
+        }
+    }
+}
+
+impl sqlx::Type<SqlxPostgres> for Numeric {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(NUMERIC_OID))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for Numeric {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        // The binary format is a header of `ndigits`, `weight`, `sign` and `dscale`,
+        // followed by base-10,000 digits, most significant first.
+        let mut groups = [0u16; NUMERIC_GROUPS];
+        let mut count = 0;
+        let mut rest = self.magnitude;
+        while rest != 0 {
+            // `count` cannot reach 11: ten groups hold every `u128`.
+            groups[count] = (rest % 10_000) as u16;
+            rest /= 10_000;
+            count += 1;
+        }
+        // The groups were collected least significant first, and PostgreSQL stores canonical
+        // digits, so low-order zero groups are dropped: 10,000 is `[1] * 10000^1`, not
+        // `[1, 0]`. Stripping them does not move `weight`, which counts from the most
+        // significant digit.
+        let mut first = 0;
+        while first + 1 < count && groups[first] == 0 {
+            first += 1;
+        }
+        let digits = &groups[first..count];
+
+        let ndigits = digits.len() as i16;
+        // `weight` is the exponent of the first digit; a zero has no digits and weight 0.
+        let weight = (count as i16).saturating_sub(1);
+        let sign = if self.negative {
+            NUMERIC_SIGN_NEGATIVE
+        } else {
+            0
+        };
+
+        buffer.extend_from_slice(&ndigits.to_be_bytes());
+        buffer.extend_from_slice(&weight.to_be_bytes());
+        buffer.extend_from_slice(&sign.to_be_bytes());
+        // `dscale` is zero because every value this type carries is an integer.
+        buffer.extend_from_slice(&0i16.to_be_bytes());
+        // Reversing puts the most significant group first, which is the order of the wire.
+        for group in digits.iter().rev() {
+            buffer.extend_from_slice(&group.to_be_bytes());
+        }
+
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        // Header plus at most one two-byte digit per four decimal digits. Ten thousand is
+        // just under 2^13.3, so dividing the bit length by 13 never undercounts.
+        let digits = match self.magnitude {
+            0 => 0,
+            magnitude => (128 - magnitude.leading_zeros() as usize).div_ceil(13),
+        };
+        8 + digits * 2
+    }
 }
 
 fn add<'q, T>(arguments: &mut PgArguments, value: T) -> Result<(), sqlx::Error>
@@ -100,8 +195,46 @@ where
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
 
-fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
+/// The number of bytes encoding `value` will append to an argument buffer.
+///
+/// Every parameter carries a four-byte length prefix, and the payload sizes are fixed for
+/// everything except text, bytes and JSON. Knowing the total up front lets [`arguments`]
+/// reserve once instead of growing and copying the buffer as each value is appended.
+fn encoded_size(value: &Value) -> usize {
+    /// The length prefix that precedes every encoded parameter.
+    const LENGTH_PREFIX: usize = 4;
+
+    match value {
+        Value::Null => LENGTH_PREFIX,
+        Value::Bool(_) => LENGTH_PREFIX + 1,
+        Value::Int(_) | Value::Float(_) => LENGTH_PREFIX + 8,
+        // `u64::MAX` is twenty decimal digits, which is five base-10,000 groups.
+        Value::UInt(_) => LENGTH_PREFIX + 8 + 5 * 2,
+        Value::UInt128(_) | Value::Int128(_) => LENGTH_PREFIX + 8 + NUMERIC_GROUPS * 2,
+        Value::Text(v) => LENGTH_PREFIX + v.len(),
+        Value::Bytes(v) => LENGTH_PREFIX + v.len(),
+        Value::Uuid(_) => LENGTH_PREFIX + 16,
+        Value::Date(_) => LENGTH_PREFIX + 4,
+        Value::Time(_) => LENGTH_PREFIX + 8,
+        Value::Timestamp(_) | Value::TimestampTz(_) => LENGTH_PREFIX + 8,
+        // The JSONB form is a one-byte version plus the document.
+        Value::Json(v) => LENGTH_PREFIX + 1 + v.len(),
+        // `Value` is `#[non_exhaustive]`. An unknown variant fails to bind before this
+        // estimate matters, so reserving nothing for it is harmless.
+        _ => 0,
+    }
+}
+
+/// Encode a statement's bound values into the argument buffer `sqlx` sends.
+///
+/// This is `pub` only so the crate's benchmarks and allocation probes can measure the
+/// encoding path without a server; [`crate::encode_arguments`] is the only thing that throws
+/// it, and it is hidden from the documentation. Treat it as an implementation detail.
+pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
     let mut arguments = PgArguments::default();
+    // The parameter count is known, and so is the encoded width of every value, so one
+    // reservation replaces the handful of grow-and-copy steps a fresh buffer would take.
+    arguments.reserve(sql.args().len(), sql.args().iter().map(encoded_size).sum());
     for value in sql.args() {
         match value {
             Value::Null => add(&mut arguments, None::<UntypedNull>)?,
@@ -110,9 +243,9 @@ fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             // A `u64` column is `NUMERIC(20,0)`, so the parameter is always `NUMERIC`, even
             // when the value happens to fit in an `i64`. That keeps one SQL type for every
             // value the column can hold.
-            Value::UInt(v) => add(&mut arguments, numeric(*v))?,
-            Value::UInt128(v) => add(&mut arguments, numeric(*v))?,
-            Value::Int128(v) => add(&mut arguments, numeric(*v))?,
+            Value::UInt(v) => add(&mut arguments, Numeric::unsigned(u128::from(*v)))?,
+            Value::UInt128(v) => add(&mut arguments, Numeric::unsigned(*v))?,
+            Value::Int128(v) => add(&mut arguments, Numeric::signed(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -122,9 +255,15 @@ fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Timestamp(v) => add(&mut arguments, *v)?,
             Value::TimestampTz(v) => add(&mut arguments, *v)?,
             Value::Json(v) => {
-                let json: serde_json::Value = serde_json::from_slice(v).map_err(|err| {
-                    <Sqlx as Driver>::error(Error::encode("json", err.to_string()))
-                })?;
+                // The document is already JSON text. Validating it in place and binding the
+                // borrowed `RawValue` lets sqlx copy those bytes into its buffer, instead of
+                // parsing them into a `serde_json::Value` tree only to serialise the tree
+                // back to the same bytes. The bound type is still `JSONB`, because it is
+                // `Json<T>`'s type for every `T`, so the prepared statement is unchanged.
+                let json: &serde_json::value::RawValue =
+                    serde_json::from_slice(v).map_err(|err| {
+                        <Sqlx as Driver>::error(Error::encode("json", err.to_string()))
+                    })?;
                 add(&mut arguments, sqlx::types::Json(json))?;
             }
             // `Value` is `#[non_exhaustive]`: a future variant must fail loudly rather than
@@ -455,21 +594,35 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<(bool, u128), &'static str> {
     if usize::from(ndigits) != (bytes.len() - 8) / 2 {
         return Err("malformed NUMERIC value");
     }
+    // A zero has no digits to fold in, and its weight carries no information.
+    if ndigits == 0 {
+        return Ok((negative, 0));
+    }
 
+    // Fold the digits in most significant first. That reads them as though the leading digit
+    // had weight `ndigits - 1`, which is true for every value a `NUMERIC(p,0)` column holds;
+    // a value PostgreSQL stores with a gap between its weight and its digits needs one
+    // further shift, which is cheaper than raising 10,000 to a power per digit.
     let mut value: u128 = 0;
     for position in 0..usize::from(ndigits) {
         let offset = 8 + position * 2;
-        let digit = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
-        let exponent = i32::from(weight) - i32::try_from(position).unwrap_or(i32::MAX);
-        let exponent = u32::try_from(exponent).map_err(|_| "malformed NUMERIC value")?;
-        let factor = 10_000_u128
-            .checked_pow(exponent)
+        let digit = u128::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+        value = value
+            .checked_mul(10_000)
+            .and_then(|value| value.checked_add(digit))
             .ok_or("the NUMERIC value is too large for a 128-bit integer")?;
-        let term = u128::from(digit)
-            .checked_mul(factor)
+    }
+
+    // `1e8` is one digit with weight 2, for example. A negative gap means a digit sits below
+    // the value's scale, which no integer column produces.
+    let gap = i32::from(weight) - (i32::from(ndigits) - 1);
+    let gap = u32::try_from(gap).map_err(|_| "malformed NUMERIC value")?;
+    if gap != 0 {
+        let factor = 10_000_u128
+            .checked_pow(gap)
             .ok_or("the NUMERIC value is too large for a 128-bit integer")?;
         value = value
-            .checked_add(term)
+            .checked_mul(factor)
             .ok_or("the NUMERIC value is too large for a 128-bit integer")?;
     }
 
