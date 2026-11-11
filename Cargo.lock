@@ -114,11 +114,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "besu-any"
+version = "0.1.0"
+dependencies = [
+ "besu",
+ "besu-mysql",
+ "besu-postgres",
+ "besu-sqlite",
+ "sqlx",
+]
+
+[[package]]
 name = "besu-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "besu",
+ "besu-any",
  "besu-core",
  "besu-mysql",
  "besu-postgres",

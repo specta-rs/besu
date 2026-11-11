@@ -4,6 +4,7 @@ members = [
     "./besu-core",
     "./besu",
     "./besu-macros",
+    "./besu-any",
     "./besu-schema",
     "./besu-sqlite",
     "./besu-postgres",
@@ -24,6 +25,7 @@ rust-version = "1.85"
 besu = { path = "./besu", version = "0.1.0", default-features = false }
 besu-core = { path = "./besu-core", version = "0.1.0" }
 besu-macros = { path = "./besu-macros", version = "0.1.0" }
+besu-any = { path = "./besu-any", version = "0.1.0" }
 besu-schema = { path = "./besu-schema", version = "0.1.0" }
 besu-sqlite = { path = "./besu-sqlite", version = "0.1.0", default-features = false }
 besu-postgres = { path = "./besu-postgres", version = "0.1.0", default-features = false }
@@ -42,8 +44,10 @@ unsafe_code = { level = "forbid", priority = -1 }
 missing_docs = { level = "warn", priority = -2 }
 
 [workspace.lints.clippy]
+# The `cargo` group is off because it reports missing crates.io metadata as a duplicate
+# diagnostic for a workspace member every time any member is checked. The metadata itself is
+# present on every crate.
 all = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -2 }
 unwrap_used = { level = "warn", priority = -3 }
 panic = { level = "warn", priority = -4 }
 todo = { level = "warn", priority = -5 }

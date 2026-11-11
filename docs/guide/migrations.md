@@ -45,7 +45,7 @@ pub struct Check {
 
 pub struct View {
     pub name: String,
-    pub definition: String,        // the dialect's own SELECT, verbatim
+    pub definition: String,        // the dialect's own description, verbatim
 }
 
 pub struct Enum {
@@ -257,16 +257,21 @@ NULL` constraints as `CHECK` in `information_schema`; introspection reads `pg_co
 of parentheses that wrap the whole expression. A snapshot that says `value > 0` therefore
 converges against the database instead of being dropped and added on every push.
 
+SQLite keeps a check only inside the `CREATE TABLE` text, and MySQL reports `CHECK_CLAUSE` in
+a form it will not accept back (backticked identifiers, backslash-escaped literals), so neither
+introspects one. `push` therefore never creates or drops a check on those drivers; write it in
+a migration. The IR and PostgreSQL rendering are the part that round-trips.
+
 A `TableDef` cannot express a check. That means a check written by hand is seen by the
 differ but is not declared by your Rust code, and `push` reports the difference as a
 `DropCheck`. Dropping a check is `Destructive`, exactly like dropping a composite `UNIQUE`, so
 `push` refuses and you either add the check to a snapshot or run `push_destructive`.
 
 **Partial indexes.** `Index::predicate` carries the `WHERE` clause of a partial index and it
-is rendered as `CREATE INDEX ... WHERE predicate`. Only PostgreSQL has them; introspection
-reads `pg_index.indpred` back through `pg_get_expr`. SQLite has partial indexes but the IR
-does not read the predicate out of its catalog, so its introspection skips a partial index
-rather than reporting it as a full one, and MySQL has none at all.
+is rendered as `CREATE INDEX ... WHERE predicate`. PostgreSQL introspection reads
+`pg_index.indpred` back through `pg_get_expr`. SQLite supports partial indexes but the IR does
+not read the predicate out of its catalog, so its introspection skips a partial index rather
+than reporting it as a full one, and MySQL has none at all.
 
 ### What the differ deliberately ignores
 
@@ -281,7 +286,7 @@ something it does not understand.
 | Indexes behind a constraint | PostgreSQL | The constraint owns the index and `DROP INDEX` cannot remove it; `UNIQUE` and primary keys are modelled as constraints, and an exclusion constraint is not modelled at all |
 | Exclusion constraints | PostgreSQL | No IR type; its backing index is skipped with it |
 | Partial indexes | SQLite, MySQL | No predicate is introspected, so the index is skipped instead of reported as a full index |
-| `CHECK` constraints | SQLite | They exist only inside the `CREATE TABLE` text; parsing that back is not something the IR can promise to get right. PostgreSQL and MySQL do report them |
+| `CHECK` constraints | SQLite, MySQL | SQLite keeps them only inside the `CREATE TABLE` text; MySQL reports a `CHECK_CLAUSE` it will not accept back. PostgreSQL does report them |
 | Triggers | every driver | Never read, never written. A SQLite table rebuild recreates the table and therefore loses a trigger attached to it |
 | Views | every driver | Read into `Schema::views` for `besu pull`, but never diffed: a view is created by a migration, not by the derive |
 

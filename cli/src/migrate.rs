@@ -46,7 +46,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             println!(
                 "reverted {} migration(s) from {}",
                 reverted.len(),
-                db.name()
+                db.backend()
             );
         }
         return Ok(());
@@ -60,7 +60,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         for migration in &applied {
             println!("applied {:04} {}", migration.version, migration.name);
         }
-        println!("applied {} migration(s) to {}", applied.len(), db.name());
+        println!("applied {} migration(s) to {}", applied.len(), db.backend());
     }
 
     Ok(())

@@ -30,13 +30,14 @@ pub struct Schema {
 
 /// A view, as reported by a database.
 ///
-/// The definition is the dialect's own `SELECT`, verbatim. It is carried so a snapshot can
-/// show it and so a person can recreate the view by hand; nothing in Besu executes it.
+/// The definition is the dialect's own description of the view, verbatim: PostgreSQL and
+/// MySQL report the `SELECT` body, while SQLite reports the whole `CREATE VIEW` statement.
+/// Nothing in Besu executes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct View {
     /// The view's name, qualified by its schema the same way a [`Table`] is.
     pub name: String,
-    /// The statement that defines the view.
+    /// The dialect's own description of the view.
     pub definition: String,
 }
 

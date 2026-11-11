@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use besu::schema::Safety;
 
+use super::database::CliDatabase;
+
 /// Apply a schema snapshot to the database.
 #[derive(clap::Args)]
 pub struct Args {
@@ -25,7 +27,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     if args.dry_run {
         let current = db.introspect().await?;
-        let changes = db.diff(&current, &desired);
+        let changes = CliDatabase::diff(&db, &current, &desired);
         if changes.is_empty() {
             println!("schema is up to date");
             return Ok(());
@@ -41,7 +43,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let result = db.push(&desired, args.destructive).await?;
+    let result = db.push_schema(&desired, args.destructive).await?;
     if result.is_empty() {
         println!("schema is up to date");
     } else {
@@ -51,7 +53,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         println!(
             "applied {} statement(s) to {}",
             result.statements.len(),
-            db.name()
+            db.backend()
         );
     }
 

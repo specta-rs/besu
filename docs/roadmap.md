@@ -7,10 +7,8 @@ would actually require. The order is a judgement about impact versus cost, not a
 | --- | --- | --- | --- |
 | 1 | [Eager loading / relations](#eager-loading--relations) | The biggest functional gap versus an ORM | Large |
 | 2 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
-| 3 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
-| 4 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
-| 5 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
-| 6 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
+| 3 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 4 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
 
 ## Eager loading / relations
 
@@ -60,27 +58,6 @@ What it would take:
 - A `Decode` story: a user type still has to decode from a driver row, so either the user
   implements `Decode` per driver or the mapping goes through an existing primitive.
 
-## Runtime driver switching
-
-Tracked as [#56](https://github.com/specta-rs/besu/issues/56).
-
-`Database<Dr>` is generic, so the backend is chosen at compile time. The CLI works around this
-with `AnyDatabase`, a hand-written enum over the three drivers. Application code that reads a
-URL from configuration cannot do the same without writing that enum itself.
-
-What it would take:
-
-- A type-erased driver. `Driver` is not object-safe: it has associated types (`Dialect`,
-  `Row`, `Output`) and returns `impl Future`. Type erasure needs boxed rows, boxed futures and
-  a dynamic `Value` path, which costs an allocation per row.
-- Or an enum wrapper in the library, as the CLI has, generated for the enabled drivers. This
-  keeps static typing per variant but makes every call site a `match`.
-- A decision about `Decode`: with a dynamic driver, a model's `Decode<Dr>` impl cannot be
-  selected statically, so rows would need a runtime decoder or a per-variant match.
-- The same problem for migrations and DDL.
-
-Until then, pick the driver at compile time or copy the CLI's enum pattern.
-
 ## wasm support
 
 The builder half is done: `besu-core` and `besu` compile for `wasm32-unknown-unknown`, so a
@@ -104,25 +81,6 @@ have. What it would take:
 
 Ship the same query builder to the client and execute it on the server in the meantime; that
 is the shape this half of the work was for.
-
-## Table name prefixes
-
-Tracked as [#61](https://github.com/specta-rs/besu/issues/61).
-
-Multi-tenant deployments often prefix every table (`tenant_42_users`). `TableDef.name` is a
-`&'static str`, so a runtime prefix cannot be applied today, and the derive's
-`#[besu(table = "...")]` is compile-time.
-
-What it would take:
-
-- A prefix carried by the database or the query builder, threaded into `push_table`, DDL and
-  introspection. That changes `push_table` from a static name to a runtime-qualified one and
-  makes some SQL text non-static.
-- A matching change in introspection: it must strip the prefix before diffing, or the diff
-  will see every table as new.
-- A migration story: existing data has to be moved or the prefix applied at creation.
-- An alternative already works: use a PostgreSQL schema (`#[besu(schema = "tenant_42")]`) or
-  separate databases.
 
 ## Studio UI
 
@@ -178,8 +136,8 @@ Kept here so the history is visible rather than deleted:
   introspected, diffed and rendered, `Schema::views` round-trips through `besu pull`, and an
   object the IR cannot express (an expression index, an exclusion constraint, a trigger) is
   skipped by introspection instead of making `push` drop it. A check cannot be declared in
-  Rust yet, and SQLite neither introspects one nor reads a partial index's predicate, so both
-  stay migration-only there.
+  Rust yet; SQLite and MySQL do not introspect one, and SQLite does not read a partial index's
+  predicate, so those stay migration-only there.
 - **#71, PostgreSQL composite `UNIQUE`.** A multi-column constraint is `Table::uniques`,
   added and dropped with `ALTER TABLE`, instead of an index that `DROP INDEX` could not
   remove.
@@ -188,6 +146,10 @@ Kept here so the history is visible rather than deleted:
 - **#73, `TimeTz` and enum types.** `TypeDef::TimeTz` for PostgreSQL's `TIMETZ`, and
   `Schema::enums` is introspected, diffed and rendered as `CREATE TYPE` / `ALTER TYPE`. A
   `DECIMAL` still cannot decode into a `String` on PostgreSQL or MySQL.
+- **#56, runtime driver switching.** `besu-any`'s `AnyDatabase`, chosen from the connection
+  string; typed queries stay per-backend, which is the honest limit.
+- **#61, table prefixes.** `Database::prefixed`. The prefix lives on `Sql`, because that is
+  where every table name is written.
 - **#53, streaming.** `Database::stream` / `Transaction::stream` decode row by row.
 - **#67, savepoints.** `Transaction::transaction` and `savepoint(name, ..)`.
 - **#58, JSON path operators.** `json_get` and `json_text` with a dotted path, rendered per

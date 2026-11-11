@@ -1,5 +1,5 @@
 use besu_core::{TypeDef, schema::ReferenceAction};
-use besu_schema::{Check, Column, ForeignKey, Index, Schema, Table, Unique, View};
+use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
@@ -10,8 +10,10 @@ use crate::Sqlx;
 ///
 /// Functional (expression) indexes are skipped as a whole, because the IR can only name
 /// columns and reporting the remaining key parts would describe an index that does not
-/// exist. Views are read into [`Schema::views`] for `besu pull`; the differ ignores them, so
-/// `push` never creates or drops one. Triggers are not read at all.
+/// exist. `CHECK` constraints are skipped too: MySQL reports them in a form it will not
+/// accept back (see the field comment in `introspect_table`). Views are read into
+/// [`Schema::views`] for `besu pull`; the differ ignores them, so `push` never creates or
+/// drops one. Triggers are not read at all.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let tables = db
         .execute(besu::sql!(
@@ -116,21 +118,6 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         .all::<(String, String, String, String, String, String)>()
         .await?;
 
-    let checks = db
-        .execute(table_query(
-            "SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE \
-             FROM information_schema.TABLE_CONSTRAINTS tc \
-             JOIN information_schema.CHECK_CONSTRAINTS cc \
-               ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
-              AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
-             WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? \
-               AND tc.CONSTRAINT_TYPE = 'CHECK' \
-             ORDER BY cc.CONSTRAINT_NAME",
-            &name,
-        ))
-        .all::<(String, String)>()
-        .await?;
-
     let mut table = Table {
         name: name.clone(),
         schema: None,
@@ -156,16 +143,12 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         indexes: Vec::new(),
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
-        // MySQL spells a check expression with backticks (`(`v` > 0)`), which is what a
-        // snapshot round-trips verbatim; the surrounding parentheses are folded away so a
-        // check declared without them compares equal.
-        checks: checks
-            .into_iter()
-            .map(|(name, expression)| Check {
-                name,
-                expression: besu_schema::normalise_expression(&expression),
-            })
-            .collect(),
+        // MySQL stores a check as a `CHECK_CLAUSE` that is not the SQL it accepts back:
+        // identifiers are backticked and string literals are backslash-escaped for MySQL's
+        // own parser, so reporting one would make `besu pull` write a snapshot that cannot be
+        // rendered again. Checks are therefore left unmodelled here, exactly as SQLite
+        // leaves them: `push` neither sees nor drops one.
+        checks: Vec::new(),
         comment: None,
     };
 

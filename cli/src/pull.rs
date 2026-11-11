@@ -22,7 +22,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             println!(
                 "wrote {} table(s) from {} to {}",
                 schema.tables.len(),
-                db.name(),
+                db.backend(),
                 path.display()
             );
         }

@@ -414,6 +414,45 @@ setting — through a pool the `DROP TABLE` would land on a connection that stil
 foreign keys and cascade into child rows. Override it when your statements only make sense
 together.
 
+## Choosing a driver at runtime
+
+A query builder is compile-time over a dialect on purpose: the SQL a query produces depends on
+the dialect, so one query cannot be shared between two databases that spell it differently.
+What can be dynamic is everything around it.
+
+`besu-any` provides `AnyDatabase`, chosen from a connection string:
+
+```rust
+use besu_any::AnyDatabase;
+
+let db = AnyDatabase::connect(&std::env::var("DATABASE_URL")?).await?;
+db.push_schema(&schema, false).await?;
+db.migrate(&Migrator::from_dir("migrations")?).await?;
+```
+
+That covers migrations, schema push and raw statements, which is what a config-driven binary
+actually needs. For typed queries, match on the variant — the dialect comes back as soon as you
+name one — and write the query once as a generic function:
+
+```rust
+match db {
+    AnyDatabase::Sqlite(db) => list_users(db).await,
+    AnyDatabase::Postgres(db) => list_users(db).await,
+    AnyDatabase::MySql(db) => list_users(db).await,
+}
+
+async fn list_users<Dr: besu::Driver>(db: &besu::Database<Dr>) -> Result<Vec<User>, Dr::Error>
+where
+    User: besu::Decode<Dr>,
+{
+    db.select(user).await
+}
+```
+
+Type erasure is deliberately not offered: `Driver` has associated types and returns `impl
+Future`, so erasing it means boxed rows, boxed futures and a runtime decoder — an allocation
+per row to solve a problem the `match` already solves.
+
 ## Testing a new driver
 
 1. **SQL without a database.** `besu::dry::<MyDialect>()` builds every query and never
