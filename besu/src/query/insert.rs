@@ -353,6 +353,15 @@ fn render_conflict<D: besu_core::Dialect>(
         out.push_raw(" ");
     }
 
+    if matches!(conflict.action, ConflictAction::Nothing) && !conflict.action_filter.is_empty() {
+        // The filter decides whether the *update* runs. `DO NOTHING` has no update, so
+        // rendering it would drop a condition the caller wrote — and its parameter.
+        out.set_error(Error::invalid_query(
+            "`do_update_filter` narrows a `DO UPDATE`, but the conflict action is              `DO NOTHING`; call `.do_update(column, value)` or drop the filter",
+        ));
+        return;
+    }
+
     match &mut conflict.action {
         ConflictAction::Nothing => out.push_raw("DO NOTHING"),
         ConflictAction::Update(sets) => {

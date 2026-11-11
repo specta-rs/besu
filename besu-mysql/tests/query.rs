@@ -1142,3 +1142,39 @@ async fn cast_to_every_marker_executes() {
     cast!("'2020-01-01 12:00:00'", besu::TimestampTz);
     cast!("1.5", besu::Decimal<10, 2>);
 }
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "documents")]
+pub struct Document {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub payload: serde_json::Value,
+}
+
+/// The typed JSON helpers are rendered, not just the raw SQL they were modelled on. The
+/// MySQL spelling was a syntax error for a while because a test asserted its own input.
+#[tokio::test]
+async fn typed_json_paths_render_and_execute() {
+    let db = fresh("besu_test_typed_json").await;
+    db.push([documents.def()]).await.unwrap();
+    db.insert(documents)
+        .value(documents.insert(serde_json::json!({ "user": { "name": "Oscar", "age": 21 } })))
+        .await
+        .unwrap();
+
+    let text: Vec<String> = db
+        .select(documents)
+        .pick(besu::json_text(documents.payload, "user.name"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(text, ["Oscar".to_string()]);
+
+    let value: Vec<serde_json::Value> = db
+        .select(documents)
+        .pick(besu::json_get(documents.payload, "user"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(value[0], serde_json::json!({ "name": "Oscar", "age": 21 }));
+}

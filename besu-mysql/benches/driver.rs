@@ -45,17 +45,20 @@ pub struct BenchNumber {
 /// The parameters a representative statement binds: a mix of every cost class, including the
 /// two that allocate while encoding (128-bit decimal text, and JSON validated as text).
 fn mixed_statement() -> Sql<MySql> {
-    let mut sql = Sql::<MySql>::raw("SELECT ?");
-    sql.bind(42_i64);
-    sql.bind("a piece of text");
-    sql.bind(vec![1u8, 2, 3, 255]);
-    sql.bind(uuid::Uuid::nil());
-    sql.bind_value(Value::Json(br#"{"a":1,"b":[true,null]}"#.to_vec()));
-    sql.bind_value(Value::UInt128(u128::MAX));
-    sql.bind(true);
-    sql.bind(2.5_f64);
-    sql.bind(chrono::NaiveDate::from_ymd_opt(2024, 5, 17).unwrap());
-    sql.bind_value(Value::Null);
+    let mut sql = Sql::<MySql>::raw("SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?");
+    // `push_arg`, not `bind`: the placeholders are already there. See the PostgreSQL bench.
+    sql.push_arg(Value::from(42_i64));
+    sql.push_arg(Value::from("a piece of text"));
+    sql.push_arg(Value::from(vec![1u8, 2, 3, 255]));
+    sql.push_arg(Value::from(uuid::Uuid::nil()));
+    sql.push_arg(Value::Json(br#"{"a":1,"b":[true,null]}"#.to_vec()));
+    sql.push_arg(Value::UInt128(u128::MAX));
+    sql.push_arg(Value::from(true));
+    sql.push_arg(Value::from(2.5_f64));
+    sql.push_arg(Value::from(
+        chrono::NaiveDate::from_ymd_opt(2024, 5, 17).unwrap(),
+    ));
+    sql.push_arg(Value::Null);
     sql
 }
 

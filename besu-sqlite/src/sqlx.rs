@@ -97,7 +97,9 @@ where
 /// ones sqlx itself uses, so the bytes bound are identical.
 fn text(capacity: usize, write: impl FnOnce(&mut String) -> core::fmt::Result) -> String {
     let mut out = String::with_capacity(capacity);
-    write(&mut out).expect("writing to a String cannot fail");
+    // Writing into a `String` cannot fail; ignoring the `fmt::Result` rather than
+    // `expect`-ing keeps this crate free of panic paths, which is a workspace-wide rule.
+    let _ = write(&mut out);
     out
 }
 

@@ -274,7 +274,8 @@ attach it to.
 ## Gotchas
 
 - **`do_update` without a target compiles and then fails** on PostgreSQL with
-  ``ON CONFLICT DO UPDATE requires a target; call `.on_conflict(column)` first``. SQLite accepts
+  ``invalid query: `ON CONFLICT DO UPDATE` needs a conflict target on `postgres`; call
+  `.on_conflict(column)` to name the key it applies to, or use `.do_nothing()` ``. SQLite accepts
   a targetless `DO UPDATE`, so the same code runs there — which is another reason to test on
   the database you deploy to.
 - **`on_conflict` replaces the whole clause.** Call `on_conflict_where`, `do_update` and

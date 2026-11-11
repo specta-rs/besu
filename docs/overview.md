@@ -75,10 +75,12 @@ A dialect can render a query with no connection, which is what makes the SQL tes
 let db = besu::dry::<besu_postgres::Postgres>();
 
 let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
-assert_eq!(
-    sql.sql(),
-    r#"SELECT "users"."id", … FROM "users" WHERE ("users"."age" > $1)"#
-);
+assert!(sql.sql().starts_with(
+    r#"SELECT "users"."id", "users"."email", … WHERE ("users"."age" > $1)"#
+));
+// PostgreSQL also carries a trailing parameter-type comment, the prepared-statement cache
+// key: `\n/* besu:i */`.
+assert!(sql.sql().ends_with("/* besu:i */"));
 ```
 
 Awaiting a query built this way returns an error rather than panicking, so a driverless build

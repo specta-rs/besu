@@ -11,7 +11,7 @@ Options:
       --database <DATABASE>  The database to change, for example `postgres://user:pass@host/db` [env: DATABASE_URL=]
       --schema <SCHEMA>      The schema snapshot to apply
       --destructive          Also drop columns and tables that the snapshot no longer declares
-      --dry-run              Print the statements instead of running them
+      --dry-run              Print the planned changes, with their safety, instead of applying them
   -h, --help                 Print help
 ```
 
@@ -54,8 +54,8 @@ running anything. Each line is prefixed with its safety:
 ```
 
 It is a real preview of the plan `push` would apply, using the same `normalise_type` folding,
-so a type the dialect cannot distinguish does not appear. The flag's own help text calls these
-"statements"; they are change descriptions, not SQL.
+so a type the dialect cannot distinguish does not appear. It prints change descriptions with
+their safety, not SQL — `besu generate` is what writes statements.
 
 ## Safety
 

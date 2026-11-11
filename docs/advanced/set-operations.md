@@ -76,8 +76,8 @@ clause"; SQLite tolerates it, but the three should agree.
   compile error, and the message names both row types.
 - A set query has no row set of its own for the type system to track, so the compounds are
   combined after both branches are fully built; the executor is the left branch's.
-- The clause methods `order_by`, `limit` and `offset` belong to `SetQuery`, not to the branch,
-  so putting them on the wrong one is a compile error rather than a misplaced clause.
+- `order_by`, `limit` and `offset` on a *branch* compile — `Select` has them — and fail when the
+  statement is built, with an error naming the branch. They belong to the compound.
 
 ## Gotchas
 
