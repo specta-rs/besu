@@ -995,3 +995,51 @@ async fn subqueries() {
         .unwrap();
     assert_eq!(names(&world), ["Alice"]);
 }
+
+/// The exact statement SQLite receives for a compound query and for each subquery form.
+#[tokio::test]
+async fn set_operation_and_subquery_sql() {
+    let db = besu::dry::<besu_sqlite::SQLite>();
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gte(18))
+        .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+        .order_by(users.name.asc())
+        .limit(10)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE ("users"."age" >= ?) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < ?) ORDER BY "name" ASC LIMIT ?"#
+    );
+    assert_eq!(sql.args(), [Value::Int(18), Value::Int(18), Value::Int(10)]);
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(exists(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id)),
+        ))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE EXISTS (SELECT "posts"."id", "posts"."title", "posts"."author_id" FROM "posts" WHERE ("posts"."author_id" = "users"."id"))"#
+    );
+    assert!(sql.args().is_empty());
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.id.in_query(db.select(posts).pick(posts.author_id)))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE ("users"."id" IN (SELECT "posts"."author_id" FROM "posts"))"#
+    );
+}

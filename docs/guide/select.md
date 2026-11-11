@@ -526,9 +526,9 @@ that decodes differently has no meaning. A `pick` on both sides is the usual fix
 | `except` | `EXCEPT` | removed |
 | `except_all` | `EXCEPT ALL` | left count minus right count |
 
-The `ALL` forms are multiset operations, not a spelling variant: `intersect_all` of two
-copies with two copies is two copies, while `intersect` of the same inputs is one. SQLite has
-neither, so those two queries fail while the statement is built instead of being sent.
+The `ALL` forms are multiset operations, not a spelling variant: intersecting two copies with
+two copies gives two copies, while `intersect` gives one. SQLite has neither, so those two
+queries fail while the statement is built instead of being sent.
 
 Operations chain, and the chain keeps every operator in order:
 
@@ -559,8 +559,8 @@ would run a different query from the one you wrote, so it is an error that names
 Mixing `INTERSECT` with `UNION` or `EXCEPT` in one chain is refused as well. The SQL has no
 parentheses because SQLite cannot parse a parenthesised compound operand, and without them
 the two families group differently: PostgreSQL and MySQL bind `INTERSECT` tighter, SQLite
-evaluates left to right. `1 UNION 2 INTERSECT 2` is `{1, 2}` there and `{2}` on SQLite. Use
-one operator family per chain.
+evaluates left to right. `1 UNION 2 INTERSECT 2` is `{1, 2}` on PostgreSQL and MySQL and
+`{2}` on SQLite. Use one operator family per chain.
 
 ## Subqueries
 

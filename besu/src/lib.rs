@@ -107,11 +107,11 @@ pub use database::{Database, RawQuery, Transaction, dry};
 #[doc(hidden)]
 pub use expr::ExprKind;
 pub use expr::{
-    CaseBuilder, Expr, IntoCondition, IntoExpr, IntoOrder, NullsOrder, Order, OrderClause, and,
-    avg, between, case, ceil, coalesce, concat, count, count_all, count_distinct, eq, floor, gt,
-    gte, ilike, in_list, is_false, is_not_null, is_null, is_true, json_get, json_text, length,
-    like, lower, lt, lte, matches, max, min, ne, not, not_between, not_ilike, not_in, not_like,
-    now, or, raw, round, sum, trim, upper,
+    CaseBuilder, Expr, IntoCondition, IntoExpr, IntoOrder, IntoSubquery, NullsOrder, Order,
+    OrderClause, and, avg, between, case, ceil, coalesce, concat, count, count_all, count_distinct,
+    eq, exists, floor, gt, gte, ilike, in_list, is_false, is_not_null, is_null, is_true, json_get,
+    json_text, length, like, lower, lt, lte, matches, max, min, ne, not, not_between, not_exists,
+    not_ilike, not_in, not_like, now, or, raw, round, sum, trim, upper,
 };
 #[cfg(feature = "tracing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
@@ -122,8 +122,8 @@ pub use macros::Fragment;
 #[cfg(feature = "migrate")]
 pub use migrate::{PushResult, SchemaDriver, SchemaError};
 pub use query::{
-    Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnConflict, Select, Update,
-    UpdateReturning,
+    Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnConflict, Select, SetOp,
+    SetQuery, Update, UpdateReturning,
 };
 pub use relation::{HasMany, WithRelation, has_many};
 pub use selection::Selection;

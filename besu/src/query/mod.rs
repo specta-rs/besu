@@ -3,11 +3,13 @@
 pub(crate) mod delete;
 pub(crate) mod insert;
 pub(crate) mod select;
+pub(crate) mod set;
 pub(crate) mod update;
 
 pub use delete::{Delete, DeleteReturning};
 pub use insert::{Insert, InsertReturning, OnConflict};
 pub use select::Select;
+pub use set::{SetOp, SetQuery};
 pub use update::{Update, UpdateReturning};
 
 use alloc::vec::Vec;
@@ -43,7 +45,7 @@ impl JoinKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct JoinClause {
     pub(crate) kind: JoinKind,
     pub(crate) table: &'static TableDef,
@@ -68,7 +70,7 @@ pub(crate) fn table_list_bytes(table: &TableDef) -> usize {
         .sum()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SelectQuery {
     pub(crate) from: &'static TableDef,
     /// `None` means "every column of every table in the query".
@@ -126,7 +128,17 @@ impl SelectQuery {
     pub(crate) fn build<D: Dialect>(mut self, prefix: Option<alloc::sync::Arc<str>>) -> Sql<D> {
         let mut out = Sql::with_capacity(self.capacity_hint());
         out.set_table_prefix(prefix);
+        self.render_into(&mut out);
+        out
+    }
 
+    /// Render this query into an existing statement.
+    ///
+    /// This is what makes a subquery a subquery: its parameters continue the enclosing
+    /// statement's numbering, and any error it records is the enclosing statement's error.
+    /// The table prefix is the one already set on `out`, so a prefixed statement stays
+    /// prefixed all the way down.
+    pub(crate) fn render_into<D: Dialect>(&mut self, out: &mut Sql<D>) {
         out.push_raw("SELECT ");
         if self.distinct {
             out.push_raw("DISTINCT ");
@@ -138,7 +150,7 @@ impl SelectQuery {
                     if i != 0 {
                         out.push_raw(", ");
                     }
-                    expr.render(&mut out);
+                    expr.render(out);
                 }
             }
             None => {
@@ -158,7 +170,7 @@ impl SelectQuery {
         }
 
         out.push_raw(" FROM ");
-        push_table(&mut out, self.from);
+        push_table(out, self.from);
 
         for join in &mut self.joins {
             if join.kind == JoinKind::Full && !D::SUPPORTS_FULL_JOIN {
@@ -176,10 +188,10 @@ impl SelectQuery {
             out.push_raw(" ");
             out.push_raw(join.kind.as_sql());
             out.push_raw(" ");
-            push_table(&mut out, join.table);
+            push_table(out, join.table);
             if let Some(on) = &mut join.on {
                 out.push_raw(" ON ");
-                on.render(&mut out);
+                on.render(out);
             }
         }
 
@@ -189,7 +201,7 @@ impl SelectQuery {
                 if i != 0 {
                     out.push_raw(" AND ");
                 }
-                condition.render(&mut out);
+                condition.render(out);
             }
         }
 
@@ -199,7 +211,7 @@ impl SelectQuery {
                 if i != 0 {
                     out.push_raw(", ");
                 }
-                expr.render(&mut out);
+                expr.render(out);
             }
         }
 
@@ -209,7 +221,7 @@ impl SelectQuery {
                 if i != 0 {
                     out.push_raw(" AND ");
                 }
-                condition.render(&mut out);
+                condition.render(out);
             }
         }
 
@@ -219,11 +231,11 @@ impl SelectQuery {
                 if i != 0 {
                     out.push_raw(", ");
                 }
-                render_order(&mut out, clause);
+                render_order(out, clause);
             }
         }
 
-        self.render_limit(&mut out);
+        render_limit::<D>(out, self.limit, self.offset);
 
         if let Some(lock) = &self.lock {
             if !D::SUPPORTS_ROW_LOCKING {
@@ -231,7 +243,7 @@ impl SelectQuery {
                     "`{}` has no row locking; `FOR UPDATE` is not available",
                     D::NAME
                 )));
-                return out;
+                return;
             }
             out.push_raw(match lock.strength {
                 LockStrength::Update => " FOR UPDATE",
@@ -244,12 +256,26 @@ impl SelectQuery {
                 out.push_raw(" NOWAIT");
             }
         }
+    }
 
-        out
+    /// The number of SQL columns the projection produces.
+    ///
+    /// A set operation requires every branch to select the same number of columns, and an
+    /// `IN (SELECT ...)` requires exactly one. `R` makes both true for every query the
+    /// builder can express, but checking the rendered column count costs nothing and turns a
+    /// future hole in the type layer into a good error instead of invalid SQL.
+    pub(crate) fn projection_len(&self) -> usize {
+        match &self.projection {
+            Some(projection) => projection.len(),
+            None => core::iter::once(self.from)
+                .chain(self.joins.iter().map(|join| join.table))
+                .map(|table| table.columns.len())
+                .sum(),
+        }
     }
 
     /// A rough upper bound on the bytes this query will render to.
-    fn capacity_hint(&self) -> usize {
+    pub(crate) fn capacity_hint(&self) -> usize {
         // "SELECT " and the clauses that never vary in wording.
         let mut bytes = 32;
 
@@ -271,31 +297,33 @@ impl SelectQuery {
             + self.group_by.len() * 24
             + self.order_by.len() * 24
     }
+}
 
-    fn render_limit<D: Dialect>(&mut self, out: &mut Sql<D>) {
-        match (self.limit, self.offset) {
-            (Some(limit), _) => {
-                out.push_raw(" LIMIT ");
-                out.bind(limit);
-                if let Some(offset) = self.offset {
-                    out.push_raw(" OFFSET ");
-                    out.bind(offset);
-                }
-            }
-            (None, Some(offset)) => {
-                if D::REQUIRES_LIMIT_WITH_OFFSET {
-                    out.push_raw(" LIMIT ");
-                    out.bind(D::UNBOUNDED_LIMIT);
-                }
+/// Write `LIMIT` and `OFFSET`, in the order and spelling the dialect needs.
+pub(crate) fn render_limit<D: Dialect>(out: &mut Sql<D>, limit: Option<i64>, offset: Option<i64>) {
+    match (limit, offset) {
+        (Some(limit), _) => {
+            out.push_raw(" LIMIT ");
+            out.bind(limit);
+            if let Some(offset) = offset {
                 out.push_raw(" OFFSET ");
                 out.bind(offset);
             }
-            (None, None) => {}
         }
+        (None, Some(offset)) => {
+            if D::REQUIRES_LIMIT_WITH_OFFSET {
+                out.push_raw(" LIMIT ");
+                out.bind(D::UNBOUNDED_LIMIT);
+            }
+            out.push_raw(" OFFSET ");
+            out.bind(offset);
+        }
+        (None, None) => {}
     }
 }
 
-fn render_order<D: Dialect>(out: &mut Sql<D>, clause: &mut OrderClause) {
+/// Render one `ORDER BY` term.
+pub(crate) fn render_order<D: Dialect>(out: &mut Sql<D>, clause: &mut OrderClause) {
     // MySQL has no `NULLS FIRST` / `NULLS LAST`, so the standard emulation is to sort by
     // `expr IS NULL` first. That produces the same ordering for the common cases.
     if !D::SUPPORTS_NULLS_ORDER {

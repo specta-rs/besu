@@ -52,6 +52,15 @@ impl Dialect for MySql {
     const FULL_TEXT: FullTextStyle = FullTextStyle::Mysql;
     const UPSERT: UpsertStyle = UpsertStyle::OnDuplicateKey;
 
+    /// MySQL 8.4 supports the `ALL` modifiers on every set operator, and the tests run them
+    /// against a real server. A server that has `INTERSECT` and `EXCEPT` but not their `ALL`
+    /// forms rejects the statement with its own syntax error, rather than the query quietly
+    /// losing duplicates.
+    const SUPPORTS_INTERSECT_ALL: bool = true;
+
+    /// See [`Self::SUPPORTS_INTERSECT_ALL`].
+    const SUPPORTS_EXCEPT_ALL: bool = true;
+
     /// MySQL can hold every value Besu models, including unsigned 64-bit integers, so
     /// binding never fails.
     fn bind(value: Value) -> Result<Self::Value, Error> {

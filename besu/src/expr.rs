@@ -13,7 +13,7 @@ use core::marker::PhantomData;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use besu_core::{Dialect, Sql, TypeDef, Value};
+use besu_core::{Dialect, Executor, Sql, TypeDef, Value};
 
 use crate::types::{
     Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, I128, Int1, Int2, Int4, Int8, Json,
@@ -113,6 +113,22 @@ pub enum ExprKind {
         /// The search text, bound as a parameter so it never becomes SQL.
         query: Value,
     },
+    /// `[NOT] EXISTS (subquery)`.
+    Exists {
+        /// The subquery, boxed because it is much larger than the other nodes.
+        query: Box<Subquery>,
+        /// `true` for `NOT EXISTS`.
+        negated: bool,
+    },
+    /// `expr [NOT] IN (subquery)`.
+    InSubquery {
+        /// The value tested against the subquery's column.
+        expr: Operand,
+        /// The subquery, which must project exactly one column.
+        query: Box<Subquery>,
+        /// `true` for `NOT IN`.
+        negated: bool,
+    },
 }
 
 /// A child of an expression node.
@@ -159,6 +175,15 @@ impl Operand {
             }
             Self::Value(value) => out.bind_value(core::mem::replace(value, Value::Null)),
             Self::Expr(kind) => kind.render(out),
+        }
+    }
+
+    /// Remove the table name from a column reference.
+    fn unqualify(&mut self) {
+        match self {
+            Self::Column { table, .. } => *table = "",
+            Self::Expr(kind) => kind.unqualify(),
+            Self::Value(_) => {}
         }
     }
 }
@@ -374,6 +399,92 @@ impl ExprKind {
                     }
                 }
             }
+            Self::Exists { query, negated } => {
+                out.push_raw(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
+                // Rendered into the same statement, so its parameters continue the outer
+                // statement's numbering, and the dialect is the outer one by construction.
+                query.query.render_into(out);
+                out.push_raw(")");
+            }
+            Self::InSubquery {
+                expr,
+                query,
+                negated,
+            } => {
+                let columns = query.query.projection_len();
+                if columns != 1 {
+                    out.set_error(besu_core::Error::invalid_query(alloc::format!(
+                        "an `IN (SELECT ...)` subquery must select exactly one column, but this \
+                         one selects {columns}"
+                    )));
+                }
+                out.push_raw("(");
+                expr.render(out);
+                out.push_raw(if *negated { " NOT IN (" } else { " IN (" });
+                query.query.render_into(out);
+                out.push_raw("))");
+            }
+        }
+    }
+
+    /// Remove the table name from every column reference inside this expression.
+    ///
+    /// A set query's `ORDER BY` may only name a result column: PostgreSQL rejects a
+    /// qualified name there with *"missing FROM-clause entry"*, and MySQL rejects it with
+    /// *"cannot be used in global ORDER clause"*. Writing `"age"` instead of
+    /// `"users"."age"` is the portable spelling, and it still means the same column because
+    /// the compound's output columns take their names from the first branch.
+    pub(crate) fn unqualify(&mut self) {
+        match self {
+            Self::Column { table, .. } => *table = "",
+            Self::Binary { left, right, .. } => {
+                left.unqualify();
+                right.unqualify();
+            }
+            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } => expr.unqualify(),
+            Self::Function { args, .. } => {
+                for arg in args {
+                    arg.unqualify();
+                }
+            }
+            Self::Between {
+                expr, low, high, ..
+            } => {
+                expr.unqualify();
+                low.unqualify();
+                high.unqualify();
+            }
+            Self::InList { expr, list, .. } => {
+                expr.unqualify();
+                for item in list {
+                    item.unqualify();
+                }
+            }
+            Self::Case {
+                operand,
+                branches,
+                fallback,
+            } => {
+                if let Some(operand) = operand {
+                    operand.unqualify();
+                }
+                for (when, then) in branches {
+                    when.unqualify();
+                    then.unqualify();
+                }
+                if let Some(fallback) = fallback {
+                    fallback.unqualify();
+                }
+            }
+            Self::Cast { expr, .. }
+            | Self::JsonPath { expr, .. }
+            | Self::InSubquery { expr, .. } => expr.unqualify(),
+            // `FullText` needs a column qualified only when a query has more than one table,
+            // and a compound `ORDER BY` never does.
+            Self::FullText { column, .. } => column.unqualify(),
+            // Nothing to rewrite: a value has no table, and a nested `EXISTS` already
+            // contains only what its own tables provide.
+            Self::Value(_) | Self::Raw(_) | Self::Star | Self::Exists { .. } => {}
         }
     }
 }
@@ -966,6 +1077,100 @@ where
 }
 
 // ---------------------------------------------------------------------------------------
+// Subqueries
+// ---------------------------------------------------------------------------------------
+
+/// A `SELECT` nested inside another statement.
+///
+/// This is the erased form of a [`Select`](crate::Select): the row set and row type are not
+/// part of it, because the statement that contains it never decodes the subquery's rows. It
+/// is rendered by the enclosing statement's dialect and shares that statement's parameter
+/// numbering.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subquery {
+    pub(crate) query: crate::query::SelectQuery,
+}
+
+/// A finished `SELECT` that can be nested inside another statement.
+///
+/// Implemented for [`Select`](crate::Select), which is what makes
+/// `exists(db.select(posts).filter(..))` read like the SQL it produces. The executor is
+/// dropped when the query is nested: the subquery is rendered by the statement that contains
+/// it, so it shares that statement's dialect and its parameters continue that statement's
+/// numbering.
+///
+/// The row set of a nested query is not constrained against the enclosing query's, because
+/// the compiler cannot express "the tables this subquery borrows from the outer query are
+/// in the outer query" without the outer query's type — which is not in scope at the point
+/// the subquery is built. Correlating requires [`Select::correlate`](crate::Select::correlate)
+/// to put the outer table in the subquery's row set, which is what makes the reference
+/// compile; the reverse check is left to the database.
+pub trait IntoSubquery {
+    /// The row type the subquery produces.
+    ///
+    /// `in_query` uses it to require the subquery to produce one value of the column's Rust
+    /// type, which is as close to comparing SQL types as `pick` allows.
+    type Row;
+
+    /// Take the finished query.
+    fn into_subquery(self) -> Subquery;
+}
+
+impl<'a, E: Executor, M, R> IntoSubquery for crate::query::Select<'a, E, M, R> {
+    type Row = R;
+
+    fn into_subquery(self) -> Subquery {
+        Subquery { query: self.query }
+    }
+}
+
+/// `EXISTS (subquery)`: whether the subquery returns at least one row.
+///
+/// ```ignore
+/// let with_posts = db
+///     .select(users)
+///     .filter(exists(
+///         db.select(posts)
+///             .correlate(users)
+///             .filter(posts.author_id.eq(users.id)),
+///     ))
+///     .await?;
+/// ```
+///
+/// ```sql
+/// SELECT ... FROM "users" WHERE EXISTS (
+///     SELECT ... FROM "posts" WHERE ("posts"."author_id" = "users"."id")
+/// )
+/// ```
+///
+/// A correlated subquery references the outer query's columns, so the subquery has to be
+/// told which outer tables it may use: that is what
+/// [`correlate`](crate::Select::correlate) does. Without it the reference to `users` inside
+/// the subquery is a compile error, because `users` is not in the subquery's own row set.
+///
+/// What the subquery selects is irrelevant to `EXISTS` — only whether a row exists — so the
+/// projection is not restricted and typically stays the default one.
+pub fn exists<RowSet, Q: IntoSubquery>(query: Q) -> Expr<RowSet, Bool> {
+    Expr::from_kind(ExprKind::Exists {
+        query: Box::new(query.into_subquery()),
+        negated: false,
+    })
+}
+
+/// `NOT EXISTS (subquery)`: whether the subquery returns no row at all.
+///
+/// This is the anti-join spelling: `NOT EXISTS (...)` is null-safe in a way that
+/// `NOT IN (...)` is not, because a `NULL` in an `IN` list makes the whole comparison
+/// unknown. Prefer it when the subquery can produce `NULL`.
+pub fn not_exists<RowSet, Q: IntoSubquery>(query: Q) -> Expr<RowSet, Bool> {
+    Expr::from_kind(ExprKind::Exists {
+        query: Box::new(query.into_subquery()),
+        negated: true,
+    })
+}
+
+// ---------------------------------------------------------------------------------------
 // Expressions with a known type
 // ---------------------------------------------------------------------------------------
 
@@ -1471,6 +1676,56 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
                 .into_iter()
                 .map(|v| ExprKind::Value(v.into()))
                 .collect(),
+            negated: true,
+        })
+    }
+
+    /// `IN (subquery)`, where the subquery selects one column of this column's type.
+    ///
+    /// ```ignore
+    /// let authors: Vec<User> = db
+    ///     .select(users)
+    ///     .filter(users.id.in_query(db.select(posts).pick(posts.author_id)))
+    ///     .await?;
+    /// ```
+    ///
+    /// The subquery's row type must be this column's Rust type, which is the closest the
+    /// compiler can get to the SQL types matching: `pick` erases the SQL type to whatever
+    /// the selection decodes as, so `i64` against `i64` is checked but a `VARCHAR` against
+    /// an integer is not. It also means a nullable column's pick is `Option<T>` and is
+    /// rejected; select it through [`as_expr`](Self::as_expr) to compare the same value
+    /// without the nullability.
+    ///
+    /// This is not null-safe: if the subquery produces a `NULL`, the comparison is unknown
+    /// rather than false. Use [`not_exists`] for an anti-join.
+    pub fn in_query<RowSet, P, Q>(self, query: Q) -> Expr<RowSet, Bool>
+    where
+        RowSet: Contains<P, T>,
+        Q: IntoSubquery,
+        (Q::Row, S::Rust): SameType,
+    {
+        let _ = PhantomData::<P>;
+        Expr::from_kind(ExprKind::InSubquery {
+            expr: Operand::new(self.into_expr_kind()),
+            query: Box::new(query.into_subquery()),
+            negated: false,
+        })
+    }
+
+    /// `NOT IN (subquery)`.
+    ///
+    /// See [`in_query`](Self::in_query) for the type check, and prefer [`not_exists`] when
+    /// the subquery can produce `NULL`, because `NOT IN` is `UNKNOWN` rather than true then.
+    pub fn not_in_query<RowSet, P, Q>(self, query: Q) -> Expr<RowSet, Bool>
+    where
+        RowSet: Contains<P, T>,
+        Q: IntoSubquery,
+        (Q::Row, S::Rust): SameType,
+    {
+        let _ = PhantomData::<P>;
+        Expr::from_kind(ExprKind::InSubquery {
+            expr: Operand::new(self.into_expr_kind()),
+            query: Box::new(query.into_subquery()),
             negated: true,
         })
     }

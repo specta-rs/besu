@@ -8,7 +8,7 @@ use crate::types::Bool;
 use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
 
 use crate::expr::{Expr, IntoCondition, IntoOrder};
-use crate::query::{JoinClause, JoinKind, SelectQuery};
+use crate::query::{JoinClause, JoinKind, SelectQuery, SetOp, SetQuery};
 use crate::selection::Selection;
 use crate::table::Table;
 
@@ -163,6 +163,130 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
 }
 
 impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
+    /// Add a table to the row set without selecting from it.
+    ///
+    /// This is how a correlated subquery reaches the enclosing query's columns. The table
+    /// joins the row set, so `users.id` compiles inside the subquery, but no `FROM` entry is
+    /// added, so the subquery still only reads its own tables:
+    ///
+    /// ```ignore
+    /// db.select(posts)
+    ///     .correlate(users)
+    ///     .filter(posts.author_id.eq(users.id))
+    /// ```
+    ///
+    /// Use it only inside a subquery. On its own it names a table the statement does not
+    /// select from, which the database will reject as an unknown column. The reverse check —
+    /// that the enclosing query really does contain `users` — cannot be made here, because
+    /// the enclosing query's type is not in scope; see [`IntoSubquery`](crate::IntoSubquery).
+    pub fn correlate<T: Table>(self, _table: T) -> Select<'a, E, (M, T), R> {
+        Select {
+            exec: self.exec,
+            query: self.query,
+            phantom: PhantomData,
+        }
+    }
+
+    /// `UNION`: every row from both sides, with duplicates removed.
+    ///
+    /// The other side must return the same row type `R`, so two projections that decode
+    /// differently cannot be combined. It may come from a different executor as long as the
+    /// driver — and therefore the dialect — is the same.
+    ///
+    /// ```compile_fail
+    /// use besu::prelude::*;
+    ///
+    /// #[derive(Table)]
+    /// #[besu(table = "users")]
+    /// struct User {
+    ///     id: i64,
+    /// }
+    ///
+    /// #[derive(Table)]
+    /// #[besu(table = "posts")]
+    /// struct Post {
+    ///     id: i64,
+    /// }
+    ///
+    /// # #[derive(Debug, Clone, Copy)]
+    /// # struct Test;
+    /// # impl besu::Dialect for Test {
+    /// #     type Value = besu::Value;
+    /// #     const NAME: &'static str = "test";
+    /// #     const PLACEHOLDER: besu::besu_core::Placeholder =
+    /// #         besu::besu_core::Placeholder::Question;
+    /// #     const SUPPORTS_RETURNING: bool = true;
+    /// #     const SUPPORTS_ILIKE: bool = false;
+    /// #     const SUPPORTS_FULL_JOIN: bool = true;
+    /// #     const UPSERT: besu::besu_core::UpsertStyle =
+    /// #         besu::besu_core::UpsertStyle::OnConflict;
+    /// #     fn bind(value: besu::Value) -> Result<Self::Value, besu::Error> {
+    /// #         Ok(value)
+    /// #     }
+    /// #     fn write_placeholder(out: &mut String, _: usize) {
+    /// #         out.push('?');
+    /// #     }
+    /// #     fn type_name(_: besu::TypeDef) -> std::borrow::Cow<'static, str> {
+    /// #         "TEXT".into()
+    /// #     }
+    /// # }
+    /// let db = besu::dry::<Test>();
+    /// // `User` and `Post` are different row types, so the two sides cannot be combined.
+    /// let _ = db.select(users).union(db.select(posts));
+    /// ```
+    pub fn union<'a2, E2, M2>(self, other: Select<'a2, E2, M2, R>) -> SetQuery<'a, E, M, R>
+    where
+        E2: Executor<Driver = E::Driver>,
+    {
+        SetQuery::new(self.exec, self.query, SetOp::Union, other.query)
+    }
+
+    /// `UNION ALL`: every row from both sides, keeping duplicates.
+    pub fn union_all<'a2, E2, M2>(self, other: Select<'a2, E2, M2, R>) -> SetQuery<'a, E, M, R>
+    where
+        E2: Executor<Driver = E::Driver>,
+    {
+        SetQuery::new(self.exec, self.query, SetOp::UnionAll, other.query)
+    }
+
+    /// `INTERSECT`: rows that both sides contain, once.
+    pub fn intersect<'a2, E2, M2>(self, other: Select<'a2, E2, M2, R>) -> SetQuery<'a, E, M, R>
+    where
+        E2: Executor<Driver = E::Driver>,
+    {
+        SetQuery::new(self.exec, self.query, SetOp::Intersect, other.query)
+    }
+
+    /// `INTERSECT ALL`: rows that both sides contain, keeping the smaller count.
+    ///
+    /// SQLite has no such spelling, so the query fails while building.
+    pub fn intersect_all<'a2, E2, M2>(self, other: Select<'a2, E2, M2, R>) -> SetQuery<'a, E, M, R>
+    where
+        E2: Executor<Driver = E::Driver>,
+    {
+        SetQuery::new(self.exec, self.query, SetOp::IntersectAll, other.query)
+    }
+
+    /// `EXCEPT`: rows from the left that the right does not contain.
+    pub fn except<'a2, E2, M2>(self, other: Select<'a2, E2, M2, R>) -> SetQuery<'a, E, M, R>
+    where
+        E2: Executor<Driver = E::Driver>,
+    {
+        SetQuery::new(self.exec, self.query, SetOp::Except, other.query)
+    }
+
+    /// `EXCEPT ALL`: rows from the left minus the right, by count.
+    ///
+    /// SQLite has no such spelling, so the query fails while building.
+    pub fn except_all<'a2, E2, M2>(self, other: Select<'a2, E2, M2, R>) -> SetQuery<'a, E, M, R>
+    where
+        E2: Executor<Driver = E::Driver>,
+    {
+        SetQuery::new(self.exec, self.query, SetOp::ExceptAll, other.query)
+    }
+}
+
+impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// An `INNER JOIN`. Rows must match on both sides.
     pub fn inner_join<T: Table>(
         mut self,
@@ -282,7 +406,7 @@ where
     }
 }
 
-fn decode_rows<E: Executor, R: Decode<E::Driver>>(
+pub(super) fn decode_rows<E: Executor, R: Decode<E::Driver>>(
     rows: &[<E::Driver as Driver>::Row],
 ) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
     let mut out = alloc::vec::Vec::with_capacity(rows.len());

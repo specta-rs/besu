@@ -138,6 +138,20 @@ pub trait Dialect: 'static + Sized {
     /// Whether `SELECT ... FOR UPDATE` is available. SQLite has no row locking.
     const SUPPORTS_ROW_LOCKING: bool = true;
 
+    /// Whether `INTERSECT ALL` is available.
+    ///
+    /// `INTERSECT` keeps a row once however many times both sides contain it; the `ALL`
+    /// modifier keeps it as many times as the smaller of the two counts, which is the
+    /// multiset intersection. SQLite has no such spelling, so it is off there.
+    const SUPPORTS_INTERSECT_ALL: bool = true;
+
+    /// Whether `EXCEPT ALL` is available.
+    ///
+    /// `EXCEPT` removes every copy of a row that the right-hand side contains; the `ALL`
+    /// modifier subtracts the counts instead, which is the multiset difference. SQLite has
+    /// no such spelling, so it is off there.
+    const SUPPORTS_EXCEPT_ALL: bool = true;
+
     /// Convert a generic value into the dialect's bound representation.
     fn bind(value: Value) -> Result<Self::Value, Error>;
 

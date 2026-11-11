@@ -602,3 +602,306 @@ async fn full_text_sql() {
     );
     assert_eq!(sql.args(), [Value::Text("rust".into())]);
 }
+
+/// The names in row order, so an ordering assertion reads as the list it checks.
+fn names(rows: &[User]) -> Vec<&str> {
+    rows.iter().map(|user| user.name.as_str()).collect()
+}
+
+/// Set operations are one statement: each branch keeps its own filter, the operator decides
+/// which rows survive, and the compound's `ORDER BY` sees the whole result.
+#[tokio::test]
+async fn set_operations() {
+    let db = setup().await;
+    for (email, name, age) in [
+        ("alice@example.com", "Alice", 30),
+        ("bob@example.com", "Bob", 17),
+        ("carol@example.com", "Carol", 25),
+        ("dave@example.com", "Dave", 40),
+    ] {
+        db.insert(users)
+            .value(users.insert(email, name, age))
+            .await
+            .unwrap();
+    }
+
+    let everyone: Vec<User> = db
+        .select(users)
+        .filter(users.age.gte(18))
+        .union(db.select(users).filter(users.age.lt(18)))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&everyone), ["Alice", "Bob", "Carol", "Dave"]);
+
+    let distinct: Vec<User> = db
+        .select(users)
+        .filter(users.age.gt(20))
+        .union(db.select(users).filter(users.age.gt(35)))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&distinct), ["Alice", "Carol", "Dave"]);
+
+    let all: Vec<User> = db
+        .select(users)
+        .filter(users.age.gt(20))
+        .union_all(db.select(users).filter(users.age.gt(35)))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&all), ["Alice", "Carol", "Dave", "Dave"]);
+
+    let both: Vec<User> = db
+        .select(users)
+        .filter(users.age.gt(20))
+        .intersect(db.select(users).filter(users.name.like("C%")))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&both), ["Carol"]);
+
+    let only: Vec<User> = db
+        .select(users)
+        .filter(users.age.gte(18))
+        .except(db.select(users).filter(users.name.like("C%")))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&only), ["Alice", "Dave"]);
+
+    // Ordering, paging and `first` belong to the compound.
+    let paged: Vec<User> = db
+        .select(users)
+        .filter(users.age.gte(18))
+        .union(db.select(users).filter(users.age.lt(18)))
+        .order_by_desc(users.age.asc())
+        .limit(2)
+        .offset(1)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&paged), ["Alice", "Carol"]);
+
+    let first: Option<User> = db
+        .select(users)
+        .filter(users.age.gte(18))
+        .union(db.select(users).filter(users.age.lt(18)))
+        .order_by(users.age.asc())
+        .first()
+        .await
+        .unwrap();
+    assert_eq!(first.map(|user| user.name), Some("Bob".to_string()));
+}
+
+/// The `ALL` operators are multiset operations, which a plain set operator cannot express:
+/// two copies intersected with two copies stay two copies, and subtraction is by count.
+#[tokio::test]
+async fn the_all_operators_keep_counts() {
+    let db = setup().await;
+    for (email, name, age) in [
+        ("alice1@example.com", "Alice", 30),
+        ("alice2@example.com", "Alice", 30),
+        ("bob@example.com", "Bob", 17),
+    ] {
+        db.insert(users)
+            .value(users.insert(email, name, age))
+            .await
+            .unwrap();
+    }
+
+    let doubled: Vec<String> = db
+        .select(users)
+        .pick(users.name)
+        .intersect_all(db.select(users).pick(users.name))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(doubled, ["Alice", "Alice", "Bob"]);
+
+    let singles: Vec<String> = db
+        .select(users)
+        .pick(users.name)
+        .intersect(db.select(users).pick(users.name))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(singles, ["Alice", "Bob"]);
+
+    // `EXCEPT ALL` removes one copy of `Alice`, `EXCEPT` removes both.
+    let all: Vec<String> = db
+        .select(users)
+        .pick(users.name)
+        .except_all(
+            db.select(users)
+                .filter(users.email.eq("alice1@example.com"))
+                .pick(users.name),
+        )
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(all, ["Alice", "Bob"]);
+
+    let distinct: Vec<String> = db
+        .select(users)
+        .pick(users.name)
+        .except(
+            db.select(users)
+                .filter(users.email.eq("alice1@example.com"))
+                .pick(users.name),
+        )
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(distinct, ["Bob"]);
+}
+
+/// `exists` and `in_query` are subqueries of the enclosing statement: their parameters are
+/// part of the same numbering and their rows are not decoded separately.
+#[tokio::test]
+async fn subqueries() {
+    let db = setup().await;
+    for (email, name, age) in [
+        ("alice@example.com", "Alice", 30),
+        ("bob@example.com", "Bob", 17),
+        ("carol@example.com", "Carol", 25),
+    ] {
+        db.insert(users)
+            .value(users.insert(email, name, age))
+            .await
+            .unwrap();
+    }
+    let alice = db
+        .select(users)
+        .filter(users.name.eq("Alice"))
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    db.insert(posts)
+        .values([
+            posts.insert("Hello", alice.id),
+            posts.insert("World", alice.id),
+        ])
+        .await
+        .unwrap();
+
+    let with_posts: Vec<User> = db
+        .select(users)
+        .filter(exists(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id)),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&with_posts), ["Alice"]);
+
+    let without_posts: Vec<User> = db
+        .select(users)
+        .filter(not_exists(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id)),
+        ))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&without_posts), ["Bob", "Carol"]);
+
+    let hello: Vec<User> = db
+        .select(users)
+        .filter(exists(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id))
+                .filter(posts.title.eq("Hello")),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&hello), ["Alice"]);
+
+    let authors: Vec<User> = db
+        .select(users)
+        .filter(users.id.in_query(db.select(posts).pick(posts.author_id)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&authors), ["Alice"]);
+
+    let non_authors: Vec<User> = db
+        .select(users)
+        .filter(
+            users
+                .id
+                .not_in_query(db.select(posts).pick(posts.author_id)),
+        )
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&non_authors), ["Bob", "Carol"]);
+}
+
+/// The exact statement PostgreSQL receives for a compound query and for each subquery form.
+#[tokio::test]
+async fn set_operation_and_subquery_sql() {
+    let db = besu::dry::<besu_postgres::Postgres>();
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gte(18))
+        .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+        .order_by(users.name.asc())
+        .limit(10)
+        .to_sql()
+        .unwrap();
+    // The trailing comment is the driver's prepared-statement cache key.
+    assert_eq!(
+        sql.sql(),
+        concat!(
+            r#"SELECT "users"."id" FROM "users" WHERE ("users"."age" >= $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2) ORDER BY "name" ASC LIMIT $3"#,
+            "\n/* besu:iii */"
+        )
+    );
+    assert_eq!(sql.args(), [Value::Int(18), Value::Int(18), Value::Int(10)]);
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(exists(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id)),
+        ))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE EXISTS (SELECT "posts"."id", "posts"."title", "posts"."author_id" FROM "posts" WHERE ("posts"."author_id" = "users"."id"))"#
+    );
+    assert!(sql.args().is_empty());
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.id.in_query(db.select(posts).pick(posts.author_id)))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE ("users"."id" IN (SELECT "posts"."author_id" FROM "posts"))"#
+    );
+}
