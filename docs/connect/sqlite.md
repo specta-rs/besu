@@ -1,6 +1,6 @@
 # Connect to SQLite
 
-`besu_sqlite::Sqlx` is a sqlx `SqlitePool` behind Besu's `Driver` trait. The constructors
+`besu_sqlite::Sqlx` wraps a sqlx `SqlitePool` behind Besu's `Driver` trait. The constructors
 differ only in what they do to the connection options, and the defaults are chosen so that a
 local application does not have to think about pragmas.
 
@@ -114,8 +114,8 @@ with no file, no pool and no runtime. Executing one returns an error that says t
   `sqlite3` shell, for instance — does not inherit either.
 - `Sqlx::new` creates the file, so a typo in the path creates a new empty database rather than
   failing. A missing table is the first symptom.
-- `Sqlx::memory()` is per-process and per-connection; there is no shared in-memory mode. Two
-  `Sqlx::memory()` calls are two unrelated databases.
+- `Sqlx::memory()` gives each `Database` its own private database; there is no way to share one
+  between connections. Two `Sqlx::memory()` calls are two unrelated databases.
 - A pool over a file and a pool over `:memory:` are not interchangeable: with `:memory:` every
   connection would be empty, which is why the constructor forces one connection and ignores
   `max_connections`.

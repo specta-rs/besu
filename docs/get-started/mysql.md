@@ -168,5 +168,6 @@ this way returns an error rather than a fake result.
   schema change would matter.
 - MySQL has no `RETURNING` and no `FULL OUTER JOIN`; the builder rejects both when the SQL is
   built rather than sending something the server cannot parse. It also has no partial indexes.
-- A `DateTime<Utc>` field is declared `DATETIME(6)` and reads back as `Timestamp`, so prefer
-  `NaiveDateTime` on MySQL; see [MySQL column types](../schema/column-types/mysql.md).
+- A `DateTime<Utc>` field is declared `DATETIME(6)` and introspects as `Timestamp`, which MySQL's
+  normalisation does not fold back, so prefer `NaiveDateTime`; see
+  [MySQL column types](../schema/column-types/mysql.md).

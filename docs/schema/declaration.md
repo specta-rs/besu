@@ -124,7 +124,8 @@ pub label: String,      // VARCHAR(64)
 ```
 
 The field's Rust type must be that `SqlType`'s `Rust` type — `String` for `Decimal`, `Char` and
-`VarChar`. A type of your own is a marker implementing `SqlType` plus `Decode` for each driver.
+`VarChar`. A type of your own is a marker implementing `SqlType`, and its `Rust` type needs
+`Decode` for each driver.
 
 ## `references`, `on_delete`, `on_update`
 

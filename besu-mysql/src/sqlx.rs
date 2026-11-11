@@ -1,8 +1,9 @@
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use num_traits::ToPrimitive;
 use sqlx::{
-    Arguments, MySql, MySqlPool, Row,
+    Arguments, MySql, MySqlPool, Row, Type, ValueRef,
     mysql::{MySqlArguments, MySqlConnectOptions, MySqlPoolOptions, MySqlQueryResult, MySqlRow},
+    types::BigDecimal,
 };
 
 use crate::MySql as MySqlDialect;
@@ -60,18 +61,108 @@ where
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
 
+/// A 128-bit integer, encoded as the decimal text MySQL stores in a `DECIMAL(39,0)`.
+///
+/// `sqlx` encodes a [`BigDecimal`] by formatting it to a `String` and then writing that as
+/// length-encoded text, so a `BigDecimal` built for one parameter allocates twice: once for
+/// the digit vector inside its `BigInt` and once for the string. Decimal text is what goes
+/// over the wire either way, so formatting straight into the argument buffer produces the
+/// same bytes with no allocation at all. The declared type stays `NEWDECIMAL`, so a cached
+/// prepared statement sees exactly the parameter type it saw before.
+#[derive(Clone, Copy)]
+struct Decimal {
+    negative: bool,
+    magnitude: u128,
+}
+
+impl Decimal {
+    fn from_u128(value: u128) -> Self {
+        Self {
+            negative: false,
+            magnitude: value,
+        }
+    }
+
+    fn from_i128(value: i128) -> Self {
+        Self {
+            negative: value < 0,
+            magnitude: value.unsigned_abs(),
+        }
+    }
+}
+
+impl Type<MySql> for Decimal {
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        <BigDecimal as Type<MySql>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
+        <BigDecimal as Type<MySql>>::compatible(ty)
+    }
+}
+
+impl sqlx::Encode<'_, MySql> for Decimal {
+    fn encode_by_ref(
+        &self,
+        buf: &mut Vec<u8>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        // A `u128` is at most 39 digits, and an `i128` is one sign longer, so the text always
+        // fits in 40 bytes. That is under 251, which means its length always fits in the
+        // one-byte form of MySQL's length-encoded integer — the same encoding sqlx uses for
+        // a `BigDecimal`.
+        let mut digits = [0u8; 40];
+        let mut start = digits.len();
+        let mut remaining = self.magnitude;
+        loop {
+            start -= 1;
+            digits[start] = b'0' + (remaining % 10) as u8;
+            remaining /= 10;
+            if remaining == 0 {
+                break;
+            }
+        }
+        if self.negative {
+            start -= 1;
+            digits[start] = b'-';
+        }
+
+        let text = &digits[start..];
+        buf.push(text.len() as u8);
+        buf.extend_from_slice(text);
+
+        Ok(sqlx::encode::IsNull::No)
+    }
+}
+
 fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
+    let values = sql.args();
     let mut arguments = MySqlArguments::default();
-    for value in sql.args() {
+
+    // The parameter count is known before anything is encoded, so asking for the buffers up
+    // front saves the value, type and null buffers each growing a handful of times (and
+    // copying themselves) on the way to the final size. Eight bytes is a rough size for a
+    // small parameter; a 128-bit value is decimal text and always at most 40 digits plus its
+    // one-byte length. Anything larger still grows once more rather than being pessimised.
+    let encoded_size: usize = values
+        .iter()
+        .map(|value| match value {
+            Value::UInt128(_) | Value::Int128(_) => 41,
+            _ => 8,
+        })
+        .sum();
+    arguments.reserve(values.len(), encoded_size);
+
+    for value in values {
         match value {
             Value::Null => add(&mut arguments, None::<i64>)?,
             Value::Bool(v) => add(&mut arguments, *v)?,
             Value::Int(v) => add(&mut arguments, *v)?,
             // MySQL has real unsigned integers, so the full `u64` range round-trips.
             Value::UInt(v) => add(&mut arguments, *v)?,
-            // A `u128` column is `DECIMAL(39,0)`, which sqlx encodes from a `BigDecimal`.
-            Value::UInt128(v) => add(&mut arguments, sqlx::types::BigDecimal::from(*v))?,
-            Value::Int128(v) => add(&mut arguments, sqlx::types::BigDecimal::from(*v))?,
+            // A `u128` column is `DECIMAL(39,0)`, so a 128-bit value goes over the wire as
+            // decimal text.
+            Value::UInt128(v) => add(&mut arguments, Decimal::from_u128(*v))?,
+            Value::Int128(v) => add(&mut arguments, Decimal::from_i128(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -88,6 +179,16 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
         }
     }
     Ok(arguments)
+}
+
+/// Encode a statement's parameters exactly as the driver would, for the benchmarks.
+///
+/// This is hidden from the documentation and is not part of the supported API. The `encode`
+/// benchmark has to time `arguments` with no database in the way, and that function is
+/// private to this crate, so this is the one seam it gets.
+#[doc(hidden)]
+pub fn arguments_for_bench(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
+    arguments(sql)
 }
 
 impl Driver for Sqlx {
@@ -199,6 +300,23 @@ where
     row.try_get(index)
 }
 
+/// Decode an already-fetched value, reporting a failure the way [`Row::try_get`] does.
+///
+/// The type has already been checked, so this is the second half of `try_get` without a
+/// second trip through the row to fetch the value and its type information again.
+fn decode_checked<'r, T>(
+    value: sqlx::mysql::MySqlValueRef<'r>,
+    index: usize,
+) -> Result<T, sqlx::Error>
+where
+    T: sqlx::Decode<'r, MySql>,
+{
+    T::decode(value).map_err(|source| sqlx::Error::ColumnDecode {
+        index: index.to_string(),
+        source,
+    })
+}
+
 macro_rules! impl_decode {
     ($($ty:ty),* $(,)?) => {
         $(
@@ -245,18 +363,23 @@ impl Decode<Sqlx> for String {
 ///
 /// Most columns are signed, but MySQL marks a few computed values — `COUNT(*)` for
 /// instance — as `BIGINT UNSIGNED`, and `sqlx` refuses to decode an unsigned column
-/// through a signed type. Trying signed first and unsigned second covers both without
-/// looking at the column metadata.
+/// through a signed type. The type information says which one the column is, so asking it
+/// first avoids trying `i64`, building (and discarding) a `ColumnDecode` error, and then
+/// trying `u64`: an unsigned column would otherwise allocate a whole error message for
+/// every value.
 fn decode_integer(row: &MySqlRow, offset: &mut usize) -> Result<i64, sqlx::Error> {
     let index = *offset;
+    let value = row.try_get_raw(index)?;
+    let type_info = value.type_info().into_owned();
 
-    if let Ok(value) = row.try_get::<i64, _>(index) {
+    if <i64 as Type<MySql>>::compatible(&type_info) {
         *offset += 1;
-        return Ok(value);
+        return decode_checked(value, index);
     }
 
-    if let Ok(value) = row.try_get::<u64, _>(index) {
+    if <u64 as Type<MySql>>::compatible(&type_info) {
         *offset += 1;
+        let value: u64 = decode_checked(value, index)?;
         return i64::try_from(value).map_err(|_| {
             <Sqlx as Driver>::error(Error::decode(
                 index,
@@ -306,10 +429,12 @@ impl Decode<Sqlx> for u64 {
         let index = *offset;
 
         // An `UNSIGNED BIGINT` column only decodes as `u64`, while a signed one only
-        // decodes as `i64`, so try both rather than guessing from the value.
-        if let Ok(value) = row.try_get::<u64, _>(index) {
+        // decodes as `i64`. The type information knows which, so ask it rather than trying
+        // `u64` and throwing away an error for every signed column.
+        let value = row.try_get_raw(index)?;
+        if <u64 as Type<MySql>>::compatible(value.type_info().as_ref()) {
             *offset += 1;
-            return Ok(value);
+            return decode_checked(value, index);
         }
 
         let value = decode_integer(row, offset)?;
@@ -322,13 +447,76 @@ impl Decode<Sqlx> for u64 {
     }
 }
 
+/// The digits of a `DECIMAL` column, when MySQL sent the value as a plain integer.
+///
+/// `BigDecimal`'s `Decode` parses that text into a `BigInt`, which allocates a digit vector,
+/// and `to_u128`/`to_i128` then walk it again. MySQL already sends a decimal as text, so
+/// parsing it straight into a 128-bit integer is the same check with no intermediate
+/// allocation. Only a plain integer — an optional `-` followed by digits — takes this route:
+/// a scaled value has to keep going through `BigDecimal`, which truncates it, so that the two
+/// paths agree on what a fractional value means.
+fn decimal_integer(row: &MySqlRow, index: usize) -> Option<(&str, bool)> {
+    let value = row.try_get_raw(index).ok()?;
+    if value.is_null() || !<BigDecimal as Type<MySql>>::compatible(value.type_info().as_ref()) {
+        return None;
+    }
+
+    let text = <&str as sqlx::Decode<MySql>>::decode(value).ok()?;
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, text),
+    };
+
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits, negative))
+}
+
+/// Parse decimal digits into a `u128`, returning `None` on overflow.
+fn parse_u128(digits: &str) -> Option<u128> {
+    let mut value = 0_u128;
+    for byte in digits.bytes() {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u128::from(digit))?;
+    }
+    Some(value)
+}
+
+/// Parse decimal digits and a sign into an `i128`, returning `None` on overflow.
+fn parse_i128(digits: &str, negative: bool) -> Option<i128> {
+    let magnitude = parse_u128(digits)?;
+    if negative {
+        // `i128::MIN`'s magnitude is one past `i128::MAX`, so go through the unsigned
+        // two's-complement value rather than negating arithmetically.
+        (magnitude <= i128::MAX as u128 + 1).then_some((magnitude as i128).wrapping_neg())
+    } else {
+        i128::try_from(magnitude).ok()
+    }
+}
+
 impl Decode<Sqlx> for u128 {
     fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
         let index = *offset;
 
-        // A `DECIMAL(39,0)` column decodes as a `BigDecimal`. `to_u128` returns `None` for a
-        // negative value and for anything above `u128::MAX`.
-        if let Ok(value) = row.try_get::<sqlx::types::BigDecimal, _>(index) {
+        // A `DECIMAL(39,0)` column, which is what a `u128` column is declared as, takes this
+        // path. A negative or scaled value falls through to `BigDecimal` so its diagnosis is
+        // unchanged.
+        if let Some((digits, false)) = decimal_integer(row, index) {
+            *offset += 1;
+            return parse_u128(digits).ok_or_else(|| {
+                <Sqlx as Driver>::error(Error::decode(
+                    index,
+                    "the DECIMAL value is not a non-negative integer that fits in u128",
+                ))
+            });
+        }
+
+        // `to_u128` returns `None` for a negative value and for anything above `u128::MAX`.
+        if let Ok(value) = row.try_get::<BigDecimal, _>(index) {
             *offset += 1;
             return value.to_u128().ok_or_else(|| {
                 <Sqlx as Driver>::error(Error::decode(
@@ -353,7 +541,17 @@ impl Decode<Sqlx> for i128 {
     fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
         let index = *offset;
 
-        if let Ok(value) = row.try_get::<sqlx::types::BigDecimal, _>(index) {
+        if let Some((digits, negative)) = decimal_integer(row, index) {
+            *offset += 1;
+            return parse_i128(digits, negative).ok_or_else(|| {
+                <Sqlx as Driver>::error(Error::decode(
+                    index,
+                    "the DECIMAL value is not an integer that fits in i128",
+                ))
+            });
+        }
+
+        if let Ok(value) = row.try_get::<BigDecimal, _>(index) {
             *offset += 1;
             return value.to_i128().ok_or_else(|| {
                 <Sqlx as Driver>::error(Error::decode(

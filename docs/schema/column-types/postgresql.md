@@ -31,6 +31,9 @@ that holds it, or to `NUMERIC` when no integer is wide enough.
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>`, `Jsonb` | matching | `CHAR(n)`, `VARCHAR(n)`, `NUMERIC(p,s)`, `JSONB` |
 
+Everything in the table round-trips through an insert and a `SELECT`, except a `Decimal`, which
+has no decoder into its `String` yet. The `Custom` types below round-trip through DDL only.
+
 ## Integers
 
 There are no unsigned types, so each unsigned marker is widened by one step and the range is

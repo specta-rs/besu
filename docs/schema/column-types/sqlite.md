@@ -31,6 +31,9 @@ driver both understand, not about storage width.
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `#[besu(sql_type = "..")]` | e.g. `VarChar<64>` | `VarChar(64)` | `TEXT` |
 
+Every type in the table round-trips through an insert and a `SELECT`. The only types that do not
+are the `Custom` ones below, which exist in a database but not in Rust.
+
 ## Integers
 
 Every signed and unsigned width below 128 bits is `INTEGER`, which is a signed 64-bit value.

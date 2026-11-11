@@ -131,9 +131,11 @@ fn the_filter_is_parameterised() {
 }
 ```
 
-The dialect is a type, so the same test can be repeated for each backend. On PostgreSQL,
-`to_sql()` appends the dialect's statement signature — a trailing `/* besu:… */` comment — so
-compare against a rendering from that dialect rather than a hand-written string.
+The dialect is a type, so the same test can be repeated for each backend. On PostgreSQL
+the statement carries a trailing `/* besu:… */` comment — the parameter-type signature that
+keeps the prepared-statement cache key distinct per bound shape. It is part of the rendered
+text and of the text the driver sends, because `build` seals the statement once, so compare
+against a rendering from that dialect rather than a hand-written string.
 
 ## What Drizzle has that Besu does not
 

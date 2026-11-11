@@ -2,8 +2,7 @@
 
 Besu splits the thing that knows SQL syntax from the thing that owns a connection. The
 dialect is a type, chosen at compile time; the driver is a value holding a pool. A
-`Database<Dr>` is just the driver plus an optional table prefix, and every query builder
-borrows it.
+`Database<Dr>` is the driver plus an optional table prefix, and every query builder borrows it.
 
 ## The two halves
 
@@ -52,7 +51,7 @@ is on by default.
 
 ## Drivers
 
-Each driver crate has the same three entry points, with per-database differences:
+Each driver crate has the same entry points, with per-database differences:
 
 | | SQLite | PostgreSQL | MySQL |
 | --- | --- | --- | --- |
@@ -84,7 +83,8 @@ db.push_schema(&schema, false).await?;
 db.migrate(&besu::schema::Migrator::from_dir("migrations")?).await?;
 ```
 
-For typed queries, match on the variant and call a generic helper:
+For typed queries, match on the variant and call a generic helper. Each arm has its own error
+type, so a real dispatcher maps them onto one application error:
 
 ```rust
 match db {
@@ -139,14 +139,13 @@ Hand-written migration SQL is not rewritten; write the prefix into it yourself.
 
 - `Database::new` does not connect. Each `Sqlx::…` constructor has already opened a pool by
   the time it returns, so a failed connection is a constructor error, not a query error.
-- `Database` is not `Clone` on purpose: a builder borrows it, and two live borrows would let
-  one query's transaction interleave with another's. The driver inside is a pool, so
-  `driver().clone()` into a second `Database` shares the connections.
+- `Database` is not `Clone`: a builder borrows it, so a second handle comes from
+  `driver().clone()`, which shares the same pool.
 - The capability constants on `Dialect` (`SUPPORTS_RETURNING`, `SUPPORTS_ILIKE`,
   `SUPPORTS_FULL_JOIN`, `SUPPORTS_NULLS_ORDER`, `REQUIRES_LIMIT_WITH_OFFSET`) are what make a
   builder reject a clause the server cannot parse. They are checked when the SQL is built, not
   by the compiler.
-- A transaction borrows the database, so statements inside it use `tx`, not `db`. Reaching for
-  `db` while `tx` is alive is a borrow error, which is the point.
+- A transaction runs on its own connection, so a statement sent through `db` while `tx` is open
+  is not part of it: it will not see uncommitted rows, and it may block on a write lock.
 - Pool configuration lives in the driver crate's `from_pool` constructor; that is the only way
   to set a timeout or a connection limit.
