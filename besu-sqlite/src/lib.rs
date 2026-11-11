@@ -12,11 +12,17 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
+mod ddl;
 mod dialect;
+#[cfg(feature = "sqlx")]
+mod introspect;
 #[cfg(feature = "sqlx")]
 mod sqlx;
 
+pub use ddl::SQLiteDdl;
 pub use dialect::SQLite;
+#[cfg(feature = "sqlx")]
+pub use introspect::introspect;
 #[cfg(feature = "sqlx")]
 pub use sqlx::Sqlx;
 

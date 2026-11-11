@@ -298,3 +298,41 @@ async fn bulk_update_requires_intent() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn schema_push_converges() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+
+    let first = db.push([users.def(), posts.def()]).await.unwrap();
+    assert_eq!(first.changes.len(), 2);
+    assert!(first.statements[0].contains("CREATE TABLE \"users\""));
+    assert!(
+        first
+            .statements
+            .iter()
+            .any(|s| s.contains("AUTOINCREMENT")),
+        "auto-incrementing primary keys must be inline in SQLite: {:?}",
+        first.statements
+    );
+
+    // Pushing the same schema again must be a no-op: that is the property that makes
+    // `push` safe to run on every boot.
+    let second = db.push([users.def(), posts.def()]).await.unwrap();
+    assert!(
+        second.is_empty(),
+        "second push should be a no-op, got {:?}",
+        second.changes
+    );
+
+    // And the introspected schema must round-trip.
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(introspected.tables.len(), 2);
+    let users_table = introspected.table("users").unwrap();
+    assert_eq!(users_table.columns.len(), 5);
+    assert!(users_table.columns.iter().any(|c| c.name == "id" && c.auto_increment));
+    assert!(users_table.columns.iter().any(|c| c.name == "email" && c.unique));
+    assert!(users_table.columns.iter().any(|c| c.name == "bio" && c.nullable));
+    let posts_table = introspected.table("posts").unwrap();
+    assert_eq!(posts_table.foreign_keys.len(), 1);
+    assert_eq!(posts_table.foreign_keys[0].references_table, "users");
+}

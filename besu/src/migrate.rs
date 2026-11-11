@@ -1,0 +1,221 @@
+//! Schema generation, introspection and migrations.
+//!
+//! Everything here is built on one idea: the schema your code declares and the schema a
+//! live database has are the *same type*. That makes `push` (diff and apply) and
+//! `introspect` (read the database back) two sides of one coin, and it makes drift
+//! impossible to miss.
+//!
+//! ```ignore
+//! // Create every table, if they do not exist yet.
+//! db.push(&[users.def(), posts.def()]).await?;
+//!
+//! // Later, after changing a struct: applies only the difference.
+//! let result = db.push(&[users.def(), posts.def()]).await?;
+//! println!("applied {} statements", result.statements.len());
+//! ```
+
+use core::future::Future;
+
+use besu_core::{Dialect, Driver, Sql, TableDef};
+use besu_schema::{AppliedMigration, Change, Ddl, MigrationError, Migrator, Schema};
+
+use crate::database::Database;
+
+/// A driver that can describe and change the schema of its database.
+///
+/// This is a separate trait from [`Driver`] because it is only needed by migrations and
+/// the CLI: a library that only runs queries never has to think about it.
+pub trait SchemaDriver: Driver {
+    /// The DDL dialect for this database.
+    type Ddl: Ddl + Default;
+
+    /// Read the database's current schema.
+    fn introspect(&self) -> impl Future<Output = Result<Schema, Self::Error>> + Send;
+}
+
+/// What a call to [`Database::push`] did.
+#[derive(Debug, Clone, Default)]
+pub struct PushResult {
+    /// The changes that were applied, in order.
+    pub changes: Vec<Change>,
+    /// The statements that were executed.
+    pub statements: Vec<String>,
+}
+
+impl PushResult {
+    /// Whether the schema already matched and nothing was executed.
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    /// Whether any change loses data.
+    pub fn is_destructive(&self) -> bool {
+        self.changes
+            .iter()
+            .any(|change| change.safety() == besu_schema::Safety::Destructive)
+    }
+}
+
+/// Anything that can go wrong while touching the schema.
+#[derive(Debug)]
+pub enum SchemaError<E> {
+    /// The database rejected a statement.
+    Driver(E),
+    /// A migration file could not be applied.
+    Migration(MigrationError<E>),
+    /// The requested change would lose data and was not explicitly allowed.
+    Destructive(Vec<Change>),
+    /// The database could not be introspected.
+    Core(besu_core::Error),
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for SchemaError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Driver(err) => write!(f, "{err}"),
+            Self::Migration(err) => write!(f, "{err}"),
+            Self::Destructive(changes) => {
+                writeln!(
+                    f,
+                    "refusing to apply {} change(s) that would lose data:",
+                    changes.len()
+                )?;
+                for change in changes {
+                    writeln!(f, "  - {change}")?;
+                }
+                write!(f, "call `push_destructive` if you really mean it")
+            }
+            Self::Core(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error for SchemaError<E> {}
+
+impl<Dr: SchemaDriver> Database<Dr> {
+    /// The DDL dialect for this database.
+    pub fn ddl() -> Dr::Ddl {
+        Dr::Ddl::default()
+    }
+
+    /// Build a [`Schema`] from the metadata of the given tables.
+    pub fn schema(tables: impl IntoIterator<Item = &'static TableDef>) -> Schema {
+        let mut schema = Schema::new();
+        for table in tables {
+            schema.push_def(table);
+        }
+        schema.sort();
+        schema
+    }
+
+    /// Read the database's current schema.
+    pub async fn introspect(&self) -> Result<Schema, Dr::Error> {
+        self.driver().introspect().await
+    }
+
+    /// Create every table that does not exist yet, and leave everything else alone.
+    pub async fn create_schema(
+        &self,
+        tables: impl IntoIterator<Item = &'static TableDef>,
+    ) -> Result<PushResult, Dr::Error> {
+        let schema = Self::schema(tables);
+        let statements = <Dr::Ddl as Ddl>::create_schema(&Dr::Ddl::default(), &schema);
+        for statement in &statements {
+            self.execute_statement(statement.clone()).await?;
+        }
+        Ok(PushResult {
+            changes: Vec::new(),
+            statements,
+        })
+    }
+
+    /// Diff the declared tables against the live database and apply the difference.
+    ///
+    /// Destructive changes are refused. Use [`Database::push_destructive`] to apply them.
+    pub async fn push(
+        &self,
+        tables: impl IntoIterator<Item = &'static TableDef>,
+    ) -> Result<PushResult, SchemaError<Dr::Error>> {
+        self.push_inner(tables, false).await
+    }
+
+    /// Like [`Database::push`], but drops columns and tables when the schema no longer
+    /// declares them.
+    pub async fn push_destructive(
+        &self,
+        tables: impl IntoIterator<Item = &'static TableDef>,
+    ) -> Result<PushResult, SchemaError<Dr::Error>> {
+        self.push_inner(tables, true).await
+    }
+
+    async fn push_inner(
+        &self,
+        tables: impl IntoIterator<Item = &'static TableDef>,
+        allow_destructive: bool,
+    ) -> Result<PushResult, SchemaError<Dr::Error>> {
+        let desired = Self::schema(tables);
+        let current = self.introspect().await.map_err(SchemaError::Driver)?;
+        let changes = besu_schema::diff::diff(&current, &desired);
+
+        if !allow_destructive {
+            let destructive: Vec<Change> = changes
+                .iter()
+                .filter(|change| change.safety() == besu_schema::Safety::Destructive)
+                .cloned()
+                .collect();
+            if !destructive.is_empty() {
+                return Err(SchemaError::Destructive(destructive));
+            }
+        }
+
+        if !Dr::Ddl::default().can_alter_column()
+            && changes
+                .iter()
+                .any(|change| matches!(change, Change::AlterColumn { .. }))
+        {
+            return Err(SchemaError::Core(besu_core::Error::unsupported(format!(
+                "{} cannot change a column in place; write an explicit migration instead",
+                <Dr::Ddl as Ddl>::name(&Dr::Ddl::default())
+            ))));
+        }
+
+        let statements = <Dr::Ddl as Ddl>::apply(&Dr::Ddl::default(), &changes);
+        for statement in &statements {
+            self.execute_statement(statement.clone())
+                .await
+                .map_err(SchemaError::Driver)?;
+        }
+
+        Ok(PushResult {
+            changes,
+            statements,
+        })
+    }
+
+    /// Apply a set of migration files.
+    pub async fn migrate(
+        &self,
+        migrator: &Migrator,
+    ) -> Result<Vec<AppliedMigration>, SchemaError<Dr::Error>>
+    where
+        i64: besu_core::Decode<Dr>,
+        String: besu_core::Decode<Dr>,
+        Option<String>: besu_core::Decode<Dr>,
+    {
+        let mut executor = &*self;
+        migrator
+            .run(&mut executor)
+            .await
+            .map_err(SchemaError::Migration)
+    }
+
+    async fn execute_statement(&self, statement: String) -> Result<(), Dr::Error> {
+        let sql = Sql::<<Dr as Driver>::Dialect>::raw(statement)
+            .finish()
+            .map_err(Dr::error)?;
+        self.driver().execute(&sql).await.map(|_| ())
+    }
+}
+
+#[allow(unused)]
+fn _keep_dialect<D: Dialect>(_: Option<Sql<D>>) {}

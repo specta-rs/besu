@@ -136,6 +136,15 @@ impl Driver for Sqlx {
     }
 }
 
+impl besu::SchemaDriver for Sqlx {
+    type Ddl = crate::SQLiteDdl;
+
+    async fn introspect(&self) -> Result<besu::schema::Schema, Self::Error> {
+        let db = besu::Database::new(self.clone());
+        crate::introspect::introspect(&db).await
+    }
+}
+
 impl TransactionDriver for Sqlx {
     type Transaction<'a> = sqlx::Transaction<'a, Sqlite>;
 
