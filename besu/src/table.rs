@@ -28,6 +28,12 @@ pub trait Table: Copy + 'static {
     fn name() -> &'static str {
         Self::DEF.name
     }
+
+    /// A model's values, one per column, in the same order as [`TableDef::columns`].
+    ///
+    /// This is what powers whole-row writes such as [`Update::set_model`](crate::Update::set_model).
+    /// The derive generates it; a hand-written table has to describe its own row.
+    fn model_values(model: &Self::Model) -> Vec<Value>;
 }
 
 /// A new row to be inserted.

@@ -630,3 +630,72 @@ async fn case_expressions() {
         ]
     );
 }
+
+#[tokio::test]
+async fn update_from_a_model() {
+    let db = setup().await;
+    let original = db
+        .insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+
+    let changed = User {
+        name: "Alicia".into(),
+        age: 31,
+        bio: Some("Rust".into()),
+        ..original.clone()
+    };
+
+    db.update(users)
+        .set_model(&changed)
+        .filter(users.id.eq(original.id))
+        .await
+        .unwrap();
+
+    let stored: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, "Alicia");
+    assert_eq!(stored[0].age, 31);
+    assert_eq!(stored[0].bio.as_deref(), Some("Rust"));
+    // The primary key is never rewritten by `set_model`.
+    assert_eq!(stored[0].id, original.id);
+}
+
+#[tokio::test]
+async fn chunked_insert_splits_across_statements() {
+    let db = setup().await;
+
+    // 500 rows with 3 bound columns each would be 1,500 parameters in one statement. Split
+    // into batches of 100 so each stays small, which is what a bulk import has to do.
+    let rows: Vec<_> = (0..500u32)
+        .map(|i| users.insert(format!("user{i}@example.com"), format!("User {i}"), 20))
+        .collect();
+
+    let outputs = db.insert(users).values_chunked(rows, 100).await.unwrap();
+    assert_eq!(outputs.len(), 5);
+
+    let count: i64 = db.select(users).pick(count_all()).await.unwrap().remove(0);
+    assert_eq!(count, 500);
+}
+
+#[tokio::test]
+async fn too_many_parameters_is_a_clear_error() {
+    let db = setup().await;
+
+    // SQLite accepts 32,766 parameters; 40,000 in one `IN` list is over the limit, and the
+    // error should say so rather than surfacing a driver message.
+    let values: Vec<i64> = (0..40_000).collect();
+    let error = db
+        .select(users)
+        .filter(users.id.in_list(values))
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("parameters"),
+        "expected a parameter-limit error, got: {message}"
+    );
+}

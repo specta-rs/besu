@@ -674,6 +674,11 @@ impl Codegen {
             self.table_name.value()
         );
 
+        let model_values = columns.iter().map(|column| {
+            let ident = &column.ident;
+            quote!(#besu::Value::from(model.#ident.clone()))
+        });
+
         quote! {
             #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
             mod #module_ident {
@@ -696,6 +701,12 @@ impl Codegen {
                 impl #besu::Table for #table_struct_ident {
                     type Model = super::#model;
                     type Insert = #insert_struct_ident;
+
+                    fn model_values(
+                        model: &super::#model,
+                    ) -> ::std::vec::Vec<#besu::Value> {
+                        ::std::vec![#(#model_values),*]
+                    }
 
                     const DEF: &'static #besu::TableDef = &#besu::TableDef {
                         name: #table_name,

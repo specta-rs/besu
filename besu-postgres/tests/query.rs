@@ -487,3 +487,21 @@ async fn same_sql_text_with_different_parameter_types() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn json_existence_operator_with_an_escaped_question_mark() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    // `??` is an escaped question mark, so this is `$1::jsonb ? 'a'` — PostgreSQL's JSON
+    // existence operator — rather than a second parameter.
+    let rows: Vec<(bool,)> = db
+        .execute(sql!(
+            "SELECT ?::jsonb ?? 'a' AS has_key",
+            r#"{"a": 1, "b": 2}"#
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(true,)]);
+}

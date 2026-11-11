@@ -79,6 +79,8 @@ extern crate alloc;
 mod condition;
 mod database;
 pub mod expr;
+#[cfg(feature = "tracing")]
+mod logged;
 mod macros;
 #[cfg(feature = "migrate")]
 pub mod migrate;
@@ -107,6 +109,9 @@ pub use expr::{
     max, min, ne, not, not_between, not_ilike, not_in, not_like, now, or, raw, round, sum, trim,
     upper,
 };
+#[cfg(feature = "tracing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
+pub use logged::{Logged, LoggedTransaction, Policy, logged};
 #[doc(hidden)]
 pub use macros::__private;
 pub use macros::Fragment;

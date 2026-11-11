@@ -137,8 +137,26 @@ impl<D: Dialect> Sql<D> {
         let index = self.args.len();
         D::write_placeholder(self.sql.to_mut(), index);
         match D::bind(value) {
-            Ok(value) => self.args.push(value),
+            Ok(value) => {
+                self.args.push(value);
+                self.check_param_limit();
+            }
             Err(err) => self.set_error(err),
+        }
+    }
+
+    /// Record an error once the statement carries more parameters than the database accepts.
+    ///
+    /// Every database has a limit, and exceeding it produces a driver error that says nothing
+    /// about which query or why. Catching it here costs one comparison per parameter.
+    fn check_param_limit(&mut self) {
+        if self.args.len() > D::MAX_PARAMS {
+            self.set_error(Error::invalid_query(alloc::format!(
+                "this statement binds more than {} parameters, which is the most `{}` accepts; \
+                 split it into batches",
+                D::MAX_PARAMS,
+                D::NAME
+            )));
         }
     }
 
@@ -148,7 +166,10 @@ impl<D: Dialect> Sql<D> {
     /// the `sql!` macro.
     pub fn push_arg(&mut self, value: Value) {
         match D::bind(value) {
-            Ok(value) => self.args.push(value),
+            Ok(value) => {
+                self.args.push(value);
+                self.check_param_limit();
+            }
             Err(err) => self.set_error(err),
         }
     }
