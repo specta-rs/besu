@@ -123,9 +123,8 @@ pub amount: String,     // NUMERIC(10,2)
 pub label: String,      // VARCHAR(64)
 ```
 
-The field's Rust type must be that `SqlType`'s `Rust` type — `String` for `Decimal`, `Char` and
-`VarChar`. A type of your own is a marker implementing `SqlType`, and its `Rust` type needs
-`Decode` for each driver.
+The field's Rust type must be the `SqlType`'s `Rust` type — `String` for `Decimal`, `Char` and
+`VarChar`. A custom marker implements `SqlType`, and its `Rust` type needs `Decode` per driver.
 
 ## `references`, `on_delete`, `on_update`
 
@@ -168,7 +167,7 @@ pub cached_score: f64,
 | Item | What it is |
 | --- | --- |
 | `User` | The row type, with `Decode<Dr>` implemented for every driver |
-| `UserTable`, `users` | The handle's type and its `const`; `users.def()` is the `&'static TableDef` |
+| `UserTable`, `users` | The handle's type, implementing `Table`, and its `const`; `users.def()` is the `&'static TableDef` |
 | `UserInsert` | The insert struct, implementing `Insertable` |
 
 There is no separate inferred-select type: the struct is what a `SELECT` returns. A column reference
