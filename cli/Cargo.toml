@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 besu = { workspace = true, features = ["derive", "migrate"] }
+besu-any = { workspace = true }
 besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu-postgres = { workspace = true, features = ["sqlx", "runtime-tokio"] }

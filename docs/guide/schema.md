@@ -161,6 +161,13 @@ A database that already has a composite `UNIQUE` reports it as a `Unique`, not a
 That distinction matters: PostgreSQL owns the index that backs the constraint, so
 `DROP INDEX` fails on it and only `ALTER TABLE ... DROP CONSTRAINT` removes it.
 
+Two index shapes have no derive attribute: a partial index's `WHERE` clause
+(`besu_schema::Index::predicate`) and a `CHECK` constraint (`besu_schema::Check`). Both are
+populated by introspection or a hand-written `Schema`; the IR renders them, the derive does
+not declare them. A view is `Schema::views`, which `besu pull` records and `push` never
+touches. See [migrations](migrations.md#what-the-differ-deliberately-ignores) for what
+introspection skips on each driver.
+
 ### Enums
 
 Only PostgreSQL has named enum types that exist outside a column. They are introspected into

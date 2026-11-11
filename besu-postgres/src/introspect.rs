@@ -359,9 +359,11 @@ async fn introspect_constraints(
 /// Read `CHECK` constraints from `pg_constraint`.
 ///
 /// `contype = 'c'` is only a real `CHECK` a person wrote: `NOT NULL` has no row here, and a
-/// domain's constraint belongs to the type, not the table. PostgreSQL stores the expression
-/// with extra parentheses (`CHECK (value > 0)` comes back as `(value > 0)`), which
-/// [`normalise_expression`] folds away so the declared spelling converges.
+/// domain's constraint belongs to the type, not the table. `conislocal` excludes a check a
+/// table merely inherited from its parent, which the table itself cannot drop. PostgreSQL
+/// stores the expression with extra parentheses (`CHECK (value > 0)` comes back as
+/// `(value > 0)`), which [`normalise_expression`] folds away so the declared spelling
+/// converges.
 async fn introspect_checks(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
@@ -374,6 +376,7 @@ async fn introspect_checks(
              JOIN pg_class t ON t.oid = con.conrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              WHERE con.contype = 'c' \
+               AND con.conislocal \
                AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
                AND n.nspname NOT LIKE 'pg_toast%' \
                AND n.nspname NOT LIKE 'pg_temp%' \

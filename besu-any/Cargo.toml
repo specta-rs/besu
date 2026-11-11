@@ -1,0 +1,27 @@
+[package]
+name = "besu-any"
+description = "A runtime-selected Besu database, for when the backend comes from configuration."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/besu-any/latest/besu-any"
+keywords = ["database", "sqlite", "postgresql", "mysql", "multi-database"]
+categories = ["database"]
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+besu = { workspace = true, features = ["derive", "migrate"] }
+besu-sqlite = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+besu-postgres = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+besu-mysql = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+sqlx = { workspace = true, features = ["sqlite", "postgres", "mysql", "runtime-tokio"] }
