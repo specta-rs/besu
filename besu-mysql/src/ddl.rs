@@ -70,6 +70,10 @@ impl Ddl for MySqlDdl {
         // declaring `TIMETZ` must compare equal to the `TIME` the database reports back.
         match ty {
             TypeDef::TimeTz => TypeDef::Time,
+            // MySQL has no column type that stores an offset: `DATETIME` is the same column
+            // for both, so a declared `TimestampTz` must compare equal to the `Timestamp`
+            // introspection reports — otherwise every `push` sees a type change.
+            TypeDef::TimestampTz => TypeDef::Timestamp,
             // `u128` is `DECIMAL(39,0)`, which is indistinguishable from a
             // `Decimal(39, 0)`; an `i128` is declared as that already.
             TypeDef::UInt(128) => TypeDef::Decimal(39, 0),
@@ -295,6 +299,21 @@ impl Ddl for MySqlDdl {
 mod tests {
     use super::*;
     use besu_schema::Unique;
+
+    #[test]
+    fn a_timestamp_with_a_zone_converges() {
+        // `DateTime<Utc>` maps to `TimestampTz`, which MySQL stores as `DATETIME(6)` and
+        // reports back as `Timestamp`. Folding the two is what keeps `push` a no-op.
+        let ddl = MySqlDdl;
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::TimestampTz),
+            TypeDef::Timestamp
+        );
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::Timestamp),
+            TypeDef::Timestamp
+        );
+    }
 
     fn table() -> Table {
         Table {
