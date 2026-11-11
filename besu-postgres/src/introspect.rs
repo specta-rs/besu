@@ -19,6 +19,7 @@ use crate::Sqlx;
 /// themselves, because a `push` that sees them would try to drop or recreate them:
 ///
 /// - expression indexes, which have no column list to report,
+/// - indexes with `INCLUDE` columns, which the IR cannot name,
 /// - indexes that back a constraint (exclusion constraints in particular), which the
 ///   constraint owns and `DROP INDEX` cannot remove,
 /// - triggers, which are never read at all.
@@ -411,7 +412,7 @@ async fn introspect_indexes(
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.relname, i.relname, ix.indisunique, ix.indnkeyatts, \
-                    a.attname, pg_get_expr(ix.indpred, ix.indrelid) \
+                    ix.indnatts, a.attname, pg_get_expr(ix.indpred, ix.indrelid) \
              FROM pg_index ix \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_class t ON t.oid = ix.indrelid \
@@ -427,7 +428,16 @@ async fn introspect_indexes(
              ORDER BY n.nspname, t.relname, i.relname, \
                       array_position(ix.indkey, a.attnum)"
         ))
-        .all::<(String, String, String, bool, i16, String, Option<String>)>()
+        .all::<(
+            String,
+            String,
+            String,
+            bool,
+            i16,
+            i16,
+            String,
+            Option<String>,
+        )>()
         .await?;
 
     struct PgIndex {
@@ -435,12 +445,13 @@ async fn introspect_indexes(
         name: String,
         unique: bool,
         keys: usize,
+        attributes: usize,
         columns: Vec<String>,
         predicate: Option<String>,
     }
 
     let mut indexes: Vec<PgIndex> = Vec::new();
-    for (schema, table, name, unique, keys, column, predicate) in rows {
+    for (schema, table, name, unique, keys, attributes, column, predicate) in rows {
         let table = qualified(&schema, &table, current);
         match indexes
             .iter_mut()
@@ -452,6 +463,7 @@ async fn introspect_indexes(
                 name,
                 unique,
                 keys: usize::try_from(keys).unwrap_or(0),
+                attributes: usize::try_from(attributes).unwrap_or(0),
                 columns: vec![column],
                 predicate: predicate.map(|predicate| normalise_expression(&predicate)),
             }),
@@ -466,6 +478,13 @@ async fn introspect_indexes(
         // `UNIQUE`, or an exclusion constraint, which has no representation at all — are
         // excluded by the query, because `DROP INDEX` cannot remove them.
         if index.columns.len() != index.keys {
+            continue;
+        }
+
+        // A non-key `INCLUDE` column is not a key column, and the IR cannot name one. An
+        // index with `INCLUDE` would otherwise be reported as a plain index over its key
+        // columns only, which is not the index that exists; skip it instead.
+        if index.attributes != index.keys {
             continue;
         }
 

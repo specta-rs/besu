@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>besu studio</title>
+<style>
+  :root {
+    --background: #070907; --live: #C8FF3D; --outlier: #FF5A1F;
+    --structure: #2E3724; --text: #F2F4EE; --muted: #8C9983;
+    --mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; grid-template-columns: 15rem 1fr;
+    background: var(--background); color: var(--text); font: 0.85rem/1.5 var(--mono);
+  }
+  aside {
+    border-right: 1px solid var(--structure); padding: 1.25rem 1rem;
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+  .brand { color: var(--live); letter-spacing: 0.04em; }
+  .brand span { color: var(--text); }
+  .note { color: var(--muted); font-size: 0.72rem; }
+  h2 {
+    margin: 0; font-size: 0.72rem; font-weight: normal; text-transform: uppercase;
+    letter-spacing: 0.12em; color: var(--muted);
+  }
+  #tables { display: flex; flex-direction: column; gap: 0.15rem; }
+  button {
+    font: inherit; color: var(--text); background: none; border: 1px solid transparent;
+    padding: 0.35rem 0.5rem; text-align: left; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--structure); }
+  button:disabled { color: var(--muted); cursor: default; }
+  button.active { border-color: var(--live); color: var(--live); }
+  button .count { float: right; color: var(--muted); }
+  button.active .count { color: var(--live); }
+  main { padding: 1.25rem; min-width: 0; display: flex; flex-direction: column; gap: 1.5rem; }
+  .heading { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+  .heading h1 { margin: 0; font-size: 1rem; color: var(--live); font-weight: normal; }
+  .heading .meta { color: var(--muted); font-size: 0.72rem; }
+  .heading .pager { margin-left: auto; display: flex; gap: 0.25rem; }
+  .scroll { overflow: auto; border: 1px solid var(--structure); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td {
+    padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--structure); text-align: left;
+    vertical-align: top; white-space: nowrap; max-width: 32rem; overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  th {
+    position: sticky; top: 0; background: var(--background); color: var(--live);
+    font-weight: normal;
+  }
+  th .type { display: block; color: var(--muted); font-size: 0.66rem; }
+  tbody tr:hover { background: #0d110d; }
+  td.null { color: var(--outlier); }
+  td.number, td.boolean { color: var(--live); }
+  .error { color: var(--outlier); min-height: 1.2rem; }
+  textarea {
+    width: 100%; min-height: 6rem; resize: vertical; background: #0b0e0b;
+    color: var(--text); border: 1px solid var(--structure); padding: 0.6rem; font: inherit;
+  }
+  textarea:focus, button:focus-visible { outline: 1px solid var(--live); outline-offset: 1px; }
+  .query-bar { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+  .query-bar button { border-color: var(--live); color: var(--live); padding: 0.35rem 1rem; }
+  pre {
+    margin: 0.75rem 0 0; padding: 0.6rem; border: 1px solid var(--structure);
+    color: var(--muted); overflow: auto; white-space: pre-wrap;
+  }
+  @media (max-width: 40rem) {
+    body { grid-template-columns: 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--structure); }
+    #tables { flex-direction: row; flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">besu<span> studio</span></div>
+  <p class="note">A development-only browser. The query box can read and modify this
+    database, and there is no authentication.</p>
+  <h2>Tables</h2>
+  <div id="tables"></div>
+</aside>
+
+<main>
+  <section>
+    <div class="heading">
+      <h1 id="table-name">No table selected</h1>
+      <span class="meta" id="table-meta"></span>
+      <span class="pager">
+        <button id="previous" type="button">previous</button>
+        <button id="next" type="button">next</button>
+      </span>
+    </div>
+    <p class="error" id="browse-error"></p>
+    <div class="scroll">
+      <table>
+        <thead><tr id="columns"></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>SQL</h2>
+    <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM …"></textarea>
+    <div class="query-bar">
+      <button id="run" type="button">run</button>
+      <span class="note">One statement at a time. It runs against the configured database;
+        write ?? for a literal question mark.</span>
+    </div>
+    <pre id="result"></pre>
+  </section>
+</main>
+
+<script>
+  const LIMIT = 50;
+  const state = { schema: null, table: null, offset: 0 };
+
+  const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+
+  const qualified = (table) =>
+    table.schema ? table.schema + "." + table.name : table.name;
+
+  async function fetchJson(url, options) {
+    const response = await fetch(url, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || response.status + " " + response.statusText);
+    return body;
+  }
+
+  function typeLabel(ty) {
+    if (typeof ty === "string") return ty;
+    if (Array.isArray(ty)) return ty[0] + "(" + ty.slice(1).join(", ") + ")";
+    const key = Object.keys(ty || {})[0];
+    if (!key) return "?";
+    const value = ty[key];
+    if (Array.isArray(value)) return key + "(" + value.join(", ") + ")";
+    return value ? key + "(" + value + ")" : key;
+  }
+
+  function cell(value) {
+    if (value === null) return node("td", "null", "NULL");
+    if (typeof value === "number") return node("td", "number", String(value));
+    if (typeof value === "boolean") return node("td", "boolean", String(value));
+    if (typeof value === "object") return node("td", "", JSON.stringify(value));
+    return node("td", "", String(value));
+  }
+
+  function renderTables() {
+    const list = document.getElementById("tables");
+    list.replaceChildren();
+    const tables = state.schema && state.schema.tables ? state.schema.tables : [];
+    if (!tables.length) {
+      list.append(node("span", "note", "This database has no tables."));
+      return;
+    }
+    for (const table of tables) {
+      const button = node("button", "", table.name);
+      button.type = "button";
+      button.append(node("span", "count", String(table.columns.length)));
+      if (state.table && qualified(state.table) === qualified(table)) button.classList.add("active");
+      button.addEventListener("click", () => {
+        state.table = table;
+        state.offset = 0;
+        renderTables();
+        loadRows();
+      });
+      list.append(button);
+    }
+  }
+
+  async function loadRows() {
+    if (!state.table) return;
+    const error = document.getElementById("browse-error");
+    error.textContent = "";
+    const params = new URLSearchParams({ limit: String(LIMIT), offset: String(state.offset) });
+
+    let data;
+    try {
+      data = await fetchJson(
+        "/api/tables/" + encodeURIComponent(qualified(state.table)) + "/rows?" + params);
+    } catch (failure) {
+      error.textContent = failure.message;
+      return;
+    }
+
+    document.getElementById("table-name").textContent = qualified(state.table);
+    document.getElementById("table-meta").textContent =
+      state.table.columns.length + " columns · rows " +
+      (data.rows.length ? state.offset + 1 : state.offset) + "–" + (state.offset + data.rows.length);
+
+    const header = document.getElementById("columns");
+    header.replaceChildren();
+    for (const column of state.table.columns) {
+      const heading = node("th", "");
+      heading.append(node("span", "", column.name));
+      heading.append(node("span", "type", typeLabel(column.ty) + (column.nullable ? " null" : "")));
+      header.append(heading);
+    }
+
+    const body = document.getElementById("rows");
+    body.replaceChildren();
+    for (const row of data.rows) {
+      const tr = node("tr", "");
+      for (const value of row) tr.append(cell(value));
+      body.append(tr);
+    }
+    if (!data.rows.length) {
+      const tr = node("tr", "");
+      const td = node("td", "note", "No rows on this page.");
+      td.colSpan = Math.max(state.table.columns.length, 1);
+      tr.append(td);
+      body.append(tr);
+    }
+
+    document.getElementById("previous").disabled = state.offset === 0;
+    document.getElementById("next").disabled = data.rows.length < LIMIT;
+  }
+
+  async function loadSchema() {
+    try {
+      state.schema = await fetchJson("/api/schema");
+    } catch (failure) {
+      document.getElementById("browse-error").textContent = failure.message;
+      return;
+    }
+    renderTables();
+    if (state.schema.tables.length) {
+      state.table = state.schema.tables[0];
+      renderTables();
+      await loadRows();
+    }
+  }
+
+  document.getElementById("previous").addEventListener("click", () => {
+    state.offset = Math.max(0, state.offset - LIMIT);
+    loadRows();
+  });
+
+  document.getElementById("next").addEventListener("click", () => {
+    state.offset += LIMIT;
+    loadRows();
+  });
+
+  const run = async () => {
+    const sql = document.getElementById("sql").value.trim();
+    const result = document.getElementById("result");
+    if (!sql) return;
+    result.textContent = "running…";
+    try {
+      const body = await fetchJson("/api/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sql }),
+      });
+      result.textContent = JSON.stringify(body, null, 2);
+      if (state.table) await loadRows();
+    } catch (failure) {
+      result.textContent = failure.message;
+    }
+  };
+
+  document.getElementById("run").addEventListener("click", run);
+  document.getElementById("sql").addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") run();
+  });
+
+  loadSchema();
+</script>
+</body>
+</html>

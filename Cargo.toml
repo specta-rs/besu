@@ -10,6 +10,7 @@ members = [
     "./besu-postgres",
     "./besu-mysql",
     "./cli",
+    "./besu-studio",
     "./examples/*",
 ]
 
@@ -30,6 +31,7 @@ besu-schema = { path = "./besu-schema", version = "0.1.0" }
 besu-sqlite = { path = "./besu-sqlite", version = "0.1.0", default-features = false }
 besu-postgres = { path = "./besu-postgres", version = "0.1.0", default-features = false }
 besu-mysql = { path = "./besu-mysql", version = "0.1.0", default-features = false }
+besu-studio = { path = "./besu-studio", version = "0.1.0" }
 
 uuid = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

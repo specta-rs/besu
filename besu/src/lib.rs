@@ -87,6 +87,7 @@ mod macros;
 pub mod migrate;
 pub mod prelude;
 mod query;
+pub mod relation;
 mod selection;
 mod stream;
 mod table;
@@ -124,6 +125,7 @@ pub use query::{
     Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnConflict, Select, Update,
     UpdateReturning,
 };
+pub use relation::{HasMany, WithRelation, has_many};
 pub use selection::Selection;
 pub use stream::Rows;
 pub use table::{Insertable, Set, Table};

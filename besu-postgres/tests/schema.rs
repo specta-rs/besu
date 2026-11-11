@@ -396,13 +396,19 @@ async fn partial_and_expression_indexes_are_not_dropped() {
     ))
     .await
     .unwrap();
+    // A non-key `INCLUDE` column has no spelling in the IR either.
+    db.execute(sql!(
+        "CREATE INDEX events_kind_include_idx ON events (kind) INCLUDE (payload)"
+    ))
+    .await
+    .unwrap();
 
     let introspected = db.introspect().await.unwrap();
     let events = introspected.table("events").unwrap();
     assert_eq!(
         events.indexes.len(),
         1,
-        "the expression index must not be reported: {:?}",
+        "the expression and `INCLUDE` indexes must not be reported: {:?}",
         events.indexes
     );
     let partial = &events.indexes[0];
