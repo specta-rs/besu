@@ -26,6 +26,15 @@ pub use introspect::introspect;
 #[cfg(feature = "sqlx")]
 pub use sqlx::Sqlx;
 
+/// Encode a statement's parameters without running it.
+///
+/// This exists so the crate's benchmarks and allocation probes can measure the driver's
+/// encoding path without a database. It is not part of the supported API and is hidden from
+/// the documentation; the name may change without a major version bump.
+#[cfg(feature = "sqlx")]
+#[doc(hidden)]
+pub use sqlx::arguments as encode_arguments;
+
 /// A [`besu::Database`] backed by PostgreSQL.
 #[cfg(feature = "sqlx")]
 pub type Database = besu::Database<Sqlx>;
