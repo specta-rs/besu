@@ -103,7 +103,12 @@ fn build(c: &mut Criterion) {
         let rows: Vec<_> = (0..100)
             .map(|i| users.insert(format!("a{i}@example.com"), "Alice", 30))
             .collect();
-        b.iter(|| db.insert(users).values(rows.iter().cloned()).to_sql().unwrap());
+        b.iter(|| {
+            db.insert(users)
+                .values(rows.iter().cloned())
+                .to_sql()
+                .unwrap()
+        });
     });
 
     group.bench_function("update set + filter", |b| {

@@ -309,7 +309,7 @@ impl<D: Dialect> Sql<D> {
     ///
     /// Called once, at the end of building a statement, so the suffix is part of the text that
     /// `to_sql` shows and part of the string the driver sends. See
-    /// [`Dialect::statement_suffix`] for why it exists.
+    /// [`Dialect::write_statement_suffix`] for why it exists.
     pub fn seal(mut self) -> Self {
         D::write_statement_suffix(self.sql.to_mut(), &self.args);
         self

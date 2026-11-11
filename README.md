@@ -127,6 +127,31 @@ assert!(sql.sql().ends_with(r#"WHERE ("users"."age" > $1)"#));
 Awaiting a query built this way returns an error rather than panicking, so a driverless build can
 still be exercised end to end.
 
+## Performance
+
+Building a query should cost almost nothing, because the database is the slow part. A
+statement is one `String` of SQL and one `Vec` of bound values, and the builder adds only the
+handful of small vectors that hold its clauses:
+
+| Query | Time |
+| ----- | ---- |
+| `select` with one filter | 157 ns |
+| `select` with three filters, `ORDER BY` and `LIMIT` | 318 ns |
+| `select` with a projection and `COUNT(*)` | 152 ns |
+| `insert` one row | 193 ns |
+| `insert` one hundred rows | 10.5 µs |
+| `update ... set ... where` | 246 ns |
+
+Measured with `cargo bench -p besu` on a release build, no database involved — that is the
+cost Besu adds on top of the driver. A one-filter `select` allocates four times: the clause
+vector, the statement text, the argument vector, and one clone that `to_sql` makes so the
+builder stays usable. Executing a query moves its values instead and allocates three.
+
+Rows are decoded straight from the driver's row type into your struct, with no per-row map
+and no intermediate `serde` pass, and `db.stream::<User>(&sql)` decodes one row at a time when
+a result set is too large to hold. Each driver carries its own criterion bench; see
+[CONTRIBUTING](CONTRIBUTING.md#benchmarks).
+
 ## Beyond the basics
 
 - **Streaming.** `db.stream::<User>(&sql)` decodes row by row, so a million-row scan is a

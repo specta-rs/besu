@@ -41,6 +41,26 @@ cargo test --workspace
 The connection strings are hard-coded in the tests because they are only ever run against
 these containers.
 
+## Benchmarks
+
+`cargo bench -p besu` measures the query builder. It uses a dry database and a hand-written
+dialect, so it needs no server and the numbers are the cost Besu adds on top of a driver.
+
+Each driver has its own bench, which needs its server:
+
+```sh
+BESU_SQLITE_BENCH_URL=/tmp/besu-bench.db cargo bench -p besu-sqlite
+BESU_POSTGRES_BENCH_URL=postgres://besu:besu@localhost:55432/besu cargo bench -p besu-postgres
+BESU_MYSQL_BENCH_URL=mysql://root:besu@localhost:53306/besu cargo bench -p besu-mysql
+```
+
+Without the variable the database half of the bench prints a line and registers nothing, so
+`cargo bench` still works on a machine with no containers.
+
+A performance claim in a pull request should come with `cargo bench` numbers from before and
+after, and with the allocation counts if it is about allocations — `dhat` in a throwaway
+crate is enough, do not add it to the workspace.
+
 ## Design rules
 
 A few rules are load-bearing; please do not break them without a discussion in an issue.
