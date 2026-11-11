@@ -58,6 +58,29 @@ A few rules are load-bearing; please do not break them without a discussion in a
 5. **Drivers are dumb.** Anything about *what* SQL to run belongs in the dialect, so the same
    code path serves a driverless test and a production pool.
 
+## Releasing
+
+The crates must be published in dependency order, because each one depends on the ones
+before it and `cargo package` verifies against the registry rather than the workspace:
+
+```
+besu-core -> besu-schema -> besu-macros -> besu -> besu-sqlite / besu-postgres / besu-mysql
+```
+
+Run `cargo publish -p <crate> --dry-run` for the first two, then `cargo publish` for each in
+turn. `besu-cli` ships a binary called `besu`, so it is published last. Bump every version
+together — the workspace uses `version.workspace = true`, so one edit to the root
+`Cargo.toml` moves all of them.
+
+Before publishing, check:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --exclude besu-cli
+```
+
 ## Adding a driver
 
 Implement three things and you have a database:

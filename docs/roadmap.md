@@ -267,7 +267,8 @@ Kept here so the history is visible rather than deleted:
 - **#69, parameter limits.** `Sql` refuses a statement that exceeds the dialect's limit.
 - **#70, batch insert chunking.** `Insert::values_chunked`.
 - **#74, a literal `?`.** `??` is an escaped question mark, for `jsonb ? 'key'`.
-- **#75, publish metadata.** Every crate has a README, keywords and categories.
+- **#75, publish metadata.** Every crate has a README, keywords and categories, and the
+  publish order is written down in `CONTRIBUTING.md`.
 - **#76, update from model.** `Update::set_model`.
 
 ## Contributing
