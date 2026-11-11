@@ -89,8 +89,23 @@ where
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
 
+/// Format a value into a `String` that already has room for the whole result.
+///
+/// chrono's `Display` for a `DelayedFormat` renders into a fresh `String` and then copies
+/// that into the formatter, which costs a date three allocations. `write_to` writes into a
+/// buffer of the right size instead, so it costs one. The format strings used below are the
+/// ones sqlx itself uses, so the bytes bound are identical.
+fn text(capacity: usize, write: impl FnOnce(&mut String) -> core::fmt::Result) -> String {
+    let mut out = String::with_capacity(capacity);
+    write(&mut out).expect("writing to a String cannot fail");
+    out
+}
+
 fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Error> {
     let mut arguments = SqliteArguments::default();
+    // The argument count is already known, so the vector behind `SqliteArguments` can be
+    // sized once instead of doubling three or four times on the way to a wide statement.
+    arguments.reserve(sql.args().len(), 0);
     for value in sql.args() {
         match value {
             Value::Null => add(&mut arguments, None::<i64>)?,
@@ -98,22 +113,47 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             Value::Int(v) => add(&mut arguments, *v)?,
             Value::UInt(v) => add(&mut arguments, i64::try_from(*v).unwrap_or(i64::MAX))?,
             // A 128-bit column is declared `TEXT`, so the exact decimal digits are bound as
-            // text rather than squeezed through SQLite's signed 64-bit integer.
+            // text rather than squeezed through SQLite's signed 64-bit integer. The decimal
+            // text is the one allocation it costs, and there is no cheaper option: SQLite has
+            // no 128-bit type and the argument must own its bytes.
             Value::UInt128(v) => add(&mut arguments, v.to_string())?,
             Value::Int128(v) => add(&mut arguments, v.to_string())?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
-            Value::Uuid(v) => add(&mut arguments, *v)?,
-            Value::Date(v) => add(&mut arguments, *v)?,
-            Value::Time(v) => add(&mut arguments, *v)?,
-            Value::Timestamp(v) => add(&mut arguments, *v)?,
+            // sqlx's `Uuid` encoder copies the sixteen bytes into an owned `Vec`. Binding the
+            // same bytes as a borrowed blob writes an identical SQLite `BLOB` with no copy.
+            Value::Uuid(v) => add(&mut arguments, v.as_bytes().as_slice())?,
+            Value::Date(v) => add(&mut arguments, text(16, |out| v.format("%F").write_to(out)))?,
+            Value::Time(v) => add(
+                &mut arguments,
+                text(16, |out| v.format("%T%.f").write_to(out)),
+            )?,
+            Value::Timestamp(v) => add(
+                &mut arguments,
+                text(32, |out| v.format("%F %T%.f").write_to(out)),
+            )?,
+            // sqlx's own encoder for a zoned timestamp already sizes its `String` up front, so
+            // there is nothing to win here; the naive ones are the ones that grow from empty.
             Value::TimestampTz(v) => add(&mut arguments, *v)?,
+            // `add` takes a `&str`, and sqlx stores it as `Cow::Borrowed`, so the JSON bytes
+            // are not copied. Binding the `&[u8]` instead would cost the same and lose the
+            // column's `TEXT` affinity, which JSON functions rely on.
             Value::Json(v) => add(&mut arguments, from_utf8(v).unwrap_or("null"))?,
             _ => add(&mut arguments, None::<i64>)?,
         }
     }
     Ok(arguments)
+}
+
+/// Encode a statement's parameters exactly as the driver would, for the benchmarks.
+///
+/// This is hidden from the documentation and is not part of the supported API. The `encode`
+/// benchmark has to time [`arguments`] with no database in the way, and that function is
+/// private to this crate, so this is the one seam it gets.
+#[doc(hidden)]
+pub fn arguments_for_bench(sql: &Sql<SQLite>) -> Result<SqliteArguments<'_>, sqlx::Error> {
+    arguments(sql)
 }
 
 impl Driver for Sqlx {

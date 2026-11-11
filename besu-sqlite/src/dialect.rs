@@ -44,6 +44,13 @@ impl Dialect for SQLite {
     // SQLITE_MAX_VARIABLE_NUMBER, the default since 3.32.
     const MAX_PARAMS: usize = 32_766;
 
+    /// SQLite has `INTERSECT` and `EXCEPT` but neither `ALL` form; both operators always
+    /// remove duplicates.
+    const SUPPORTS_INTERSECT_ALL: bool = false;
+
+    /// SQLite has no `EXCEPT ALL`; see [`Self::SUPPORTS_INTERSECT_ALL`].
+    const SUPPORTS_EXCEPT_ALL: bool = false;
+
     fn bind(value: Value) -> Result<Self::Value, Error> {
         sqlite_bind(value)
     }

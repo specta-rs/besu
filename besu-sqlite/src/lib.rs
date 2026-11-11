@@ -73,6 +73,9 @@ pub use dialect::SQLite;
 pub use introspect::introspect;
 #[cfg(feature = "sqlx")]
 pub use sqlx::Sqlx;
+#[cfg(feature = "sqlx")]
+#[doc(hidden)]
+pub use sqlx::arguments_for_bench;
 
 /// A [`besu::Database`] backed by SQLite.
 #[cfg(feature = "sqlx")]
