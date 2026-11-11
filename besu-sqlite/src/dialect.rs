@@ -32,6 +32,8 @@ impl Dialect for SQLite {
     const UNBOUNDED_LIMIT: i64 = -1;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
     const SUPPORTS_ROW_LOCKING: bool = false;
+    // SQLITE_MAX_VARIABLE_NUMBER, the default since 3.32.
+    const MAX_PARAMS: usize = 32_766;
 
     fn bind(value: Value) -> Result<Self::Value, Error> {
         sqlite_bind(value)
