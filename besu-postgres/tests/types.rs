@@ -131,24 +131,15 @@ async fn every_type_round_trips() {
 async fn unsigned_big_round_trips_at_the_extremes() {
     let db = common::database().await;
 
-    // `besu::sql!` only accepts constant arguments, so the interesting values are written
-    // out rather than looped over: zero, the first value above `i64::MAX`, and `u64::MAX`.
-    let zero: Vec<(u64,)> = db.execute(sql!("SELECT 0::numeric")).all().await.unwrap();
-    assert_eq!(zero[0].0, 0);
-
-    let just_above: Vec<(u64,)> = db
-        .execute(sql!("SELECT ?::numeric", 9_223_372_036_854_775_808_u64))
-        .all()
-        .await
-        .unwrap();
-    assert_eq!(just_above[0].0, 9_223_372_036_854_775_808);
-
-    let maximum: Vec<(u64,)> = db
-        .execute(sql!("SELECT ?::numeric", 18_446_744_073_709_551_615_u64))
-        .all()
-        .await
-        .unwrap();
-    assert_eq!(maximum[0].0, u64::MAX);
+    for value in [0, 1, i64::MAX as u64 + 1, u64::MAX] {
+        eprintln!("trying {value}");
+        let rows: Vec<(u64,)> = db
+            .execute(sql!("SELECT ?::numeric", value))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows[0].0, value);
+    }
 }
 
 #[tokio::test]

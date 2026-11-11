@@ -216,19 +216,32 @@ impl<Dr: SchemaDriver> Database<Dr> {
     }
 
     /// Apply a set of migration files.
+    ///
+    /// The whole run happens inside a transaction, which gives two things at once: the
+    /// migrations are atomic, and every statement runs on the *same* connection. That second
+    /// part matters for SQLite, where a pool with several connections will happily hand two
+    /// statements of a schema change to different connections and fail in confusing ways.
     pub async fn migrate(
         &self,
         migrator: &Migrator,
     ) -> Result<Vec<AppliedMigration>, SchemaError<Dr::Error>>
     where
+        Dr: besu_core::TransactionDriver,
         i64: besu_core::Decode<Dr>,
         String: besu_core::Decode<Dr>,
     {
-        let mut executor = self;
-        migrator
-            .run(&mut executor)
-            .await
-            .map_err(SchemaError::Migration)
+        let mut tx = self.begin().await.map_err(SchemaError::Driver)?;
+        let mut executor = &mut tx;
+        match migrator.run(&mut executor).await {
+            Ok(applied) => {
+                tx.commit().await.map_err(SchemaError::Driver)?;
+                Ok(applied)
+            }
+            Err(err) => {
+                let _ = tx.rollback().await;
+                Err(SchemaError::Migration(err))
+            }
+        }
     }
 
     async fn execute_statement(&self, statement: String) -> Result<(), Dr::Error> {

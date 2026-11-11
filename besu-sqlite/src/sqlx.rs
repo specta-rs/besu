@@ -33,9 +33,15 @@ impl Sqlx {
         .await
     }
 
-    /// Open a database from a connection string such as `sqlite::memory:`.
+    /// Open a database from a connection string such as `sqlite://app.db`.
+    ///
+    /// The same sensible defaults as [`Sqlx::new`] are applied on top of whatever the URL
+    /// specifies, so a missing file is created and foreign keys are enforced.
     pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
-        let options = url.parse::<SqliteConnectOptions>()?;
+        let options = url
+            .parse::<SqliteConnectOptions>()?
+            .create_if_missing(true)
+            .foreign_keys(true);
         Self::with_options(options).await
     }
 

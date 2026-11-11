@@ -69,16 +69,20 @@ let user_id: i64 = db
     .await?;
 ```
 
-The closure is an `AsyncFnOnce(&mut Transaction<'_, Dr>) -> Result<T, Dr::Error>`. A plain
-closure returning an `async move` block works too:
+The closure is an `AsyncFnOnce(&mut Transaction<'_, Dr>) -> Result<T, Dr::Error>`. Write it as
+an async closure:
 
 ```rust
-db.transaction(|tx| async move {
+db.transaction(async |tx| {
     tx.insert(users).value(..).await?;
     Ok(())
 })
 .await?;
 ```
+
+A plain closure returning an `async move` block does not satisfy the higher-ranked lifetime
+bound: the `&mut Transaction` borrow cannot be captured that way. Use the async-closure form,
+which is what the bound was written for.
 
 The error type is the driver's error, not a Besu error, so `?` inside the closure works
 whenever the surrounding function returns that type (or boxes it).
