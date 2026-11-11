@@ -155,6 +155,31 @@ impl<'a, E: Executor, T, const SAFE: bool> Update<'a, E, T, SAFE> {
         self
     }
 
+    /// `SET` every column from a model.
+    ///
+    /// The primary key and any generated column are skipped, because rewriting them is
+    /// almost never what you want; set them by hand if you do.
+    ///
+    /// ```ignore
+    /// db.update(users)
+    ///     .set_model(&user)
+    ///     .filter(users.id.eq(user.id))
+    ///     .await?;
+    /// ```
+    pub fn set_model(mut self, model: &T::Model) -> Self
+    where
+        T: Table,
+    {
+        let values = T::model_values(model);
+        for (column, value) in T::DEF.columns.iter().zip(values) {
+            if column.primary_key || column.auto_increment {
+                continue;
+            }
+            self.query.sets.push((column.name, ExprKind::Value(value)));
+        }
+        self
+    }
+
     /// `SET column = <expression>`.
     ///
     /// Use this to compute the new value in the database, for example

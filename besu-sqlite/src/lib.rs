@@ -26,6 +26,16 @@
 //!
 //! ```compile_fail
 //! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64 }
+//! # #[derive(Table)] #[besu(table = "posts")] struct Post { pub id: i64, pub author_id: i64 }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // Both sides of a comparison are checked, not just the left one.
+//! let _ = db.select(users).filter(eq(users.id, posts.author_id));
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
 //! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64, pub age: i32 }
 //! # fn demo(db: &besu_sqlite::Database) {
 //! // `age` is an integer column, so it will never compare equal to a string.

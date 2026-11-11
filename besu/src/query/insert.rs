@@ -302,6 +302,46 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         self
     }
 
+    /// Insert many rows, splitting them across statements so no single statement exceeds the
+    /// database's parameter limit.
+    ///
+    /// Returns what each statement reported. The batches are **not** atomic — wrap the call in
+    /// [`Database::transaction`](crate::Database::transaction) if all of them must succeed or
+    /// none. A `returning` clause is not available here, because there is no single statement
+    /// to attach it to.
+    pub async fn values_chunked(
+        self,
+        values: impl IntoIterator<Item = I>,
+        rows_per_statement: usize,
+    ) -> Result<Vec<E::Output>, ErrorOf<E>> {
+        let mut exec = self.exec;
+        let mut pending: alloc::collections::VecDeque<Option<alloc::vec::Vec<Option<Value>>>> =
+            values
+                .into_iter()
+                .map(|value| Some(value.into_values()))
+                .collect();
+
+        let batch_size = rows_per_statement.max(1);
+        let mut outputs = Vec::new();
+        while !pending.is_empty() {
+            let mut query = InsertQuery::new(self.query.table);
+            query.conflict = self.query.conflict.clone();
+            for _ in 0..batch_size {
+                match pending.pop_front().flatten() {
+                    Some(row) => query.rows.push(row),
+                    None => break,
+                }
+            }
+            let sql = query
+                .build::<DialectOf<E>>()
+                .finish()
+                .map_err(<E::Driver as Driver>::error)?;
+            outputs.push(exec.execute(&sql).await?);
+        }
+
+        Ok(outputs)
+    }
+
     /// Return the inserted rows.
     ///
     /// This is a terminal operation: it changes the query's return type, which is why it

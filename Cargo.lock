@@ -109,6 +109,7 @@ dependencies = [
  "besu-schema",
  "chrono",
  "serde_json",
+ "tracing",
  "uuid",
 ]
 

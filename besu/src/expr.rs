@@ -397,7 +397,16 @@ impl<T, S: SqlType> core::fmt::Debug for Expr<T, S> {
 // ---------------------------------------------------------------------------------------
 
 /// Internal marker: the value came from a [`Column`].
-pub enum ColumnMarker {}
+///
+/// The path parameter is what proves the column's table is in the query. Because it lives in
+/// the marker rather than in a separate bound, a *literal* on the other side of a comparison
+/// simply cannot be mistaken for a column that needs checking — which is what lets both
+/// operands be checked.
+pub struct ColumnMarker<P>(PhantomData<P>);
+
+/// Internal marker: a boolean column used directly as a condition.
+pub struct ColumnCondition<P>(PhantomData<P>);
+
 /// Internal marker: the value is already an [`Expr`].
 pub enum ExprMarker {}
 /// Internal marker: the value is a plain literal.
@@ -409,21 +418,16 @@ pub enum OptionMarker {}
 ///
 /// The `M` parameter only exists to keep the implementations from overlapping; it is always
 /// inferred.
-pub trait IntoExpr<T, S: SqlType, M = ValueMarker> {
-    /// The table this expression references, or [`Literal`] if it references none.
-    ///
-    /// This is what makes "you cannot mention a table you did not join" a compile error.
-    type Table;
-
+pub trait IntoExpr<T, S: SqlType, M> {
     /// Convert into an expression.
     fn into_expr(self) -> Expr<T, S>;
 }
 
-impl<RowSet, T: Table, S: SqlType, N: Nullability> IntoExpr<RowSet, S, ColumnMarker>
+impl<RowSet, T: Table, S: SqlType, N: Nullability, P> IntoExpr<RowSet, S, ColumnMarker<P>>
     for Column<T, S, N>
+where
+    RowSet: Contains<P, T>,
 {
-    type Table = T;
-
     fn into_expr(self) -> Expr<RowSet, S> {
         Expr::from_kind(ExprKind::Column {
             table: T::DEF.name,
@@ -433,8 +437,6 @@ impl<RowSet, T: Table, S: SqlType, N: Nullability> IntoExpr<RowSet, S, ColumnMar
 }
 
 impl<T, S: SqlType> IntoExpr<T, S, ExprMarker> for Expr<T, S> {
-    type Table = Literal;
-
     fn into_expr(self) -> Expr<T, S> {
         self
     }
@@ -570,16 +572,12 @@ impl IntoSqlValue<Jsonb> for serde_json::Value {
 }
 
 impl<T, S: SqlType, V: IntoSqlValue<S>> IntoExpr<T, S, ValueMarker> for V {
-    type Table = Literal;
-
     fn into_expr(self) -> Expr<T, S> {
         Expr::from_kind(ExprKind::Value(self.into_sql_value()))
     }
 }
 
 impl<T, S: SqlType, V: IntoSqlValue<S>> IntoExpr<T, S, OptionMarker> for Option<V> {
-    type Table = Literal;
-
     fn into_expr(self) -> Expr<T, S> {
         Expr::from_kind(ExprKind::Value(match self {
             Some(value) => value.into_sql_value(),
@@ -649,9 +647,9 @@ comparisons! {
 }
 
 /// `a IS NULL`.
-pub fn is_null<RowSet, A, PA>(a: A) -> Expr<RowSet, Bool>
+pub fn is_null<RowSet, A, MA>(a: A) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS NULL",
@@ -660,9 +658,9 @@ where
 }
 
 /// `a IS NOT NULL`.
-pub fn is_not_null<RowSet, A, PA>(a: A) -> Expr<RowSet, Bool>
+pub fn is_not_null<RowSet, A, MA>(a: A) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS NOT NULL",
@@ -671,9 +669,9 @@ where
 }
 
 /// `a IS TRUE`.
-pub fn is_true<RowSet, A, PA>(a: A) -> Expr<RowSet, Bool>
+pub fn is_true<RowSet, A, MA>(a: A) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS TRUE",
@@ -682,9 +680,9 @@ where
 }
 
 /// `a IS FALSE`.
-pub fn is_false<RowSet, A, PA>(a: A) -> Expr<RowSet, Bool>
+pub fn is_false<RowSet, A, MA>(a: A) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
     Expr::from_kind(ExprKind::Postfix {
         op: "IS FALSE",
@@ -693,9 +691,9 @@ where
 }
 
 /// `a IN (values...)`.
-pub fn in_list<RowSet, A, I, V, PA>(a: A, values: I) -> Expr<RowSet, Bool>
+pub fn in_list<RowSet, A, I, V, MA>(a: A, values: I) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
     I: IntoIterator<Item = V>,
     V: Into<Value>,
 {
@@ -710,9 +708,9 @@ where
 }
 
 /// `a NOT IN (values...)`.
-pub fn not_in<RowSet, A, I, V, PA>(a: A, values: I) -> Expr<RowSet, Bool>
+pub fn not_in<RowSet, A, I, V, MA>(a: A, values: I) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
     I: IntoIterator<Item = V>,
     V: Into<Value>,
 {
@@ -727,9 +725,9 @@ where
 }
 
 /// `a BETWEEN low AND high`.
-pub fn between<RowSet, A, V, PA>(a: A, low: V, high: V) -> Expr<RowSet, Bool>
+pub fn between<RowSet, A, V, MA>(a: A, low: V, high: V) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
     V: Into<Value>,
 {
     Expr::from_kind(ExprKind::Between {
@@ -741,9 +739,9 @@ where
 }
 
 /// `a NOT BETWEEN low AND high`.
-pub fn not_between<RowSet, A, V, PA>(a: A, low: V, high: V) -> Expr<RowSet, Bool>
+pub fn not_between<RowSet, A, V, MA>(a: A, low: V, high: V) -> Expr<RowSet, Bool>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
     V: Into<Value>,
 {
     Expr::from_kind(ExprKind::Between {
@@ -773,7 +771,7 @@ impl<T> IntoCondition<T, ExprMarker> for Expr<T, Bool> {
     }
 }
 
-impl<RowSet, T: Table, N: Nullability, P> IntoCondition<RowSet, (ColumnMarker, P)>
+impl<RowSet, T: Table, N: Nullability, P> IntoCondition<RowSet, ColumnCondition<P>>
     for Column<T, Bool, N>
 where
     RowSet: Contains<P, T>,
@@ -792,7 +790,6 @@ where
     A: IntoCondition<RowSet, PA>,
     B: IntoCondition<RowSet, PB>,
 {
-    let _ = PhantomData::<(PA, PB)>;
     Expr::from_kind(ExprKind::Binary {
         op: "AND",
         left: Box::new(a.into_condition()),
@@ -806,7 +803,6 @@ where
     A: IntoCondition<RowSet, PA>,
     B: IntoCondition<RowSet, PB>,
 {
-    let _ = PhantomData::<(PA, PB)>;
     Expr::from_kind(ExprKind::Binary {
         op: "OR",
         left: Box::new(a.into_condition()),
@@ -835,20 +831,20 @@ where
 /// compiler can coerce a literal to the column it is compared against, whereas this trait
 /// fixes it. Functions like [`sum`] need the fixed form, because they choose their own
 /// result type and would otherwise have nothing to infer the argument's type from.
-pub trait TypedExpr<RowSet> {
+pub trait TypedExpr<RowSet, M> {
     /// The SQL type this expression produces.
     type SqlType: SqlType;
-
-    /// The table this expression references, or [`Literal`] if it references none.
-    type Table;
 
     /// Convert into an expression.
     fn into_typed(self) -> Expr<RowSet, Self::SqlType>;
 }
 
-impl<RowSet, T: Table, S: SqlType, N: Nullability> TypedExpr<RowSet> for Column<T, S, N> {
+impl<RowSet, T: Table, S: SqlType, N: Nullability, P> TypedExpr<RowSet, ColumnMarker<P>>
+    for Column<T, S, N>
+where
+    RowSet: Contains<P, T>,
+{
     type SqlType = S;
-    type Table = T;
 
     fn into_typed(self) -> Expr<RowSet, S> {
         Expr::from_kind(ExprKind::Column {
@@ -858,9 +854,8 @@ impl<RowSet, T: Table, S: SqlType, N: Nullability> TypedExpr<RowSet> for Column<
     }
 }
 
-impl<RowSet, S: SqlType> TypedExpr<RowSet> for Expr<RowSet, S> {
+impl<RowSet, S: SqlType> TypedExpr<RowSet, ExprMarker> for Expr<RowSet, S> {
     type SqlType = S;
-    type Table = Literal;
 
     fn into_typed(self) -> Expr<RowSet, S> {
         self
@@ -879,9 +874,9 @@ macro_rules! unary_to {
     ($( $(#[$attr:meta])* $name:ident -> $out:ty = $sql:literal ),* $(,)?) => {
         $(
             $(#[$attr])*
-            pub fn $name<RowSet, A>(value: A) -> Expr<RowSet, $out>
+            pub fn $name<RowSet, A, MA>(value: A) -> Expr<RowSet, $out>
             where
-                A: TypedExpr<RowSet>,
+                A: TypedExpr<RowSet, MA>,
             {
                 call($sql, alloc::vec![value.into_typed().into_kind()])
             }
@@ -893,9 +888,9 @@ macro_rules! unary_same {
     ($( $(#[$attr:meta])* $name:ident = $sql:literal ),* $(,)?) => {
         $(
             $(#[$attr])*
-            pub fn $name<RowSet, A>(value: A) -> Expr<RowSet, A::SqlType>
+            pub fn $name<RowSet, A, MA>(value: A) -> Expr<RowSet, A::SqlType>
             where
-                A: TypedExpr<RowSet>,
+                A: TypedExpr<RowSet, MA>,
             {
                 call($sql, alloc::vec![value.into_typed().into_kind()])
             }
@@ -921,9 +916,9 @@ unary_to! {
 /// The sum is cast to a double in the database rather than left as whatever the database
 /// decides: PostgreSQL and MySQL return `NUMERIC` for a sum of integers, which no driver can
 /// decode as `f64` without another dependency. Casting keeps the result type honest.
-pub fn sum<RowSet, A>(value: A) -> Expr<RowSet, Float8>
+pub fn sum<RowSet, A, MA>(value: A) -> Expr<RowSet, Float8>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
     cast_to_float(call::<_, Float8>(
         "SUM",
@@ -932,9 +927,9 @@ where
 }
 
 /// `AVG(expr)`, cast to a double for the same reason as [`sum`].
-pub fn avg<RowSet, A>(value: A) -> Expr<RowSet, Float8>
+pub fn avg<RowSet, A, MA>(value: A) -> Expr<RowSet, Float8>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
     cast_to_float(call::<_, Float8>(
         "AVG",
@@ -970,11 +965,10 @@ pub fn count_all<T>() -> Expr<T, Int8> {
 }
 
 /// `COUNT(DISTINCT expr)`.
-pub fn count_distinct<RowSet, A, P>(value: A) -> Expr<RowSet, Int8>
+pub fn count_distinct<RowSet, A, MA>(value: A) -> Expr<RowSet, Int8>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
 {
-    let _ = PhantomData::<P>;
     Expr::from_kind(ExprKind::Function {
         name: "COUNT",
         args: alloc::vec![value.into_typed().into_kind()],
@@ -983,10 +977,10 @@ where
 }
 
 /// `CONCAT(a, b)`.
-pub fn concat<RowSet, A, B, PA, PB>(a: A, b: B) -> Expr<RowSet, Text>
+pub fn concat<RowSet, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Text>
 where
-    A: TypedExpr<RowSet>,
-    B: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
+    B: TypedExpr<RowSet, MB>,
 {
     call(
         "CONCAT",
@@ -995,9 +989,9 @@ where
 }
 
 /// `COALESCE(a, b)`, falling back to `b` when `a` is `NULL`.
-pub fn coalesce<RowSet, A, B, MB, PA, PB>(a: A, b: B) -> Expr<RowSet, A::SqlType>
+pub fn coalesce<RowSet, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, A::SqlType>
 where
-    A: TypedExpr<RowSet>,
+    A: TypedExpr<RowSet, MA>,
     B: IntoExpr<RowSet, A::SqlType, MB>,
 {
     call(

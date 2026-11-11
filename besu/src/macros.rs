@@ -82,6 +82,12 @@ impl Fragment {
                     quote = Some(ch);
                     sql.push(ch);
                 }
+                // `??` is an escaped question mark, for operators such as PostgreSQL's
+                // `jsonb ? 'key'` that would otherwise look like a parameter.
+                '?' if chars.peek() == Some(&'?') => {
+                    chars.next();
+                    sql.push('?');
+                }
                 '?' => {
                     D::write_placeholder(&mut sql, index);
                     index += 1;
@@ -139,7 +145,12 @@ pub const fn count_placeholders(sql: &str) -> usize {
         } else if byte == b'\'' || byte == b'"' || byte == b'`' {
             quote = byte;
         } else if byte == b'?' {
-            count += 1;
+            if index + 1 < bytes.len() && bytes[index + 1] == b'?' {
+                // An escaped question mark, which binds nothing.
+                index += 1;
+            } else {
+                count += 1;
+            }
         }
         index += 1;
     }
@@ -150,8 +161,8 @@ pub const fn count_placeholders(sql: &str) -> usize {
 /// Build a [`Fragment`] from raw SQL and bound parameters.
 ///
 /// The SQL must be a string literal so the placeholder count can be checked at compile time.
-/// Every `?` outside a quoted string or a `--` comment is a parameter; there is no escape for
-/// a literal question mark.
+/// Every `?` outside a quoted string or a `--` comment is a parameter, and `??` is an escaped
+/// literal question mark — needed for operators such as PostgreSQL's `jsonb ? 'key'`.
 ///
 /// ```ignore
 /// let sql = besu::sql!(
@@ -206,6 +217,12 @@ mod tests {
         assert_eq!(count_placeholders("SELECT 1"), 0);
         assert_eq!(count_placeholders("SELECT * FROM t WHERE a = ?"), 1);
         assert_eq!(count_placeholders("a = ? AND b = ?"), 2);
+    }
+
+    #[test]
+    fn doubled_question_marks_are_literal() {
+        assert_eq!(count_placeholders("SELECT data ?? 'key'"), 0);
+        assert_eq!(count_placeholders("SELECT data ?? 'key' AND id = ?"), 1);
     }
 
     #[test]
