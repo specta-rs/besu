@@ -262,8 +262,8 @@ a form it will not accept back (backticked identifiers, backslash-escaped litera
 introspects one. `push` therefore never creates or drops a check on those drivers; write it in
 a migration. The IR and PostgreSQL rendering are the part that round-trips.
 
-A `TableDef` cannot express a check. That means a check written by hand is seen by the
-differ but is not declared by your Rust code, and `push` reports the difference as a
+A `TableDef` cannot express a check. On PostgreSQL that means a check written by hand is seen
+by the differ but is not declared by your Rust code, and `push` reports the difference as a
 `DropCheck`. Dropping a check is `Destructive`, exactly like dropping a composite `UNIQUE`, so
 `push` refuses and you either add the check to a snapshot or run `push_destructive`.
 
@@ -283,6 +283,7 @@ something it does not understand.
 | Object | Where | Why |
 | --- | --- | --- |
 | Expression indexes (`lower(email)`) | every driver | An index key is a column name in the IR; a reported index would name the wrong columns and `push` would replace it |
+| Indexes with `INCLUDE` columns | PostgreSQL | The IR has no spelling for a non-key column, so the index is skipped rather than reported as a narrower one |
 | Indexes behind a constraint | PostgreSQL | The constraint owns the index and `DROP INDEX` cannot remove it; `UNIQUE` and primary keys are modelled as constraints, and an exclusion constraint is not modelled at all |
 | Exclusion constraints | PostgreSQL | No IR type; its backing index is skipped with it |
 | Partial indexes | SQLite, MySQL | No predicate is introspected, so the index is skipped instead of reported as a full index |

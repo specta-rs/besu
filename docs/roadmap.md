@@ -5,33 +5,8 @@ would actually require. The order is a judgement about impact versus cost, not a
 
 | # | Item | Why it matters | Rough size |
 | --- | --- | --- | --- |
-| 1 | [Eager loading / relations](#eager-loading--relations) | The biggest functional gap versus an ORM | Large |
-| 2 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
-| 3 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
-| 4 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
-
-## Eager loading / relations
-
-Tracked as [#52](https://github.com/specta-rs/besu/issues/52).
-
-Today a join returns a tuple: `(User, Option<Post>)`. There is no `User::posts`, no
-`find_with_related`, and no way to load a graph without writing the join and grouping by hand.
-That is the main reason to pick SeaORM over Besu for an object-shaped application.
-
-What it would take:
-
-- A relation descriptor on the table: a `HasMany<Child>` / `BelongsTo<Parent>` value carrying
-  the local and foreign columns. `TableDef` currently has columns, indexes and foreign keys,
-  but no relation list; this would either extend it or live in a separate registry.
-- A `Decode` implementation for `Vec<T>`. Decoding is offset-based and has no notion of
-  grouping, so nested results need either a second pass that groups rows by a key or a
-  different row shape.
-- A decision about SQL shape. A join plus grouping is one statement but duplicates the parent
-  columns; a second query per relation is two statements and avoids the duplication but
-  reintroduces the N+1 question. The project rule — the query you write is the SQL that runs
-  — argues for batched, explicit second queries that are visible in the API.
-- A `with(..)` method on `Select` that returns a nested row type, plus a way to spell the
-  expected shape without a hand-written `Decode`.
+| 1 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
+| 2 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
 
 ## Custom column types
 
@@ -82,25 +57,6 @@ have. What it would take:
 Ship the same query builder to the client and execute it on the server in the meantime; that
 is the shape this half of the work was for.
 
-## Studio UI
-
-Tracked as [#62](https://github.com/specta-rs/besu/issues/62).
-
-There is no visual tool. Drizzle Studio is the model: browse tables, inspect rows, run a query
-and see the SQL.
-
-What it would take:
-
-- A server (probably axum) exposing the schema IR (already serialisable), a paged row browser
-  and a query endpoint.
-- Authentication and authorisation, because a schema browser is a database browser.
-- A frontend, or a small server-rendered UI.
-- A safety model for writes: a Studio that can run arbitrary SQL defeats the point of the
-  typed API unless it is explicitly a development tool.
-- Packaging as `besu studio`, with the same URL dispatch the CLI already has.
-
-This is deliberately last: it is useful, but it is not on the path to a dependable library.
-
 ## Smaller items
 
 These are not large enough for their own section, but they are real. Each is a tracking issue.
@@ -114,6 +70,11 @@ These are not large enough for their own section, but they are real. Each is a t
 
 Kept here so the history is visible rather than deleted:
 
+- **#52, eager loading and relations.** `has_many(parent_key, child_foreign_key)` plus
+  `Select::with` load a has-many relation with one batched second statement, and an empty
+  parent result sends no second statement at all. The parent and child columns are the whole
+  descriptor, so the schema layer is unchanged. Insert-with-relations, many-to-many and nested
+  relations stay open.
 - **#59, `u128` support.** `Value::UInt128` / `Value::Int128`, a `U128` / `I128` `SqlType`
   and derive mapping, and encode/decode in every driver. PostgreSQL and MySQL use exact
   39-digit decimals; SQLite stores the decimal digits as `TEXT`.
@@ -160,6 +121,11 @@ Kept here so the history is visible rather than deleted:
   render `to_tsvector(..) @@ plainto_tsquery(..)` on PostgreSQL, `MATCH ... AGAINST` on MySQL
   and `MATCH` on SQLite. A `tsvector` column type, declaring the index or virtual table in
   `TableDef`, a language parameter, ranking and highlighting are still open.
+- **#62, Studio UI.** `besu-studio` is a development-only server and single page: it serves
+  the introspected schema, a paged row browser and a one-statement SQL endpoint. It binds
+  loopback only unless `--allow-remote` is passed, because the query box runs arbitrary SQL
+  and there is no authentication. See
+  [The studio](architecture.md#the-studio).
 
 ## Contributing
 

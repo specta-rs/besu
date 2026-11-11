@@ -1358,7 +1358,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         fn not_ilike => "NOT ILIKE",
     }
 
-    /// Full-text match against `query`, as [`matches`](crate::expr::matches) renders it.
+    /// Full-text match against `query`, rendered per dialect; see the [`matches`](fn@matches) function.
     ///
     /// This is the method form, so the column is checked against the query's row set:
     ///

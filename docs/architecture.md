@@ -284,6 +284,39 @@ statement returns an error.
 | `besu-schema` | The IR, diffing, DDL, migrations | Query builders, drivers |
 | `besu-sqlite` / `-postgres` / `-mysql` | One database's SQL and wire protocol | The other databases |
 | `besu-cli` | URL schemes, snapshots, files | Application query code |
+| `besu-studio` | The schema IR, `AnyDatabase`, HTTP | Typed query builders, application models |
+
+## The studio
+
+`besu-studio` is the only interactive consumer of the layers above. It is a separate crate
+and binary rather than a `besu studio` subcommand because it needs axum, a runtime and a
+frontend of its own, and a database browser should not sit in the library's dependency tree.
+
+It uses only the dynamic APIs. `AnyDatabase::introspect` supplies `GET /api/schema`; the row
+endpoint matches on the backend, asks the driver for each cell as text — the driver is the
+only layer that knows how a row is laid out — projects `NULL` through `Driver::is_null`, and
+uses the introspected column type to restore numbers, booleans and JSON. The page is one
+HTML file inlined into the binary, with no build step and no CDN.
+
+### Security posture
+
+There is no authentication, and the query endpoint runs any single statement, including one
+that writes. That is deliberate for a development tool and unacceptable anywhere else, so:
+
+- the binary binds `127.0.0.1` unless `--allow-remote` is passed, and prints what that means
+  when it is;
+- a table name in the row URL is checked against the introspected schema rather than
+  interpolated into SQL, and the statement is built through `Sql`, which quotes identifiers
+  the dialect's own way;
+- the query endpoint refuses anything the migration splitter does not report as exactly one
+  statement, so a pasted script is refused rather than half-run.
+
+The statement is a `Fragment`, the same type `sql!` produces, so a bare `?` is a parameter
+placeholder and `??` is a literal question mark. There are no parameters to bind from the
+page, which is another reason the SQL box is for development only.
+
+A studio fit for anything but a development machine would need authentication, an explicit
+read-only mode and a write policy that is off by default. None of those are here.
 
 ## Gotchas
 

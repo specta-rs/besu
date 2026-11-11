@@ -355,6 +355,94 @@ case; `and(...)` works for a compound join condition.
 
 `CROSS JOIN` takes no `ON`, because it deliberately pairs every row with every row.
 
+## Eager loading with `with`
+
+A join gives you `(User, Option<Post>)` — one row per post, with the user repeated and
+`Option` to handle the user who has none. When you want each user *with* all of its posts,
+`with` loads the relation in a second, visible statement:
+
+```rust
+let users_with_posts: Vec<(User, Vec<Post>)> = db
+    .select(users)
+    .filter(users.age.gt(18))
+    .with(has_many(users.id, posts.author_id))
+    .await?;
+```
+
+Two statements run, and both are ordinary SQL you could have written yourself:
+
+```sql
+SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio", "users"."id"
+  FROM "users" WHERE ("users"."age" > $1);
+
+SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id"
+  FROM "posts" WHERE ("posts"."author_id" IN ($1, $2, $3));
+```
+
+`has_many` takes the parent's key column and the child's foreign key. They must have the same
+SQL type, which is what makes the parent keys usable as the child's `IN` list. Nothing is
+registered on the table: the relation is just the column pair. The two statements are built
+and run independently, so each numbers its own placeholders from the start.
+
+The first statement is the query as you wrote it, with the parent key appended to the
+projection. The second selects the child table's columns and then the foreign key again; the
+repetition is what the loader reads the key from, and it costs one column per child row, not a
+duplicated parent row.
+
+The keys are deduplicated before the child statement, so a hundred parents with three distinct
+keys bind three parameters, not a hundred. The child statement runs once for the whole result,
+so this is not N+1. When the parent result is empty no second statement is sent at all, because
+`IN ()` is a syntax error on some databases.
+
+Every parent is present in the result, in the parent query's order. A parent with no children
+gets an empty `Vec` rather than disappearing:
+
+```rust
+for (user, posts) in &users_with_posts {
+    println!("{} has {} posts", user.name, posts.len());
+}
+```
+
+Children arrive in the order the database returned them; this API does not add an `ORDER BY`
+of its own. Add one to the child statement by hand if the order matters.
+
+`with` composes with the rest of the builder, including `pick`:
+
+```rust
+let named: Vec<(String, Vec<Post>)> = db
+    .select(users)
+    .order_by(users.name.asc())
+    .pick(users.name)
+    .with(has_many(users.id, posts.author_id))
+    .await?;
+```
+
+`with` is only available on a plain `db.select(table)`; after a join the row set is no longer a
+single table, so there is no unambiguous parent to attach children to. Use the join and group
+the rows yourself if you need that shape.
+
+To see exactly what will run, `to_sql(keys)` renders both statements for a key list:
+
+```rust
+let (parent, child) = db
+    .select(users)
+    .with(has_many(users.id, posts.author_id))
+    .to_sql([1, 2, 3]);
+```
+
+### What is not modelled
+
+- **Inserting a parent and its children together.** The insert builder writes one table, and
+  a transaction is the explicit way to write two.
+- **Many-to-many.** It needs a join table and two column pairs, so `has_many` cannot describe
+  it.
+- **Belongs-to.** A child's parent is the same relation read from the other end; load it with
+  a `select` on the parent table, or with a join.
+- **Nested relations.** `with` returns `Vec<(R, Vec<C>)>`, not a child that itself has
+  children loaded.
+- **Per-parent limits.** `LIMIT` applies to the parent query; the child statement has no
+  `LIMIT` and no per-parent pagination.
+
 ## Grouping and aggregates
 
 `group_by` and `having` sit between filtering and ordering:
@@ -497,6 +585,7 @@ for humans, never for execution.
 | A column that does not exist (`users.missing`) | Compile error: no such field |
 | A value of the wrong type (`users.age.eq("old")`) | Compile error at the argument |
 | A table that was never joined, via a column method | Compile error: `Contains` is not satisfied |
+| A relation on a query with a join (`Select::with`) | Compile error: the row set is not a single table |
 | A projection whose type does not match the binding | Compile error at the `Vec<T>` annotation |
 | A nullable column assigned to a non-`Option` type | Compile error |
 | `ILIKE` on a dialect without it | Runtime error while building the SQL |
@@ -514,6 +603,10 @@ for humans, never for execution.
   the nullability. That is the opposite of what a hand-written `Decode` would do, so let the
   annotation follow the compiler.
 - **`pick` replaces the projection.** It does not add to the default column list.
+- **`with` selects the child foreign key twice.** The model consumes the declared columns in
+  order and the trailing copy is what the loader reads the key from, so the second statement
+  has one redundant column per child row. That is the cost of grouping any child type without
+  a hand-written decoder.
 - **A table handle does not use the model's `Decode`.** `pick(users)` is a list of columns, so
   a field marked `#[besu(skip)]` is filled with `Default::default()` exactly as it is in the
   default projection.
