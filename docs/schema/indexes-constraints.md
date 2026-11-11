@@ -113,7 +113,7 @@ schema.table_mut("events").unwrap().indexes.push(Index {
 CREATE INDEX "events_errors_idx" ON "events" ("kind") WHERE kind = 'error'
 ```
 
-SQLite introspects no predicate for a partial index, so introspection skips one; MySQL has none.
+SQLite exposes no predicate in its catalogue, so a partial index is skipped; MySQL has none.
 
 ## Foreign keys
 
