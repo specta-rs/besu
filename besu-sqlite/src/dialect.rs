@@ -31,6 +31,7 @@ impl Dialect for SQLite {
     const SUPPORTS_DEFAULT_IN_VALUES: bool = false;
     const UNBOUNDED_LIMIT: i64 = -1;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
+    const SUPPORTS_ROW_LOCKING: bool = false;
 
     fn bind(value: Value) -> Result<Self::Value, Error> {
         sqlite_bind(value)

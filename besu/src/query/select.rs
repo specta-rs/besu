@@ -87,6 +87,42 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
         self
     }
 
+    /// `FOR UPDATE`: lock the selected rows until the transaction ends.
+    pub fn for_update(mut self) -> Self {
+        self.query.lock = Some(crate::query::Lock {
+            strength: crate::query::LockStrength::Update,
+            skip_locked: false,
+            no_wait: false,
+        });
+        self
+    }
+
+    /// `FOR SHARE`: stop others writing to the selected rows until the transaction ends.
+    pub fn for_share(mut self) -> Self {
+        self.query.lock = Some(crate::query::Lock {
+            strength: crate::query::LockStrength::Share,
+            skip_locked: false,
+            no_wait: false,
+        });
+        self
+    }
+
+    /// Add `SKIP LOCKED` to the row lock, for queue-style workloads.
+    pub fn skip_locked(mut self) -> Self {
+        if let Some(lock) = &mut self.query.lock {
+            lock.skip_locked = true;
+        }
+        self
+    }
+
+    /// Add `NOWAIT` to the row lock, failing instead of waiting.
+    pub fn no_wait(mut self) -> Self {
+        if let Some(lock) = &mut self.query.lock {
+            lock.no_wait = true;
+        }
+        self
+    }
+
     /// Choose exactly what to return.
     ///
     /// The selection's type becomes the row type, so `pick((user.id, user.name))` yields

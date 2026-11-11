@@ -123,6 +123,12 @@ impl ExprKind {
             Self::Star => out.push_raw("*"),
             Self::Raw(sql) => out.push_raw(sql),
             Self::Binary { op, left, right } => {
+                if matches!(*op, "ILIKE" | "NOT ILIKE") && !D::SUPPORTS_ILIKE {
+                    out.set_error(besu_core::Error::unsupported(alloc::format!(
+                        "`{}` has no `ILIKE`; use `LIKE` with a lowercased column instead",
+                        D::NAME
+                    )));
+                }
                 out.push_raw("(");
                 left.render(out);
                 out.push_raw(" ");
