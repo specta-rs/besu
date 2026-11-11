@@ -91,6 +91,7 @@ pub struct ForeignKey {
 
 /// The action taken by a foreign key when the referenced row changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ReferenceAction {
     /// Let the database decide (usually `NO ACTION`).

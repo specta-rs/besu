@@ -20,7 +20,7 @@ pub trait Table: Copy + 'static {
     const DEF: &'static TableDef;
 
     /// The table's static metadata.
-    fn def() -> &'static TableDef {
+    fn def(&self) -> &'static TableDef {
         Self::DEF
     }
 

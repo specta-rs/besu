@@ -29,7 +29,10 @@ pub trait Ddl {
     fn type_name(&self, ty: &TypeDef) -> String;
 
     /// The full definition of a column, as it appears in `CREATE TABLE`.
-    fn column_sql(&self, column: &Column) -> String;
+    ///
+    /// `inline_pk` is true when the table has exactly one primary key column, which is when
+    /// dialects expect `PRIMARY KEY` on the column rather than in a table constraint.
+    fn column_sql(&self, column: &Column, inline_pk: bool) -> String;
 
     /// Render a literal value for use in DDL, for example a default.
     fn literal(&self, value: &Value) -> String {
@@ -51,14 +54,16 @@ pub trait Ddl {
         sql.push_str(&self.quote_table(&table.name));
         sql.push_str(" (");
 
+        let primary_key: Vec<&Column> = table.primary_key();
+        let inline_pk = primary_key.len() == 1;
+
         for (i, column) in table.columns.iter().enumerate() {
             if i != 0 {
                 sql.push_str(", ");
             }
-            sql.push_str(&self.column_sql(column));
+            sql.push_str(&self.column_sql(column, inline_pk));
         }
 
-        let primary_key: Vec<&Column> = table.primary_key();
         if primary_key.len() > 1 {
             sql.push_str(", PRIMARY KEY (");
             for (i, column) in primary_key.iter().enumerate() {
@@ -89,7 +94,7 @@ pub trait Ddl {
         format!(
             "ALTER TABLE {} ADD COLUMN {}",
             self.quote_table(table),
-            self.column_sql(column)
+            self.column_sql(column, false)
         )
     }
 
@@ -100,6 +105,15 @@ pub trait Ddl {
             self.quote_table(table),
             self.quote(column)
         )
+    }
+
+    /// Whether `ALTER TABLE ... ALTER COLUMN` is available at all.
+    ///
+    /// SQLite has no such statement: changing a column means rebuilding the table. When
+    /// this is `false`, `push` refuses to alter a column and asks for an explicit
+    /// migration instead of quietly dropping data.
+    fn can_alter_column(&self) -> bool {
+        true
     }
 
     /// Statements that migrate a column's definition.

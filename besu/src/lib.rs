@@ -70,6 +70,8 @@ mod condition;
 mod database;
 pub mod expr;
 mod macros;
+#[cfg(feature = "migrate")]
+pub mod migrate;
 pub mod prelude;
 mod query;
 mod selection;
@@ -99,6 +101,10 @@ pub use query::{Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnCo
 pub use selection::Selection;
 pub use table::{Insertable, Set, Table};
 pub use besu_core::schema::{ColumnDef, DefaultValue, ForeignKey, Index, ReferenceAction};
+#[cfg(feature = "migrate")]
+pub use besu_schema as schema;
+#[cfg(feature = "migrate")]
+pub use migrate::{PushResult, SchemaDriver, SchemaError};
 
 /// Derive a [`Table`] from a struct.
 #[cfg(feature = "derive")]

@@ -271,53 +271,7 @@ pub struct ForeignKey {
     pub on_update: ReferenceAction,
 }
 
-/// The action a foreign key takes when the referenced row changes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum ReferenceAction {
-    /// Let the database decide.
-    #[default]
-    Default,
-    /// `CASCADE`
-    Cascade,
-    /// `SET NULL`
-    SetNull,
-    /// `SET DEFAULT`
-    SetDefault,
-    /// `RESTRICT`
-    Restrict,
-    /// `NO ACTION`
-    NoAction,
-}
-
-impl From<besu_core::schema::ReferenceAction> for ReferenceAction {
-    fn from(value: besu_core::schema::ReferenceAction) -> Self {
-        use besu_core::schema::ReferenceAction as Core;
-        match value {
-            Core::Default => Self::Default,
-            Core::Cascade => Self::Cascade,
-            Core::SetNull => Self::SetNull,
-            Core::SetDefault => Self::SetDefault,
-            Core::Restrict => Self::Restrict,
-            Core::NoAction => Self::NoAction,
-            _ => Self::Default,
-        }
-    }
-}
-
-impl ReferenceAction {
-    /// Render the action as SQL, if it is not the default.
-    pub const fn as_sql(&self) -> Option<&'static str> {
-        match self {
-            Self::Default => None,
-            Self::Cascade => Some("CASCADE"),
-            Self::SetNull => Some("SET NULL"),
-            Self::SetDefault => Some("SET DEFAULT"),
-            Self::Restrict => Some("RESTRICT"),
-            Self::NoAction => Some("NO ACTION"),
-        }
-    }
-}
+pub use besu_core::schema::ReferenceAction;
 
 /// A default value, normalised to a SQL expression for comparison.
 pub type Default = Option<String>;
