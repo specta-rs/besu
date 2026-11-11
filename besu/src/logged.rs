@@ -50,6 +50,9 @@
 //! All events use the target `besu::query`, so `RUST_LOG=besu::query=debug` is enough to
 //! see them.
 //!
+//! A statement is reported whether it succeeded or failed, and its result is returned
+//! untouched: the wrapper never turns an error into a log line, or the other way around.
+//!
 //! # Timing is wall clock
 //!
 //! The measurement is the time from handing the statement to the driver to getting the
@@ -166,7 +169,7 @@ impl Policy {
         self
     }
 
-    /// Change the slow-query threshold, or remove it with `None`.
+    /// Change the slow-query threshold.
     pub const fn slow(mut self, threshold: Duration) -> Self {
         self.slow = Some(threshold);
         self

@@ -83,6 +83,12 @@ What it would take:
 
 Tracked as [#55](https://github.com/specta-rs/besu/issues/55).
 
+`#[besu(sql_type = "...")]` now names a `SqlType` directly, so a sized `VARCHAR`, an exact
+`DECIMAL` and a user-defined marker type can all be declared. What is still missing is a
+first-class decimal value type: `Decimal`'s Rust type is a `String`, which SQLite handles by
+storing text, but PostgreSQL and MySQL return `NUMERIC` and no driver decodes that into a
+string yet. Enum DDL and `CREATE TYPE` are also unwritten.
+
 `TypeDef::Custom(Cow<'static, str>)` already exists and introspection uses it for native types
 Besu does not model. The derive does not: a field type outside the built-in list is a compile
 error, so `DECIMAL`, PostgreSQL enums and domain types cannot be declared.
@@ -235,32 +241,34 @@ This is deliberately last: it is useful, but it is not on the path to a dependab
 
 These are not large enough for their own section, but they are real. Each is a tracking issue.
 
-- **[#63](https://github.com/specta-rs/besu/issues/63) — the right-hand side of a comparison
-  is not checked.** `eq(users.id, posts.author_id)` checks `users` but not `posts`; column
-  method syntax is always checked. This is the most valuable typesafety work left.
-- **[#64](https://github.com/specta-rs/besu/issues/64) — SQLite cannot alter a column in
-  place.** `push` refuses and `generate` warns; the table rebuild is unwritten.
-- **[#65](https://github.com/specta-rs/besu/issues/65) — observability.** No tracing spans,
-  query timing or slow-query hook. A `Logged<Dr>` wrapper would demonstrate the `Driver` seam.
 - **[#66](https://github.com/specta-rs/besu/issues/66) — partial and expression indexes,
   check constraints, views.** `TableDef` models plain indexes and foreign keys.
 - **[#67](https://github.com/specta-rs/besu/issues/67) — savepoints and nested
   transactions.** One level only.
 - **[#68](https://github.com/specta-rs/besu/issues/68) — down migrations.** The runner is
   append-only by design.
-- **[#69](https://github.com/specta-rs/besu/issues/69) — parameter limits for `IN` lists.**
-  `MAX_PARAMS` is checked for bulk inserts but not elsewhere.
-- **[#70](https://github.com/specta-rs/besu/issues/70) — batch insert chunking.** The error
-  message names the batch size; splitting the work is yours.
 - **[#71](https://github.com/specta-rs/besu/issues/71) — PostgreSQL composite `UNIQUE`.**
   Represented as an index, which `DROP INDEX` cannot remove.
 - **[#72](https://github.com/specta-rs/besu/issues/72) — schema-qualified tables are diffed
   by name only.**
 - **[#73](https://github.com/specta-rs/besu/issues/73) — `TimeTz`, enums and other native
-  types** come back as `TypeDef::Custom`.
-- **[#74](https://github.com/specta-rs/besu/issues/74) — a literal `?` escape** for `sql!`.
-- **[#75](https://github.com/specta-rs/besu/issues/75) — publish-ready crate metadata.**
-- **[#76](https://github.com/specta-rs/besu/issues/76) — update from model.**
+  types** come back as `TypeDef::Custom`, and a `DECIMAL` cannot decode into a `String` on
+  PostgreSQL or MySQL yet.
+
+## Recently closed
+
+Kept here so the history is visible rather than deleted:
+
+- **#63, two-sided containment.** Both operands of a comparison, every aggregate argument and
+  every helper-function argument are checked now.
+- **#64, SQLite column changes.** `push` rebuilds the table instead of refusing.
+- **#65, observability.** `besu::logged(driver)` wraps any driver with tracing, timing and a
+  slow-query warning.
+- **#69, parameter limits.** `Sql` refuses a statement that exceeds the dialect's limit.
+- **#70, batch insert chunking.** `Insert::values_chunked`.
+- **#74, a literal `?`.** `??` is an escaped question mark, for `jsonb ? 'key'`.
+- **#75, publish metadata.** Every crate has a README, keywords and categories.
+- **#76, update from model.** `Update::set_model`.
 
 ## Contributing
 

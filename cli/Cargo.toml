@@ -7,6 +7,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+categories = ["database", "command-line-utilities"]
+keywords = ["database", "cli", "migrations", "schema"]
 
 [lints]
 workspace = true

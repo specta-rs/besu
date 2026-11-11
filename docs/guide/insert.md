@@ -281,3 +281,20 @@ With `returning(users)`, the same statement ends in
   accepts an explicit value depends on the database and its sequence state.
 - **Upsert targets must match a real unique constraint.** Besu checks that the columns exist,
   not that the database has a unique index over them; a mismatch is a database error.
+
+## Bulk inserts beyond the parameter limit
+
+Every database caps how many parameters one statement may bind — 32,766 on SQLite, 65,535 on
+PostgreSQL and MySQL. `Insert` refuses a statement that would exceed it and tells you the batch
+size to use. `values_chunked` does the splitting:
+
+```rust
+let outputs = db
+    .insert(users)
+    .values_chunked(rows, 500)
+    .await?;
+```
+
+The batches are **not** atomic. Wrap the call in `db.transaction(..)` when all of them must
+succeed or none, and note that `returning` is not available in this form because there is no
+single statement to attach it to.

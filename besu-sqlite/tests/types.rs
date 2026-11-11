@@ -133,6 +133,18 @@ async fn declared_types_are_reflected_in_the_schema() {
 }
 
 #[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "prices")]
+pub struct Price {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    // `sql_type` names a `SqlType` directly, which is how a sized or exact type is declared.
+    #[besu(sql_type = "besu::Decimal<10, 2>")]
+    pub amount: String,
+    #[besu(sql_type = "besu::VarChar<64>")]
+    pub label: String,
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "events")]
 pub struct Event {
     #[besu(primary_key, auto_increment)]
@@ -178,4 +190,39 @@ async fn declared_indexes_are_created_and_converge() {
         table.column("slug").unwrap().unique,
         "a unique column must round-trip as unique"
     );
+}
+
+#[tokio::test]
+async fn explicit_sql_types_are_declared_and_converge() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let first = db.push([prices.def()]).await.unwrap();
+    // SQLite has no decimal type, and `NUMERIC` affinity would corrupt an exact value, so a
+    // decimal column is text there. The declared type is still a decimal.
+    assert!(
+        first.statements[0].contains("\"amount\" TEXT"),
+        "a decimal column must be stored as text on SQLite: {:?}",
+        first.statements
+    );
+
+    let schema = besu::Database::<Sqlx>::schema([prices.def()]);
+    let table = schema.table("prices").unwrap();
+    assert_eq!(
+        table.column("amount").unwrap().ty,
+        besu::TypeDef::Decimal(10, 2)
+    );
+    assert_eq!(
+        table.column("label").unwrap().ty,
+        besu::TypeDef::VarChar(64)
+    );
+
+    db.insert(prices)
+        .value(prices.insert("12.34", "widget"))
+        .await
+        .unwrap();
+    let stored: Vec<Price> = db.select(prices).await.unwrap();
+    assert_eq!(stored[0].amount, "12.34");
+
+    // SQLite stores both as NUMERIC/TEXT, so a second push is still a no-op.
+    let second = db.push([prices.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
 }
