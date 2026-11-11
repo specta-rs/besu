@@ -31,6 +31,27 @@ pub trait SchemaDriver: Driver {
 
     /// Read the database's current schema.
     fn introspect(&self) -> impl Future<Output = Result<Schema, Self::Error>> + Send;
+
+    /// Run a list of schema statements.
+    ///
+    /// The default runs them one at a time. A driver overrides this when the statements only
+    /// make sense together — SQLite's table rebuild toggles `PRAGMA foreign_keys`, which is a
+    /// *per-connection* setting, so every statement of a rebuild has to reach the same
+    /// connection or the `DROP TABLE` will cascade into child rows.
+    fn execute_statements(
+        &self,
+        statements: &[String],
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        async move {
+            for statement in statements {
+                let sql = Sql::<<Self as Driver>::Dialect>::raw(statement.clone())
+                    .finish()
+                    .map_err(Self::error)?;
+                self.execute(&sql).await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// What a call to [`Database::push`] did.
@@ -120,9 +141,7 @@ impl<Dr: SchemaDriver> Database<Dr> {
     ) -> Result<PushResult, Dr::Error> {
         let schema = Self::schema(tables);
         let statements = <Dr::Ddl as Ddl>::create_schema(&Dr::Ddl::default(), &schema);
-        for statement in &statements {
-            self.execute_statement(statement.clone()).await?;
-        }
+        self.driver().execute_statements(&statements).await?;
         Ok(PushResult {
             changes: Vec::new(),
             statements,
@@ -204,11 +223,10 @@ impl<Dr: SchemaDriver> Database<Dr> {
 
         let statements =
             <Dr::Ddl as Ddl>::apply_with(&Dr::Ddl::default(), &changes, &current, desired);
-        for statement in &statements {
-            self.execute_statement(statement.clone())
-                .await
-                .map_err(SchemaError::Driver)?;
-        }
+        self.driver()
+            .execute_statements(&statements)
+            .await
+            .map_err(SchemaError::Driver)?;
 
         Ok(PushResult {
             changes,
@@ -243,13 +261,6 @@ impl<Dr: SchemaDriver> Database<Dr> {
                 Err(SchemaError::Migration(err))
             }
         }
-    }
-
-    async fn execute_statement(&self, statement: String) -> Result<(), Dr::Error> {
-        let sql = Sql::<<Dr as Driver>::Dialect>::raw(statement)
-            .finish()
-            .map_err(Dr::error)?;
-        self.driver().execute(&sql).await.map(|_| ())
     }
 }
 

@@ -405,6 +405,15 @@ query layer never learns it exists. Read `besu/src/logged.rs` after `besu-sqlite
 smallest way to see what a driver actually has to provide, and the cost design (check
 `tracing::enabled!` before formatting anything) is worth copying.
 
+## `execute_statements`
+
+`SchemaDriver` has one method beyond `introspect`: `execute_statements`, which runs a list of
+schema statements. The default runs them one at a time and is right for almost every database.
+SQLite overrides it because its table rebuild toggles `PRAGMA foreign_keys`, a *per-connection*
+setting — through a pool the `DROP TABLE` would land on a connection that still enforces
+foreign keys and cascade into child rows. Override it when your statements only make sense
+together.
+
 ## Testing a new driver
 
 1. **SQL without a database.** `besu::dry::<MyDialect>()` builds every query and never

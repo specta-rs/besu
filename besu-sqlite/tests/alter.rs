@@ -7,6 +7,46 @@
 use besu::prelude::*;
 use besu_sqlite::Sqlx;
 
+mod parents_v1 {
+    use besu::Table;
+
+    #[derive(Table, Debug, Clone)]
+    #[besu(table = "parents")]
+    pub struct Parent {
+        #[besu(primary_key)]
+        pub id: i64,
+        pub name: String,
+        pub note: i32,
+    }
+}
+
+mod parents_v2 {
+    use besu::Table;
+
+    #[derive(Table, Debug, Clone)]
+    #[besu(table = "parents")]
+    pub struct Parent {
+        #[besu(primary_key)]
+        pub id: i64,
+        pub name: String,
+        /// `INTEGER` before, `TEXT` now: this is what forces the rebuild.
+        pub note: String,
+    }
+}
+
+mod children_v1 {
+    use besu::Table;
+
+    #[derive(Table, Debug, Clone)]
+    #[besu(table = "children")]
+    pub struct Child {
+        #[besu(primary_key)]
+        pub id: i64,
+        #[besu(references = "parents.id", on_delete = "cascade")]
+        pub parent_id: i64,
+    }
+}
+
 mod v1 {
     use besu::Table;
 
@@ -358,5 +398,50 @@ async fn rebuilding_a_parent_table_does_not_disturb_its_children() {
         again.is_empty(),
         "the rebuilt schema must converge, got {:?}",
         again.changes
+    );
+}
+
+#[tokio::test]
+async fn a_rebuild_keeps_its_foreign_key_toggle_on_one_connection() {
+    // A file database pools several connections, which is how the foreign-key pragma could
+    // end up applied to a different connection than the `DROP TABLE` it is meant to protect.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.db");
+    let db = besu::Database::new(Sqlx::new(&path).await.unwrap());
+
+    db.push([children_v1::children.def()]).await.unwrap();
+    db.push([children_v1::children.def(), parents_v1::parents.def()])
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "INSERT INTO parents (id, name, note) VALUES (1, 'parent', 7)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO children (id, parent_id) VALUES (1, 1)"))
+        .await
+        .unwrap();
+
+    // Change a column on the parent, which forces a rebuild of the table the child points at.
+    db.push([children_v1::children.def(), parents_v2::parents.def()])
+        .await
+        .unwrap();
+
+    let children: Vec<(i64,)> = db
+        .execute(sql!("SELECT id FROM children"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        children,
+        [(1,)],
+        "a cascading delete would have removed the child row"
+    );
+
+    // And the constraint is enforced again afterwards.
+    assert!(
+        db.execute(sql!("INSERT INTO children (id, parent_id) VALUES (2, 999)"))
+            .await
+            .is_err()
     );
 }
