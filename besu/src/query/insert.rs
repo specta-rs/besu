@@ -362,7 +362,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build())
+        Ok(self.query.build().seal())
     }
 
     fn into_parts(self) -> (E, InsertQuery) {

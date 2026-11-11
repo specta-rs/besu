@@ -1,6 +1,16 @@
-use core::future::Future;
+use core::{future::Future, pin::Pin};
+
+use futures_core::Stream;
 
 use crate::{Dialect, Error, Sql};
+
+/// A stream of rows, borrowed from the statement and the connection it was started on.
+///
+/// Streaming has to borrow rather than own: sqlx needs the SQL text to outlive the cursor, and
+/// a transaction needs to stay borrowed for as long as the cursor is open. The lifetime is why
+/// [`Sql`] is passed by reference.
+pub type RowStream<'a, D> =
+    Pin<Box<dyn Stream<Item = Result<<D as Driver>::Row, <D as Driver>::Error>> + Send + 'a>>;
 
 /// A driver implements the database execution logic for a specific database.
 ///
@@ -44,6 +54,60 @@ pub trait Driver: Clone + Send + Sync + 'static {
         &self,
         sql: &Sql<Self::Dialect>,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
+
+    /// Run a query and hand back its rows as they arrive.
+    ///
+    /// The default collects through [`Driver::query`], which keeps a hand-written driver
+    /// simple; a driver that can genuinely stream should override it. Every shipped driver
+    /// does.
+    fn query_stream<'a>(
+        &'a self,
+        sql: &'a Sql<Self::Dialect>,
+    ) -> impl Future<Output = Result<RowStream<'a, Self>, Self::Error>> + Send {
+        async move {
+            let rows = self
+                .query(sql)
+                .await?
+                .into_iter()
+                .map(Ok)
+                .collect::<Vec<_>>();
+            Ok(Box::pin(futures_stream::iter(rows)) as RowStream<'a, Self>)
+        }
+    }
+}
+
+/// The smallest possible `Stream` over a `Vec`, so the default [`Driver::query_stream`] does
+/// not need a dependency on `futures-util`.
+///
+/// This is public because a driver that cannot genuinely stream — and a test fake — needs
+/// exactly this.
+pub mod futures_stream {
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+
+    use futures_core::Stream;
+
+    /// A `Stream` over the items of a `Vec`.
+    pub struct Iter<T> {
+        items: std::vec::IntoIter<T>,
+    }
+
+    /// Build the stream.
+    pub fn iter<T>(items: Vec<T>) -> Iter<T> {
+        Iter {
+            items: items.into_iter(),
+        }
+    }
+
+    impl<T> Unpin for Iter<T> {}
+
+    impl<T> Stream for Iter<T> {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<T>> {
+            Poll::Ready(self.get_mut().items.next())
+        }
+    }
 }
 
 /// A driver that can run queries inside a transaction.
@@ -83,4 +147,10 @@ pub trait TransactionDriver: Driver {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Self::Dialect>,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
+
+    /// Run a query inside a transaction and stream its rows.
+    fn txn_query_stream<'c, 'a>(
+        tx: &'c mut Self::Transaction<'a>,
+        sql: &'c Sql<Self::Dialect>,
+    ) -> impl Future<Output = Result<RowStream<'c, Self>, Self::Error>> + Send;
 }

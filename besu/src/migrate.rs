@@ -262,6 +262,63 @@ impl<Dr: SchemaDriver> Database<Dr> {
             }
         }
     }
+
+    /// Revert applied migrations until the newest one is at most `to`.
+    ///
+    /// `to = 0` reverts everything. Like [`Database::migrate`], the whole run happens inside a
+    /// transaction, which makes it atomic and keeps every statement of a schema change on one
+    /// connection. The reverted migrations are returned newest first.
+    pub async fn migrate_down(
+        &self,
+        migrator: &Migrator,
+        to: i64,
+    ) -> Result<Vec<AppliedMigration>, SchemaError<Dr::Error>>
+    where
+        Dr: besu_core::TransactionDriver,
+        i64: besu_core::Decode<Dr>,
+        String: besu_core::Decode<Dr>,
+    {
+        let mut tx = self.begin().await.map_err(SchemaError::Driver)?;
+        let mut executor = &mut tx;
+        match migrator.down_to(&mut executor, to).await {
+            Ok(reverted) => {
+                tx.commit().await.map_err(SchemaError::Driver)?;
+                Ok(reverted)
+            }
+            Err(err) => {
+                let _ = tx.rollback().await;
+                Err(SchemaError::Migration(err))
+            }
+        }
+    }
+
+    /// Revert only the most recently applied migration.
+    ///
+    /// Returns the reverted migration, or `None` when nothing has been applied. This is
+    /// [`Database::migrate_down`] with a target that is one version back, and it exists
+    /// separately because only the journal knows what "one back" is.
+    pub async fn migrate_down_one(
+        &self,
+        migrator: &Migrator,
+    ) -> Result<Option<AppliedMigration>, SchemaError<Dr::Error>>
+    where
+        Dr: besu_core::TransactionDriver,
+        i64: besu_core::Decode<Dr>,
+        String: besu_core::Decode<Dr>,
+    {
+        let mut tx = self.begin().await.map_err(SchemaError::Driver)?;
+        let mut executor = &mut tx;
+        match migrator.down_one(&mut executor).await {
+            Ok(reverted) => {
+                tx.commit().await.map_err(SchemaError::Driver)?;
+                Ok(reverted)
+            }
+            Err(err) => {
+                let _ = tx.rollback().await;
+                Err(SchemaError::Migration(err))
+            }
+        }
+    }
 }
 
 #[allow(unused)]

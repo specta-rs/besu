@@ -135,6 +135,7 @@ name = "besu-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-core",
  "serde",
  "serde_json",
  "uuid",

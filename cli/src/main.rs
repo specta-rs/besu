@@ -10,6 +10,7 @@
 //! besu push     --database postgres://… --schema schema.json
 //! besu generate --database postgres://… --schema schema.json --out migrations
 //! besu migrate  --database postgres://… --dir migrations
+//! besu migrate  --database postgres://… --dir migrations --down --to 0
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -36,7 +37,7 @@ enum Command {
     Push(push::Args),
     /// Turn the difference between a snapshot and the database into migration files.
     Generate(generate::Args),
-    /// Apply migration files.
+    /// Apply migration files, or revert them with `--down`.
     Migrate(migrate::Args),
 }
 

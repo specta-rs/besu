@@ -213,6 +213,68 @@ database. `IntoFuture` boxes a future with a `Send` bound when the executor is `
 is what lets queries run on a multi-threaded runtime. `Driver` is `Send + Sync + 'static`, so
 a pool can be cloned into as many tasks as you like.
 
+## Compiling for wasm32
+
+The query builder compiles and runs on `wasm32-unknown-unknown`. A web front end can build
+the same typed query the server would build and render the exact SQL it will send. Nothing
+in that path needs a socket, a filesystem, an async runtime or a clock: it is `alloc` and
+arithmetic. The intended use is generating SQL on the client for a server to execute.
+
+```toml
+[dependencies]
+# The builder, the derive and the SQL: all of it is at home in a browser.
+besu = { version = "0.1", default-features = false, features = ["derive"] }
+# The dialect and DDL only. The default features are `sqlx` and `runtime-tokio`.
+besu-postgres = { version = "0.1", default-features = false }
+```
+
+```rust
+// On the client.
+let db = besu::dry::<besu_postgres::Postgres>();
+let sql = db
+    .select(users)
+    .filter(users.age.gt(18))
+    .limit(50)
+    .to_sql()?;
+
+// POST `sql.sql()` and `sql.args()` to the server, which runs the same builder with a
+// real database behind it and lets the driver do the actual work.
+```
+
+| Crate | On `wasm32-unknown-unknown` |
+| --- | --- |
+| `besu-core` | Works. It is `no_std`-shaped apart from the `std::error::Error` impl on `Error`, and `std` does exist on this target. `chrono`, `uuid` and `serde_json` are values, not services. |
+| `besu` | Works with every feature, including `derive`, `migrate` and `tracing`. Building, rendering, `sql!` and the schema IR never reach for the operating system. |
+| `besu-sqlite` / `-postgres` / `-mysql` with `default-features = false` | Works: the dialect and the DDL, which is what a client needs to spell `?`, `$1` and identifiers correctly. |
+| Any driver feature (`sqlx`, `runtime-tokio`) | Does not build. sqlx reaches tokio, tokio reaches mio, and mio needs a socket API that this target does not have. |
+| Running a query, `push`, `introspect`, `Migrator` | Do not run. Every one of them needs a `SchemaDriver` or a `Driver`, which means a connection. `Database` itself is fine to hold; it just has nothing to talk to. |
+
+The boundary is enforced, not assumed: the `wasm` CI job checks `besu-core` and `besu` for
+this target and `besu/tests/dry.rs` asserts the rendered SQL on every platform. There is no
+`wasm` feature flag, because nothing in the builder needed one; a feature nobody has to
+enable cannot silently rot.
+
+### What still traps
+
+`std` compiles for this target, but parts of it do not work, and the failure is a trap at
+run time rather than an error at build time:
+
+- `std::time::Instant::now()` panics. The `tracing` feature compiles, but `besu::logged(..)`
+  reads the clock once a subscriber has the `besu::query` target enabled, so the wrapper
+  traps in a browser exactly when logging is switched on. With no subscriber it never touches
+  the clock.
+- `chrono::Utc::now()` panics as well, unless `chrono/wasmbind` is enabled (which pulls in
+  `wasm-bindgen` and its loader). Besu never reads the clock: `now()` in an expression writes
+  the SQL `CURRENT_TIMESTAMP` and the database evaluates it, and a timestamp that came from
+  JavaScript is just a `Value::TimestampTz`.
+- `Send + Sync` bounds still compile. A wasm module is single-threaded, so the bounds are
+  vacuous on this target, not wrong.
+
+Decoding is the other half of the boundary: `Decode` is implemented *by each driver*, because
+pulling a value out of a row is database-specific. A browser has no rows and no `Decode`, which
+is exactly why `dry::<D>()` is the honest executor there: it renders, and attempting to run the
+statement returns an error.
+
 ## What each layer is allowed to know
 
 | Layer | Knows about | Must not know about |

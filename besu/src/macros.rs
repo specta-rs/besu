@@ -106,7 +106,7 @@ impl Fragment {
                 self.args.len()
             )));
         }
-        out
+        out.seal()
     }
 }
 

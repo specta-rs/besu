@@ -8,21 +8,14 @@ use crate::SQLite;
 pub struct SQLiteDdl;
 
 impl SQLiteDdl {
-    /// `CREATE TABLE` for `table`, written under `name` instead of the table's own name.
-    ///
-    /// The table rebuild is the only caller: it creates the desired table under a temporary
-    /// name, then renames it once the old table is gone.
-    fn create_table_as(&self, table: &Table, name: &str) -> String {
-        let mut temporary = table.clone();
-        temporary.name = name.to_owned();
-        self.create_table(&temporary)
-    }
-
     /// The standard SQLite table rebuild: create the desired table under a temporary name,
     /// copy the rows across, drop the old table, rename the new one into place, then
     /// recreate the indexes.
     fn rebuild_table(&self, current: &Table, desired: &Table) -> Vec<String> {
-        let temporary = format!("{}__besu_tmp", desired.name);
+        // The temporary table keeps the schema, so a table in an attached database is
+        // rebuilt there rather than in the main one.
+        let mut temporary = desired.clone();
+        temporary.name = format!("{}__besu_tmp", desired.name);
 
         let mut statements = vec![
             // `DROP TABLE` would fail while another table's foreign key points at this
@@ -31,7 +24,7 @@ impl SQLiteDdl {
             // pragma inside a transaction, and `Database::push` executes statements one at
             // a time without opening one, so the setting takes effect.
             "PRAGMA foreign_keys = OFF".to_owned(),
-            self.create_table_as(desired, &temporary),
+            self.create_table(&temporary),
         ];
 
         // Only the columns present in both definitions are copied. A dropped column is
@@ -53,24 +46,26 @@ impl SQLiteDdl {
             let columns = columns.join(", ");
             statements.push(format!(
                 "INSERT INTO {} ({columns}) SELECT {columns} FROM {}",
-                self.quote_table(&temporary),
-                self.quote_table(&desired.name),
+                self.quote_table(&temporary.qualified_name()),
+                self.quote_table(&desired.qualified_name()),
             ));
         }
 
-        statements.push(self.drop_table(&desired.name));
+        statements.push(self.drop_table(&desired.qualified_name()));
         // `PRAGMA legacy_alter_table` is not needed: the old table is gone before this
-        // rename, so there are no references to the temporary name to rewrite.
+        // rename, so there are no references to the temporary name to rewrite. The new name
+        // cannot be schema-qualified; the table stays where it already is.
         statements.push(format!(
             "ALTER TABLE {} RENAME TO {}",
-            self.quote_table(&temporary),
+            self.quote_table(&temporary.qualified_name()),
             self.quote(&desired.name),
         ));
 
-        // `DROP TABLE` took the old indexes with it. Unique column constraints are inline
-        // in `CREATE TABLE`; the secondary ones have to be recreated here.
+        // `DROP TABLE` took the old indexes with it. Unique column constraints and
+        // multi-column uniques are inline in `CREATE TABLE`; the secondary ones have to be
+        // recreated here.
         for index in &desired.indexes {
-            statements.push(self.create_index(&desired.name, index));
+            statements.push(self.create_index(&desired.qualified_name(), index));
         }
 
         statements.push("PRAGMA foreign_keys = ON".to_owned());
@@ -160,25 +155,29 @@ impl Ddl for SQLiteDdl {
         // definition, so every other change for that table is skipped: the rebuild already
         // creates the desired columns, inline constraints, foreign keys and indexes, and a
         // later `ADD COLUMN`, `ADD INDEX` or `DROP INDEX` would fail or apply twice.
-        let altered: Vec<&str> = changes
+        let altered: Vec<String> = changes
             .iter()
             .filter_map(|change| match change {
-                Change::AlterColumn { table, .. } => Some(table.as_str()),
+                Change::AlterColumn { table, .. } => Some(table.clone()),
                 _ => None,
             })
             .collect();
 
-        let mut rebuilt: Vec<&str> = Vec::new();
+        let mut rebuilt: Vec<String> = Vec::new();
         let mut statements = Vec::new();
 
         for change in changes {
-            let table = change.table();
+            // Enum changes carry no table and render as nothing on SQLite.
+            let Some(table) = change.table() else {
+                statements.extend(self.change(change));
+                continue;
+            };
             if altered.contains(&table) {
                 if rebuilt.contains(&table) {
                     continue;
                 }
                 // A diff only emits `AlterColumn` for a table that exists on both sides.
-                if let (Some(from), Some(to)) = (current.table(table), desired.table(table)) {
+                if let (Some(from), Some(to)) = (current.get(&table), desired.get(&table)) {
                     rebuilt.push(table);
                     statements.extend(self.rebuild_table(from, to));
                 }
@@ -203,11 +202,71 @@ impl Ddl for SQLiteDdl {
         String::new()
     }
 
+    fn add_unique(&self, _table: &str, _unique: &besu_schema::Unique) -> String {
+        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`; a unique constraint can only be
+        // written inside `CREATE TABLE`. Adding one to an existing table therefore means
+        // rebuilding it, which `push` does not do for this change.
+        String::new()
+    }
+
+    fn drop_unique(&self, _table: &str, _unique: &besu_schema::Unique) -> String {
+        // See `add_unique`. Dropping the constraint would need the same rebuild.
+        String::new()
+    }
+
     fn literal(&self, value: &Value) -> String {
         match value {
             Value::Null => "NULL".into(),
             Value::Bool(v) => if *v { "1" } else { "0" }.into(),
             other => Ddl::literal(self, other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use besu_schema::Unique;
+
+    fn table() -> Table {
+        Table {
+            name: "memberships".into(),
+            schema: None,
+            columns: vec![Column {
+                name: "user_id".into(),
+                ty: TypeDef::Int8,
+                nullable: false,
+                auto_increment: false,
+                primary_key: false,
+                unique: false,
+                default: None,
+                comment: None,
+                renamed_from: None,
+            }],
+            indexes: Vec::new(),
+            uniques: vec![Unique {
+                name: "memberships_user_key".into(),
+                columns: vec!["user_id".into()],
+            }],
+            foreign_keys: Vec::new(),
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn a_unique_is_written_inside_create_table() {
+        assert_eq!(
+            SQLiteDdl.create_table(&table()),
+            r#"CREATE TABLE "memberships" ("user_id" INTEGER NOT NULL, CONSTRAINT "memberships_user_key" UNIQUE ("user_id"))"#
+        );
+    }
+
+    #[test]
+    fn a_unique_cannot_be_added_or_dropped_after_the_fact() {
+        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so the change renders as nothing
+        // and only a table rebuild can apply it.
+        let unique = &table().uniques[0];
+        assert!(SQLiteDdl.add_unique("memberships", unique).is_empty());
+        assert!(SQLiteDdl.drop_unique("memberships", unique).is_empty());
     }
 }

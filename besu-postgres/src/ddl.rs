@@ -1,5 +1,5 @@
 use besu_core::{Dialect, TypeDef};
-use besu_schema::{Column, Ddl, ForeignKey, Index};
+use besu_schema::{Column, Ddl, Enum, ForeignKey, Index};
 
 use crate::Postgres;
 
@@ -133,8 +133,17 @@ impl Ddl for PostgresDdl {
         statements
     }
 
-    fn drop_index(&self, _table: &str, index: &Index) -> String {
-        format!("DROP INDEX {}", self.quote(&index.name))
+    fn drop_index(&self, table: &str, index: &Index) -> String {
+        // An index belongs to the table's schema, so an unqualified `DROP INDEX` names the
+        // wrong one whenever the table is not in the current schema.
+        match table.split_once('.') {
+            Some((schema, _)) => format!(
+                "DROP INDEX {}.{}",
+                self.quote(schema),
+                self.quote(&index.name)
+            ),
+            None => format!("DROP INDEX {}", self.quote(&index.name)),
+        }
     }
 
     fn drop_foreign_key(&self, table: &str, fk: &ForeignKey) -> String {
@@ -143,5 +152,37 @@ impl Ddl for PostgresDdl {
             self.quote_table(table),
             self.quote(&fk.name)
         )
+    }
+
+    /// `CREATE TYPE ... AS ENUM (...)`.
+    fn create_enum(&self, e: &Enum) -> Vec<String> {
+        let values: Vec<String> = e
+            .values
+            .iter()
+            .map(|value| format!("'{}'", value.replace('\'', "''")))
+            .collect();
+        vec![format!(
+            "CREATE TYPE {} AS ENUM ({})",
+            self.quote_table(&e.name),
+            values.join(", ")
+        )]
+    }
+
+    /// `DROP TYPE`.
+    fn drop_enum(&self, name: &str) -> Vec<String> {
+        vec![format!("DROP TYPE {}", self.quote_table(name))]
+    }
+
+    /// `ALTER TYPE ... ADD VALUE`.
+    ///
+    /// Before PostgreSQL 12 this cannot run inside a transaction block. `push` executes
+    /// statements one at a time, so it works there; a migration file that wraps several
+    /// statements in a transaction may need `ALTER TYPE` in its own migration.
+    fn add_enum_value(&self, name: &str, value: &str) -> Vec<String> {
+        vec![format!(
+            "ALTER TYPE {} ADD VALUE '{}'",
+            self.quote_table(name),
+            value.replace('\'', "''")
+        )]
     }
 }

@@ -43,9 +43,10 @@ pub mod value;
 
 pub use decode::Decode;
 pub use dialect::{Dialect, JsonPathStyle, Placeholder, UpsertStyle};
-pub use driver::{Driver, TransactionDriver};
+pub use driver::{Driver, RowStream, TransactionDriver, futures_stream};
 pub use error::Error;
 pub use executor::{DialectOf, Dry, DryDriver, DryRow, ErrorOf, Executor, RowOf};
+pub use futures_core::Stream;
 pub use schema::{ColumnDef, DefaultValue, ForeignKey, Index, TableDef};
 pub use sql::{Rendered, Sql};
 pub use types::TypeDef;

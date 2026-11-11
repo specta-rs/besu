@@ -1,5 +1,5 @@
 use besu_core::{TypeDef, schema::ReferenceAction};
-use besu_schema::{Column, ForeignKey, Index, Schema, Table};
+use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique};
 
 use crate::Sqlx;
 
@@ -110,6 +110,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
             )
             .collect(),
         indexes: Vec::new(),
+        uniques: Vec::new(),
         foreign_keys: Vec::new(),
         comment: None,
     };
@@ -164,6 +165,17 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
                 .iter()
                 .any(|fk| fk.columns == index.columns)
         {
+            continue;
+        }
+
+        // MySQL has no constraint distinct from the unique key that enforces it, so a
+        // multi-column unique key is the table's `Unique`. It is dropped with
+        // `DROP CONSTRAINT` (8.0.19+) or `DROP INDEX`, both of which name that key.
+        if index.unique && index.columns.len() > 1 {
+            table.uniques.push(Unique {
+                name: index.name,
+                columns: index.columns,
+            });
             continue;
         }
 

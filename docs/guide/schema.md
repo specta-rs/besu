@@ -9,7 +9,7 @@ a live database.
 use besu::prelude::*;
 
 #[derive(Table)]
-#[besu(table = "users", schema = "public")]
+#[besu(table = "users")]
 pub struct User {
     #[besu(primary_key, auto_increment)]
     pub id: i64,
@@ -78,7 +78,7 @@ The field's Rust type must be the `Rust` type of the named `SqlType` — `String
 
 One caveat: SQLite has no decimal type, and `NUMERIC` affinity would round an exact value, so
 a `Decimal` column is declared `TEXT` there. On PostgreSQL and MySQL it is `NUMERIC`/`DECIMAL`,
-but decoding one into a `String` is not implemented yet — see #73.
+but decoding one into a `String` is not implemented yet.
 
 ## Struct-level attributes
 
@@ -152,8 +152,28 @@ pub email: String,
 ```
 
 There is no attribute for a composite index. A `TableDef` is a plain public struct, so a
-hand-written definition can declare one, and raw SQL always works. Composite uniqueness has
-the same limitation: only a single column can be marked `unique` by the derive.
+hand-written definition can declare one, and raw SQL always works. Composite uniqueness works
+the same way: only a single column can be marked `unique` by the derive, while a
+`besu_schema::Unique` (name plus columns) covers the rest and is rendered as
+`CONSTRAINT ... UNIQUE (...)`.
+
+A database that already has a composite `UNIQUE` reports it as a `Unique`, not an index.
+That distinction matters: PostgreSQL owns the index that backs the constraint, so
+`DROP INDEX` fails on it and only `ALTER TABLE ... DROP CONSTRAINT` removes it.
+
+### Enums
+
+Only PostgreSQL has named enum types that exist outside a column. They are introspected into
+`Schema::enums` and diffed (`CREATE TYPE`, `DROP TYPE`, `ALTER TYPE ... ADD VALUE`), but the
+derive has no attribute for declaring one: a column declared over an enum arrives as
+`TypeDef::Custom("mood")`, which is the type name verbatim. Give the type a spelling with
+`sql_type` and a custom `SqlType` marker if the model has to read and write it, or use a
+snapshot (`besu pull` / `besu push --schema`) as the source of truth for the type list.
+
+MySQL's inline `ENUM(...)` and `SET(...)` stay `Custom`: they belong to a column, not to the
+schema, and `Schema::enums` is empty there. `TimeTz` is modelled for PostgreSQL's `TIMETZ`;
+no driver decodes it (sqlx's only TIMETZ type is its own `PgTimeTz` struct), so a column of
+that type can be created and introspected but not read into a Rust value.
 
 ### Foreign keys
 
@@ -162,8 +182,9 @@ the same limitation: only a single column can be marked `unique` by the derive.
 pub author_id: i64,
 ```
 
-`references` must be exactly `"table.column"`; a missing dot is a compile error. The generated
-constraint is named `{table}_{column}_fkey`. Accepted actions are:
+`references` must be `"table.column"`, or `"schema.table.column"` for a table in another
+schema; a missing dot is a compile error. The generated constraint is named
+`{table}_{column}_fkey`. Accepted actions are:
 
 | Spelling | `ReferenceAction` |
 | --- | --- |
@@ -222,6 +243,7 @@ reference type, not a path, and is rejected; use `String`.
 | `uuid::Uuid` | `Uuid` | `Uuid` | `BLOB` | `UUID` | `BINARY(16)` |
 | `chrono::NaiveDate` | `Date` | `Date` | `TEXT` | `DATE` | `DATE` |
 | `chrono::NaiveTime` | `Time` | `Time` | `TEXT` | `TIME` | `TIME` |
+| — (no Rust type) | — | `TimeTz` | `TIME` | `TIMETZ` | `TIME` |
 | `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `TEXT` | `TIMESTAMP` | `DATETIME(6)` |
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TEXT` | `TIMESTAMPTZ` | `DATETIME(6)` |
 | `serde_json::Value` | `Json` | `Json` | `TEXT` | `JSON` | `JSON` |
@@ -281,9 +303,12 @@ helpers for filtering on it.
 - Because the type mapping looks at the last path segment, a type alias or a same-named type
   from another crate can be mapped to the wrong SQL type. `time::Date` is not
   `chrono::NaiveDate`, but both end in `Date`.
-- `#[besu(schema = "...")]` is stored and used to qualify table names. On SQLite a schema is
-  an attached database, so only set it if you have attached one; MySQL treats it as a
-  database name.
+- `#[besu(schema = "...")]` is stored and used to qualify table names, and it is part of the
+  table's identity: `app.users` and `users` are two tables. Leave it off for the database's
+  default schema — PostgreSQL reports the current schema as unqualified, so naming it
+  explicitly makes the declared table look like a different one. Besu never runs
+  `CREATE SCHEMA`, so the schema has to exist. On SQLite a schema is an attached database, so
+  only set it if you have attached one; MySQL treats it as a database name.
 - `auto_increment` is normally paired with `primary_key`. The derive does not enforce the
   pairing, and some databases reject an auto-increment column that is not a key.
 - A generated index or foreign key name can collide with one you created by hand. The naming

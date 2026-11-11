@@ -2,68 +2,143 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
-use besu_schema::{Column, ForeignKey, Index, Schema, Table};
+use besu_schema::{Column, Enum, ForeignKey, Index, Schema, Table, Unique};
 
 use crate::Sqlx;
 
 /// Read the database's schema from PostgreSQL's own catalogue.
 ///
-/// Only base tables in the connection's current schema are reported, and Besu's own
+/// Every base table outside PostgreSQL's system schemas is reported. A table in the
+/// connection's `current_schema()` is reported unqualified (`schema: None`); a table
+/// anywhere else carries its schema, because its identity is `(schema, name)`. Besu's own
 /// `_besu_migrations` bookkeeping table is skipped.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
+    let current = current_schema(db).await?;
+
     let names = db
         .execute(besu::sql!(
-            "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = current_schema() \
+            "SELECT table_schema, table_name FROM information_schema.tables \
+             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+               AND table_schema NOT LIKE 'pg_toast%' \
+               AND table_schema NOT LIKE 'pg_temp%' \
                AND table_type = 'BASE TABLE' \
                AND table_name <> '_besu_migrations' \
-             ORDER BY table_name"
+             ORDER BY table_schema, table_name"
         ))
-        .all::<String>()
+        .all::<(String, String)>()
         .await?;
 
     let mut tables: BTreeMap<String, Table> = names
         .into_iter()
-        .map(|name| {
+        .map(|(schema, name)| {
+            let key = qualified(&schema, &name, current.as_deref());
             let table = Table {
-                name: name.clone(),
-                // Besu only ever looks at the current schema, so it is the implicit one.
-                schema: None,
+                name,
+                // The default schema is implicit: naming it would make every declared
+                // table, which leaves `schema` unset, look like a different table.
+                schema: (Some(schema.as_str()) != current.as_deref()).then_some(schema),
                 columns: Vec::new(),
                 indexes: Vec::new(),
+                uniques: Vec::new(),
                 foreign_keys: Vec::new(),
                 comment: None,
             };
-            (name, table)
+            (key, table)
         })
         .collect();
 
-    introspect_columns(db, &mut tables).await?;
-    let constraints = introspect_constraints(db, &mut tables).await?;
-    introspect_indexes(db, &mut tables, &constraints).await?;
-    introspect_foreign_keys(db, &mut tables).await?;
+    introspect_columns(db, &mut tables, current.as_deref()).await?;
+    let constraints = introspect_constraints(db, &mut tables, current.as_deref()).await?;
+    introspect_indexes(db, &mut tables, &constraints, current.as_deref()).await?;
+    introspect_foreign_keys(db, &mut tables, current.as_deref()).await?;
 
     let mut schema = Schema::new();
     schema.tables = tables.into_values().collect();
+    schema.enums = introspect_enums(db, current.as_deref()).await?;
     schema.sort();
     Ok(schema)
+}
+
+/// Qualify a name with its schema, unless that schema is the connection's default.
+///
+/// Everything the IR names — tables, enum types, the types columns are declared with — uses
+/// the same rule, so `(schema, name)` is the identity and the default schema stays implicit.
+fn qualified(schema: &str, name: &str, current: Option<&str>) -> String {
+    if Some(schema) == current {
+        name.to_owned()
+    } else {
+        format!("{schema}.{name}")
+    }
+}
+
+/// The schema unqualified names resolve to, or `None` when `search_path` is empty.
+async fn current_schema(db: &besu::Database<Sqlx>) -> Result<Option<String>, sqlx::Error> {
+    Ok(db
+        .execute(besu::sql!("SELECT current_schema()"))
+        .all::<Option<String>>()
+        .await?
+        .into_iter()
+        .next()
+        .flatten())
+}
+
+/// Read every named enum type into [`Schema::enums`].
+///
+/// Enum order matters in PostgreSQL — it is the order values compare in — so the values are
+/// collected by `enumsortorder`. An enum outside the default schema is named
+/// `schema.type`, the same way a table elsewhere is qualified, so two schemas can each
+/// define a `mood` without being confused for each other.
+async fn introspect_enums(
+    db: &besu::Database<Sqlx>,
+    current: Option<&str>,
+) -> Result<Vec<Enum>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT n.nspname, t.typname, e.enumlabel \
+             FROM pg_type t \
+             JOIN pg_enum e ON e.enumtypid = t.oid \
+             JOIN pg_namespace n ON n.oid = t.typnamespace \
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+             ORDER BY n.nspname, t.typname, e.enumsortorder"
+        ))
+        .all::<(String, String, String)>()
+        .await?;
+
+    let mut enums: Vec<Enum> = Vec::new();
+    for (schema, name, value) in rows {
+        let name = qualified(&schema, &name, current);
+        match enums.iter_mut().find(|e| e.name == name) {
+            Some(existing) => existing.values.push(value),
+            None => enums.push(Enum {
+                name,
+                values: vec![value],
+            }),
+        }
+    }
+
+    Ok(enums)
 }
 
 async fn introspect_columns(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
+    current: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     #[allow(clippy::type_complexity)]
     let rows = db
         .execute(besu::sql!(
-            "SELECT table_name, column_name, data_type, udt_name, is_nullable, \
-                    column_default, is_identity, character_maximum_length, \
+            "SELECT table_schema, table_name, column_name, data_type, udt_schema, udt_name, \
+                    is_nullable, column_default, is_identity, character_maximum_length, \
                     numeric_precision, numeric_scale \
              FROM information_schema.columns \
-             WHERE table_schema = current_schema() \
-             ORDER BY table_name, ordinal_position"
+             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+               AND table_schema NOT LIKE 'pg_toast%' \
+             ORDER BY table_schema, table_name, ordinal_position"
         ))
         .all::<(
+            String,
+            String,
             String,
             String,
             String,
@@ -78,9 +153,11 @@ async fn introspect_columns(
         .await?;
 
     for (
+        schema,
         table_name,
         name,
         data_type,
+        udt_schema,
         udt_name,
         is_nullable,
         default,
@@ -90,7 +167,7 @@ async fn introspect_columns(
         numeric_scale,
     ) in rows
     {
-        let Some(table) = tables.get_mut(&table_name) else {
+        let Some(table) = tables.get_mut(&qualified(&schema, &table_name, current)) else {
             continue;
         };
 
@@ -103,13 +180,24 @@ async fn introspect_columns(
 
         table.columns.push(Column {
             name,
-            ty: parse_type(
-                &data_type,
-                &udt_name,
-                character_length,
-                numeric_precision,
-                numeric_scale,
-            ),
+            ty: {
+                let ty = parse_type(
+                    &data_type,
+                    &udt_name,
+                    character_length,
+                    numeric_precision,
+                    numeric_scale,
+                );
+                // An enum, domain or composite type that lives in another schema has to be
+                // named with that schema: an unqualified name would be resolved through
+                // `search_path` and could reach the wrong type.
+                match ty {
+                    TypeDef::Custom(name) if data_type == "USER-DEFINED" => {
+                        TypeDef::Custom(qualified(&udt_schema, name.as_ref(), current).into())
+                    }
+                    other => other,
+                }
+            },
             nullable: is_nullable == "YES",
             auto_increment,
             primary_key: false,
@@ -128,24 +216,33 @@ async fn introspect_columns(
     Ok(())
 }
 
-/// Read primary keys and `UNIQUE` constraints, returning every constraint name so their
-/// backing indexes can be skipped.
+/// Read primary keys and `UNIQUE` constraints, returning every constraint so their backing
+/// indexes can be skipped.
+///
+/// A single-column `UNIQUE` is folded onto its column, which is how the derive declares it.
+/// A composite one becomes [`Table::uniques`], a constraint the database owns: reporting it
+/// as an index is what made `DROP INDEX` fail on it.
 async fn introspect_constraints(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
-) -> Result<BTreeSet<String>, sqlx::Error> {
+    current: Option<&str>,
+) -> Result<BTreeSet<(String, String)>, sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
-            "SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name \
+            "SELECT tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type, \
+                    kcu.column_name \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
                ON kcu.constraint_schema = tc.constraint_schema \
               AND kcu.constraint_name = tc.constraint_name \
-             WHERE tc.table_schema = current_schema() \
+              AND kcu.table_schema = tc.table_schema \
+              AND kcu.table_name = tc.table_name \
+             WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema') \
+               AND tc.table_schema NOT LIKE 'pg_toast%' \
                AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE') \
-             ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position"
+             ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position"
         ))
-        .all::<(String, String, String, String)>()
+        .all::<(String, String, String, String, String)>()
         .await?;
 
     struct Constraint {
@@ -156,7 +253,8 @@ async fn introspect_constraints(
     }
 
     let mut constraints: Vec<Constraint> = Vec::new();
-    for (table, name, kind, column) in rows {
+    for (schema, table, name, kind, column) in rows {
+        let table = qualified(&schema, &table, current);
         match constraints
             .iter_mut()
             .find(|constraint| constraint.table == table && constraint.name == name)
@@ -173,7 +271,7 @@ async fn introspect_constraints(
 
     let mut names = BTreeSet::new();
     for constraint in constraints {
-        names.insert(constraint.name.clone());
+        names.insert((constraint.table.clone(), constraint.name.clone()));
 
         let Some(table) = tables.get_mut(&constraint.table) else {
             continue;
@@ -196,13 +294,12 @@ async fn introspect_constraints(
                 column.unique = true;
             }
         } else {
-            // A composite `UNIQUE` has no per-column spelling, so keep it as a unique index.
-            // (PostgreSQL owns the index through the constraint, so dropping it needs a
-            // migration that drops the constraint instead.)
-            table.indexes.push(Index {
+            // A composite `UNIQUE` has no per-column spelling. PostgreSQL owns a backing
+            // index through the constraint, and `DROP INDEX` cannot remove it, so it is a
+            // constraint in its own right.
+            table.uniques.push(Unique {
                 name: constraint.name,
                 columns: constraint.columns,
-                unique: true,
             });
         }
     }
@@ -213,22 +310,25 @@ async fn introspect_constraints(
 async fn introspect_indexes(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
-    constraints: &BTreeSet<String>,
+    constraints: &BTreeSet<(String, String)>,
+    current: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
-            "SELECT t.relname, i.relname, ix.indisunique, ix.indnkeyatts, a.attname \
+            "SELECT n.nspname, t.relname, i.relname, ix.indisunique, ix.indnkeyatts, a.attname \
              FROM pg_index ix \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) \
-             WHERE n.nspname = current_schema() \
+             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
                AND NOT ix.indisprimary \
                AND array_position(ix.indkey, a.attnum) <= ix.indnkeyatts \
-             ORDER BY t.relname, i.relname, array_position(ix.indkey, a.attnum)"
+             ORDER BY n.nspname, t.relname, i.relname, \
+                      array_position(ix.indkey, a.attnum)"
         ))
-        .all::<(String, String, bool, i16, String)>()
+        .all::<(String, String, String, bool, i16, String)>()
         .await?;
 
     struct PgIndex {
@@ -240,7 +340,8 @@ async fn introspect_indexes(
     }
 
     let mut indexes: Vec<PgIndex> = Vec::new();
-    for (table, name, unique, keys, column) in rows {
+    for (schema, table, name, unique, keys, column) in rows {
+        let table = qualified(&schema, &table, current);
         match indexes
             .iter_mut()
             .find(|index| index.table == table && index.name == name)
@@ -259,7 +360,9 @@ async fn introspect_indexes(
     for index in indexes {
         // Indexes backing a primary key or unique constraint are already represented, and an
         // index on an expression has fewer columns than key attributes: skip both.
-        if constraints.contains(&index.name) || index.columns.len() != index.keys {
+        if constraints.contains(&(index.table.clone(), index.name.clone()))
+            || index.columns.len() != index.keys
+        {
             continue;
         }
 
@@ -279,28 +382,58 @@ async fn introspect_indexes(
 async fn introspect_foreign_keys(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
+    current: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
-            "SELECT t.relname, con.conname, rt.relname, con.confdeltype::text, \
-                    con.confupdtype::text, a.attname, ra.attname \
+            "SELECT n.nspname, t.relname, con.conname, rn.nspname, rt.relname, \
+                    con.confdeltype::text, con.confupdtype::text, a.attname, ra.attname \
              FROM pg_constraint con \
              JOIN pg_class t ON t.oid = con.conrelid \
-             JOIN pg_class rt ON rt.oid = con.confrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_class rt ON rt.oid = con.confrelid \
+             JOIN pg_namespace rn ON rn.oid = rt.relnamespace \
              JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
              JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS rk(attnum, ord) \
                ON rk.ord = k.ord \
              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
              JOIN pg_attribute ra ON ra.attrelid = rt.oid AND ra.attnum = rk.attnum \
-             WHERE con.contype = 'f' AND n.nspname = current_schema() \
-             ORDER BY t.relname, con.conname, k.ord"
+             WHERE con.contype = 'f' \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+             ORDER BY n.nspname, t.relname, con.conname, k.ord"
         ))
-        .all::<(String, String, String, String, String, String, String)>()
+        .all::<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>()
         .await?;
 
     let mut foreign_keys: Vec<(String, ForeignKey)> = Vec::new();
-    for (table, name, references_table, on_delete, on_update, column, references_column) in rows {
+    for (
+        schema,
+        table,
+        name,
+        references_schema,
+        references_table,
+        on_delete,
+        on_update,
+        column,
+        references_column,
+    ) in rows
+    {
+        let table = qualified(&schema, &table, current);
+        // The referenced table is qualified the same way as any other name, so a constraint
+        // that crosses schemas reaches the right table.
+        let references_table = qualified(&references_schema, &references_table, current);
+
         if let Some((_, fk)) = foreign_keys
             .iter_mut()
             .find(|(existing, fk)| existing == &table && fk.name == name)
@@ -360,6 +493,7 @@ fn parse_type(
         "jsonb" => TypeDef::Jsonb,
         "date" => TypeDef::Date,
         "time without time zone" => TypeDef::Time,
+        "time with time zone" => TypeDef::TimeTz,
         "timestamp without time zone" => TypeDef::Timestamp,
         "timestamp with time zone" => TypeDef::TimestampTz,
         "numeric" | "decimal" => match (numeric_precision, numeric_scale) {
@@ -369,6 +503,9 @@ fn parse_type(
             (Some(precision), None) => TypeDef::Decimal(narrow(precision), 0),
             _ => TypeDef::Custom("numeric".into()),
         },
+        // An enum, a domain, or any other type Besu does not model keeps its name, so it
+        // round-trips and generated DDL names the same type. Enumerations are additionally
+        // listed in `Schema::enums`.
         "USER-DEFINED" | "ARRAY" => TypeDef::Custom(udt_name.to_owned().into()),
         other => TypeDef::Custom(other.to_owned().into()),
     }

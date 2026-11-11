@@ -1,6 +1,8 @@
 use besu_core::{TypeDef, Value};
 
-use crate::{Column, ForeignKey, Index, ReferenceAction, Schema, Table, diff::Change};
+use crate::{
+    Column, Enum, ForeignKey, Index, ReferenceAction, Schema, Table, Unique, diff::Change,
+};
 
 /// Render a schema as DDL for a particular database.
 ///
@@ -58,7 +60,7 @@ pub trait Ddl {
     fn create_table(&self, table: &Table) -> String {
         let mut sql = String::new();
         sql.push_str("CREATE TABLE ");
-        sql.push_str(&self.quote_table(&table.name));
+        sql.push_str(&self.quote_table(&table.qualified_name()));
         sql.push_str(" (");
 
         let primary_key: Vec<&Column> = table.primary_key();
@@ -80,6 +82,11 @@ pub trait Ddl {
                 sql.push_str(&self.quote(&column.name));
             }
             sql.push(')');
+        }
+
+        for unique in &table.uniques {
+            sql.push_str(", ");
+            sql.push_str(&self.unique_clause(unique));
         }
 
         for fk in &table.foreign_keys {
@@ -179,6 +186,72 @@ pub trait Ddl {
         format!("DROP INDEX {}", self.quote(&index.name))
     }
 
+    /// The `UNIQUE` clause used inside `CREATE TABLE`.
+    fn unique_clause(&self, unique: &Unique) -> String {
+        let mut sql = String::from("CONSTRAINT ");
+        sql.push_str(&self.quote(&unique.name));
+        sql.push_str(" UNIQUE (");
+        sql.push_str(&join_quoted(&unique.columns, |c| self.quote(c)));
+        sql.push(')');
+        sql
+    }
+
+    /// `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE`.
+    ///
+    /// SQLite has no such statement, so it renders uniques inside `CREATE TABLE` instead
+    /// and returns no statement here — exactly as it does for foreign keys.
+    fn add_unique(&self, table: &str, unique: &Unique) -> String {
+        format!(
+            "ALTER TABLE {} ADD {}",
+            self.quote_table(table),
+            self.unique_clause(unique)
+        )
+    }
+
+    /// `ALTER TABLE ... DROP CONSTRAINT`.
+    ///
+    /// Like [`Ddl::add_unique`], SQLite returns no statement.
+    fn drop_unique(&self, table: &str, unique: &Unique) -> String {
+        format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.quote_table(table),
+            self.quote(&unique.name)
+        )
+    }
+
+    /// Statements that create a named enum type.
+    ///
+    /// The default returns nothing, because only PostgreSQL has named types that are not
+    /// part of a column: MySQL spells an enum inline in the column and SQLite has no enum
+    /// at all. A dialect without them ignores [`Change::CreateEnum`] rather than failing,
+    /// which keeps a schema shared with PostgreSQL usable everywhere.
+    fn create_enum(&self, _e: &Enum) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that drop a named enum type.
+    ///
+    /// The default returns nothing; see [`Ddl::create_enum`].
+    fn drop_enum(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that append a value to an existing enum type.
+    ///
+    /// The default returns nothing; see [`Ddl::create_enum`].
+    fn add_enum_value(&self, _name: &str, _value: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that remove a value from an existing enum type.
+    ///
+    /// The default returns nothing, and PostgreSQL overrides it with nothing too: there is
+    /// no `ALTER TYPE ... DROP VALUE`. It is a [`Safety::Destructive`](crate::Safety)
+    /// change, so `push` refuses it and a migration has to recreate the type by hand.
+    fn remove_enum_value(&self, _name: &str, _value: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The `FOREIGN KEY` clause used inside `CREATE TABLE`.
     fn foreign_key_clause(&self, fk: &ForeignKey) -> String {
         let mut sql = String::from("CONSTRAINT ");
@@ -235,12 +308,16 @@ pub trait Ddl {
                 let mut statements = vec![self.create_table(table)];
                 if !Self::INLINE_INDEXES {
                     for index in &table.indexes {
-                        statements.push(self.create_index(&table.name, index));
+                        statements.push(self.create_index(&table.qualified_name(), index));
                     }
                 }
                 statements
             }
             Change::DropTable { name } => vec![self.drop_table(name)],
+            Change::CreateEnum(e) => self.create_enum(e),
+            Change::DropEnum { name } => self.drop_enum(name),
+            Change::AddEnumValue { name, value } => self.add_enum_value(name, value),
+            Change::RemoveEnumValue { name, value } => self.remove_enum_value(name, value),
             Change::AddColumn { table, column } => vec![self.add_column(table, column)],
             Change::RenameColumn { table, from, to } => {
                 vec![self.rename_column(table, from, to)]
@@ -249,6 +326,8 @@ pub trait Ddl {
             Change::AlterColumn { table, from, to } => self.alter_column(table, from, to),
             Change::AddIndex { table, index } => vec![self.create_index(table, index)],
             Change::DropIndex { table, index } => vec![self.drop_index(table, index)],
+            Change::AddUnique { table, unique } => vec![self.add_unique(table, unique)],
+            Change::DropUnique { table, unique } => vec![self.drop_unique(table, unique)],
             Change::AddForeignKey { table, foreign_key } => {
                 vec![self.add_foreign_key(table, foreign_key)]
             }
@@ -260,14 +339,21 @@ pub trait Ddl {
 
     /// Render a whole schema from scratch.
     ///
-    /// Tables come first, in dependency order, and then their indexes, so a foreign key can
-    /// reference a table that has not been created yet.
+    /// Enums come first, because a column can name one; then tables in dependency order;
+    /// then their indexes, so a foreign key can reference a table that has not been created
+    /// yet.
     fn create_schema(&self, schema: &Schema) -> Vec<String> {
-        schema
-            .topological_order()
-            .into_iter()
-            .flat_map(|table| self.default_change(&Change::CreateTable(table.clone())))
-            .collect()
+        let mut statements = Vec::new();
+        for e in &schema.enums {
+            statements.extend(self.create_enum(e));
+        }
+        statements.extend(
+            schema
+                .topological_order()
+                .into_iter()
+                .flat_map(|table| self.default_change(&Change::CreateTable(table.clone()))),
+        );
+        statements
     }
 
     /// Render a diff as statements, in order.

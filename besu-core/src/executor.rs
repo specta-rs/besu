@@ -1,6 +1,6 @@
 use core::future::Future;
 
-use crate::{Dialect, Driver, Sql};
+use crate::{Dialect, Driver, RowStream, Sql};
 
 /// The dialect an [`Executor`] speaks.
 pub type DialectOf<E> = <<E as Executor>::Driver as Driver>::Dialect;
@@ -37,6 +37,15 @@ pub trait Executor {
         &mut self,
         sql: &Sql<DialectOf<Self>>,
     ) -> impl Future<Output = Result<Self::Output, ErrorOf<Self>>> + Send;
+
+    /// Run a query and hand back its rows as they arrive.
+    ///
+    /// The borrow is `'a` on both `self` and the statement: a cursor keeps the connection and
+    /// the SQL text alive for as long as it is open.
+    fn query_stream<'a>(
+        &'a mut self,
+        sql: &'a Sql<DialectOf<Self>>,
+    ) -> impl Future<Output = Result<RowStream<'a, Self::Driver>, ErrorOf<Self>>> + Send + 'a;
 }
 
 impl<Dr: Driver> Executor for &Dr {
@@ -51,6 +60,14 @@ impl<Dr: Driver> Executor for &Dr {
     async fn execute(&mut self, sql: &Sql<Dr::Dialect>) -> Result<Dr::Output, Dr::Error> {
         let driver: &Dr = self;
         driver.execute(sql).await
+    }
+
+    fn query_stream<'a>(
+        &'a mut self,
+        sql: &'a Sql<Dr::Dialect>,
+    ) -> impl Future<Output = Result<RowStream<'a, Dr>, Dr::Error>> + Send + 'a {
+        let driver: &Dr = self;
+        driver.query_stream(sql)
     }
 }
 
@@ -170,5 +187,14 @@ impl<D: Dialect> Executor for &Dry<D> {
 
     async fn execute(&mut self, sql: &Sql<D>) -> Result<(), crate::Error> {
         DryDriver::<D>(core::marker::PhantomData).execute(sql).await
+    }
+
+    async fn query_stream<'a>(
+        &'a mut self,
+        sql: &'a Sql<D>,
+    ) -> Result<RowStream<'a, DryDriver<D>>, crate::Error> {
+        DryDriver::<D>(core::marker::PhantomData)
+            .query_stream(sql)
+            .await
     }
 }

@@ -29,6 +29,39 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features --exclude besu-postgres --exclude besu-mysql
 
+  # The builder is the only part of Besu that can run in a browser, and it is only useful
+  # there if it keeps compiling for `wasm32-unknown-unknown`. Nothing is executed on this
+  # target: there is no runtime in the job, so `--all-targets` compiles the tests instead of
+  # running them. The SQL those queries produce is asserted by `besu/tests/dry.rs`, which
+  # runs on every native platform in the `test` job.
+  wasm:
+    name: wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Add the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Check besu-core
+        run: cargo check --target wasm32-unknown-unknown -p besu-core --all-features --all-targets
+      - name: Check besu without default features
+        run: cargo check --target wasm32-unknown-unknown -p besu --no-default-features
+      - name: Check besu with the derive
+        run: cargo check --target wasm32-unknown-unknown -p besu --no-default-features --features derive --all-targets
+      - name: Check besu with every feature
+        run: cargo check --target wasm32-unknown-unknown -p besu --all-features --all-targets
+      # A browser needs a real dialect to spell `?`, `$1` and `` ` `` correctly, and the
+      # driver feature is what carries sqlx, tokio and mio. Turning it off leaves the
+      # dialect and the DDL, which are pure `alloc`.
+      - name: Check the SQLite dialect without its driver
+        run: cargo check --target wasm32-unknown-unknown -p besu-sqlite --no-default-features
+      - name: Check the PostgreSQL dialect without its driver
+        run: cargo check --target wasm32-unknown-unknown -p besu-postgres --no-default-features
+      - name: Check the MySQL dialect without its driver
+        run: cargo check --target wasm32-unknown-unknown -p besu-mysql --no-default-features
+
   database:
     name: database / ${{ matrix.database }}
     runs-on: ubuntu-latest

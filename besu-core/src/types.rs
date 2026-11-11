@@ -41,6 +41,13 @@ pub enum TypeDef {
     Date,
     /// A time with no date.
     Time,
+    /// A time with no date, carrying a timezone. This is PostgreSQL's `TIMETZ`.
+    ///
+    /// It is modelled so introspection round-trips and DDL renders it, but no driver
+    /// decodes it: sqlx represents the type as its own `PgTimeTz` struct, which Besu's
+    /// driver-independent [`Value`](crate::Value) has no variant for. Use `TimestampTz`
+    /// (or `Time`) in code that reads and writes rows.
+    TimeTz,
     /// A timestamp with no timezone.
     Timestamp,
     /// A timestamp with a timezone.

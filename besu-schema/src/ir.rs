@@ -12,11 +12,18 @@ pub struct Schema {
     #[serde(default)]
     pub tables: Vec<Table>,
     /// Schema-level named enums, kept for round-tripping databases that have them.
+    ///
+    /// Only PostgreSQL has types that are not part of a column. The differ creates these
+    /// before the tables that use them and drops them after, and a column of an enum type
+    /// is `TypeDef::Custom`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enums: Vec<Enum>,
 }
 
 /// A named enum type, as found in PostgreSQL.
+///
+/// The name is unqualified for an enum in the database's default schema and `schema.name`
+/// otherwise, the same rule [`Table`] follows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Enum {
     /// The type name.
@@ -40,33 +47,82 @@ impl Schema {
         for def in defs {
             schema.push_def(def);
         }
-        schema.tables.sort_by(|a, b| a.name.cmp(&b.name));
+        schema.sort();
         schema
     }
 
     /// Add (or replace) a table from static metadata.
     pub fn push_def(&mut self, def: &TableDef) {
         let table = Table::from_def(def);
-        if let Some(slot) = self.tables.iter_mut().find(|t| t.name == table.name) {
+        if let Some(slot) = self
+            .tables
+            .iter_mut()
+            .find(|t| t.schema == table.schema && t.name == table.name)
+        {
             *slot = table;
         } else {
             self.tables.push(table);
         }
     }
 
-    /// Find a table by name.
+    /// Find a table by name in the default schema.
+    ///
+    /// A table's identity is `(schema, name)`, so two tables called `users` in different
+    /// schemas are distinct. This matches the unqualified table first; when there is no
+    /// such table it falls back to the first table with that name, which keeps lookups by
+    /// name working for schemas that were introspected explicitly. Use [`Schema::find`]
+    /// when the schema matters.
     pub fn table(&self, name: &str) -> Option<&Table> {
-        self.tables.iter().find(|t| t.name == name)
+        self.find(None, name)
+            .or_else(|| self.tables.iter().find(|t| t.name == name))
     }
 
-    /// Find a table by name, mutably.
+    /// Find a table by name in the default schema, mutably.
     pub fn table_mut(&mut self, name: &str) -> Option<&mut Table> {
+        if self
+            .tables
+            .iter()
+            .any(|t| t.schema.is_none() && t.name == name)
+        {
+            return self
+                .tables
+                .iter_mut()
+                .find(|t| t.schema.is_none() && t.name == name);
+        }
         self.tables.iter_mut().find(|t| t.name == name)
     }
 
-    /// Sort tables by name so output is stable.
+    /// Find a table by its schema and name.
+    ///
+    /// `schema` is the table's schema, or `None` for the default schema. This is the
+    /// identity the differ uses.
+    pub fn find(&self, schema: Option<&str>, name: &str) -> Option<&Table> {
+        self.tables
+            .iter()
+            .find(|t| t.name == name && t.schema.as_deref() == schema)
+    }
+
+    /// Find a table by a qualified name, as carried by [`Change`](crate::Change).
+    ///
+    /// The name is `schema.table` when the table has a schema, and a bare `table`
+    /// otherwise.
+    pub fn get(&self, qualified: &str) -> Option<&Table> {
+        match qualified.split_once('.') {
+            Some((schema, name)) => self.find(Some(schema), name),
+            None => self.find(None, qualified),
+        }
+    }
+
+    /// Find a named enum type by name.
+    pub fn find_enum(&self, name: &str) -> Option<&Enum> {
+        self.enums.iter().find(|e| e.name == name)
+    }
+
+    /// Sort tables by schema and name, and enums by name, so output is stable.
     pub fn sort(&mut self) {
-        self.tables.sort_by(|a, b| a.name.cmp(&b.name));
+        self.tables
+            .sort_by(|a, b| a.schema.cmp(&b.schema).then_with(|| a.name.cmp(&b.name)));
+        self.enums.sort_by(|a, b| a.name.cmp(&b.name));
         for table in &mut self.tables {
             table.normalise();
         }
@@ -80,18 +136,24 @@ impl Schema {
         fn visit<'a>(
             table: &'a Table,
             schema: &'a Schema,
-            seen: &mut Vec<&'a str>,
+            seen: &mut Vec<&'a Table>,
             out: &mut Vec<&'a Table>,
         ) {
-            if seen.contains(&table.name.as_str()) {
+            if seen
+                .iter()
+                .any(|seen| seen.name == table.name && seen.schema == table.schema)
+            {
                 return;
             }
-            seen.push(table.name.as_str());
+            seen.push(table);
             for fk in &table.foreign_keys {
-                if fk.references_table == table.name {
+                if fk.references_table == table.qualified_name() {
                     continue;
                 }
-                if let Some(dep) = schema.table(&fk.references_table) {
+                let referenced = schema
+                    .get(&fk.references_table)
+                    .or_else(|| schema.table(&fk.references_table));
+                if let Some(dep) = referenced {
                     visit(dep, schema, seen, out);
                 }
             }
@@ -120,6 +182,13 @@ pub struct Table {
     /// Secondary indexes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<Index>,
+    /// Multi-column `UNIQUE` constraints.
+    ///
+    /// A single-column `UNIQUE` lives on the column itself, as [`Column::unique`]. A
+    /// constraint over several columns has no per-column spelling and is a separate object
+    /// the database owns, so it is kept here rather than being modelled as an index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uniques: Vec<Unique>,
     /// Foreign key constraints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_keys: Vec<ForeignKey>,
@@ -144,6 +213,10 @@ impl Table {
                     unique: idx.unique,
                 })
                 .collect(),
+            // The derive has no attribute for a composite `UNIQUE`; a hand-written
+            // `TableDef` cannot carry one either, so this is only ever populated by
+            // introspection.
+            uniques: Vec::new(),
             foreign_keys: def
                 .foreign_keys
                 .iter()
@@ -157,6 +230,17 @@ impl Table {
                 })
                 .collect(),
             comment: None,
+        }
+    }
+
+    /// The table's name, qualified by its schema when it has one, as in `app.users`.
+    ///
+    /// This is the identity [`Change`](crate::Change) carries and what
+    /// [`Ddl::quote_table`](crate::Ddl::quote_table) expects; it is *not* quoted.
+    pub fn qualified_name(&self) -> String {
+        match &self.schema {
+            Some(schema) => format!("{schema}.{}", self.name),
+            None => self.name.clone(),
         }
     }
 
@@ -182,8 +266,18 @@ impl Table {
     pub fn normalise(&mut self) {
         self.columns.sort_by_key(|c| !c.primary_key);
         self.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        self.uniques.sort_by(|a, b| a.name.cmp(&b.name));
         self.foreign_keys.sort_by(|a, b| a.name.cmp(&b.name));
     }
+}
+
+/// A multi-column `UNIQUE` constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unique {
+    /// The constraint name.
+    pub name: String,
+    /// The constrained columns, in order.
+    pub columns: Vec<String>,
 }
 
 /// A single column.
