@@ -103,8 +103,9 @@ returns an error that points at `to_sql`.
 - DDL causes an implicit commit on MySQL, so wrapping a schema change in `db.transaction(..)`
   does not make it atomic. That is the server's rule, not the driver's.
 - `OFFSET` without `LIMIT` is not grammatical; the builder supplies an unbounded `LIMIT` when
-  you set only an offset. `FULL OUTER JOIN` and `NULLS FIRST`/`NULLS LAST` have no MySQL
-  spelling, and the builder rejects them rather than emitting something that will not parse.
+  you set only an offset. `FULL OUTER JOIN` has no MySQL spelling, and the builder rejects it
+  rather than emitting something that will not parse; `NULLS FIRST`/`NULLS LAST` are emulated by
+  ordering on `expr IS NULL` first.
 - MySQL identifiers are quoted with backticks and a backtick inside one is doubled, so a table
   or column with an unusual name round-trips through DDL.
 - `push` is not transactional, and a failed statement leaves the earlier ones applied.

@@ -31,6 +31,9 @@ timestamps are `DATETIME(6)` rather than `TIMESTAMP`.
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>` | matching | `CHAR(n)`, `VARCHAR(n)`, `DECIMAL(p,s)` |
 
+Everything in the table round-trips through an insert and a `SELECT`, except a `Decimal`, which
+has no decoder into its `String` yet. The `Custom` types below round-trip through DDL only.
+
 ## Integers
 
 MySQL has signed and unsigned types at every width, so each marker maps onto the type of the
@@ -103,9 +106,8 @@ column cannot be indexed or made unique.
 
 ## UUID
 
-`uuid::Uuid` is `BINARY(16)`, not a 36-character string. That is both smaller and comparable as
-bytes, and a `VARBINARY` or `BLOB` of the same bytes decodes as `Uuid` only when the declared
-length is exactly 16.
+`uuid::Uuid` is `BINARY(16)`, not a 36-character string: smaller, and ordered as bytes rather
+than as text.
 
 ```rust
 pub id: uuid::Uuid,
@@ -156,7 +158,7 @@ so a declared `u128` converges against the `DECIMAL(39,0)` reported back.
 
 ## Custom types
 
-MySQL's inline `ENUM(...)` and `SET(...)` keep their native spelling, so `<name>` arrives as
+MySQL's inline `ENUM(...)` and `SET(...)` keep their native spelling, so a column arrives as
 `Custom("enum('a','b')")`. They belong to the column rather than to the schema, so
 `Schema::enums` is empty on MySQL and there is no derive spelling for one. Anything newer than
 the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` for the same reason. The

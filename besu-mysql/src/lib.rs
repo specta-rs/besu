@@ -28,6 +28,9 @@ pub use dialect::MySql;
 pub use introspect::introspect;
 #[cfg(feature = "sqlx")]
 pub use sqlx::Sqlx;
+#[cfg(feature = "sqlx")]
+#[doc(hidden)]
+pub use sqlx::arguments_for_bench;
 
 /// A [`besu::Database`] backed by MySQL.
 #[cfg(feature = "sqlx")]

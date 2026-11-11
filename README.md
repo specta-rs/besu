@@ -187,12 +187,13 @@ db.migrate(&Migrator::from_dir("migrations")?).await?;
 
 The README is an overview. The full documentation lives in [`docs/`](docs/README.md).
 
-- [Getting started](docs/guide/getting-started.md)
-- [Defining a schema](docs/guide/schema.md)
-- [Selecting data](docs/guide/select.md), [inserting](docs/guide/insert.md), [updating and deleting](docs/guide/update-delete.md)
-- [Raw SQL](docs/guide/raw-sql.md) and [transactions](docs/guide/transactions.md)
-- [Migrations](docs/guide/migrations.md)
-- [Writing a driver](docs/guide/drivers.md)
+- [Get started with SQLite](docs/get-started/sqlite.md) · [PostgreSQL](docs/get-started/postgresql.md) · [MySQL](docs/get-started/mysql.md)
+- [Schema declaration](docs/schema/declaration.md) and [column types](docs/schema/column-types/postgresql.md)
+- [Select](docs/queries/select.md), [insert](docs/queries/insert.md), [update](docs/queries/update.md), [delete](docs/queries/delete.md)
+- [Operators](docs/queries/operators.md), [joins](docs/queries/joins.md) and [the `sql!` operator](docs/queries/sql.md)
+- [Transactions](docs/advanced/transactions.md), [set operations](docs/advanced/set-operations.md) and [subqueries](docs/advanced/subqueries.md)
+- [Migrations](docs/migrations/overview.md)
+- [Drizzle parity](docs/parity.md), [performance](docs/performance.md) and [writing a driver](docs/drivers.md)
 - [Architecture](docs/architecture.md), [comparison](docs/comparison.md) and [roadmap](docs/roadmap.md)
 
 API reference is on [docs.rs](https://docs.rs/besu).

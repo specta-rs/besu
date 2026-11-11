@@ -13,8 +13,8 @@ let db = besu::Database::new(
 );
 ```
 
-`Sqlx::new` is an alias for `Sqlx::connect`, so either name works. The URL carries TLS mode,
-application name and connect timeout in its query string, which is how sqlx expects them:
+`Sqlx::new` is an alias for `Sqlx::connect`, so either name works. The URL carries TLS mode
+and the application name in its query string, which is how sqlx expects them:
 
 ```rust
 let db = besu::Database::new(

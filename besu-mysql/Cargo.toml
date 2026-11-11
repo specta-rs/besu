@@ -26,7 +26,12 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 besu = { workspace = true, features = ["derive", "migrate"] }
+
+[[bench]]
+name = "driver"
+harness = false
 
 [dependencies]
 besu-core = { workspace = true }

@@ -97,8 +97,8 @@ the `Schema` IR.
 
 ### Partial indexes
 
-Only PostgreSQL has them, and only PostgreSQL reads the predicate back. `Index::predicate` is
-the `WHERE` clause, appended verbatim.
+Only PostgreSQL reads a predicate back into the IR. `Index::predicate` is the `WHERE` clause,
+appended verbatim.
 
 ```rust
 schema.table_mut("events").unwrap().indexes.push(Index {
@@ -113,8 +113,7 @@ schema.table_mut("events").unwrap().indexes.push(Index {
 CREATE INDEX "events_errors_idx" ON "events" ("kind") WHERE kind = 'error'
 ```
 
-SQLite supports partial indexes but its catalogue report has no predicate the IR can carry, so
-introspection skips one rather than report it as a full index. MySQL has none.
+SQLite introspects no predicate for a partial index, so introspection skips one; MySQL has none.
 
 ## Foreign keys
 
@@ -176,7 +175,8 @@ a check inside the `CREATE TABLE` text and MySQL reports a `CHECK_CLAUSE` it wil
 | `CHECK` | No | No | Yes |
 
 A table definition pushed from Rust therefore declares its keys, single-column uniques and indexes,
-and its single-column foreign keys. Everything else needs a `besu pull` snapshot or a migration.
+and its single-column foreign keys. Everything else needs a hand-written `TableDef`, a `besu pull`
+snapshot or a migration.
 
 ## Safety
 
