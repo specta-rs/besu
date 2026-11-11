@@ -1,0 +1,10 @@
+[package]
+name = "example-mysql"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+besu = { workspace = true, features = ["derive", "migrate"] }
+besu-mysql = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -1,8 +1,6 @@
 use besu_core::{TypeDef, Value};
 
-use crate::{
-    diff::Change, Column, ForeignKey, Index, ReferenceAction, Schema, Table,
-};
+use crate::{Column, ForeignKey, Index, ReferenceAction, Schema, Table, diff::Change};
 
 /// Render a schema as DDL for a particular database.
 ///
@@ -223,7 +221,10 @@ pub trait Ddl {
 
     /// Render a diff as statements, in order.
     fn apply(&self, changes: &[Change]) -> Vec<String> {
-        changes.iter().flat_map(|change| self.change(change)).collect()
+        changes
+            .iter()
+            .flat_map(|change| self.change(change))
+            .collect()
     }
 }
 

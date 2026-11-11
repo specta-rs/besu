@@ -66,12 +66,12 @@ impl Value {
                         }
                         f.write_str("'")
                     }
-                                    Value::Uuid(v) => write!(f, "'{v}'"),
-                                    Value::Date(v) => write!(f, "'{v}'"),
-                                    Value::Time(v) => write!(f, "'{v}'"),
-                                    Value::Timestamp(v) => write!(f, "'{v}'"),
-                                    Value::TimestampTz(v) => write!(f, "'{v}'"),
-                                    Value::Json(v) => write!(f, "'{}'", String::from_utf8_lossy(v).escape_debug()),
+                    Value::Uuid(v) => write!(f, "'{v}'"),
+                    Value::Date(v) => write!(f, "'{v}'"),
+                    Value::Time(v) => write!(f, "'{v}'"),
+                    Value::Timestamp(v) => write!(f, "'{v}'"),
+                    Value::TimestampTz(v) => write!(f, "'{v}'"),
+                    Value::Json(v) => write!(f, "'{}'", String::from_utf8_lossy(v).escape_debug()),
                 }
             }
         }

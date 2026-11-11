@@ -1,0 +1,10 @@
+[package]
+name = "example-sqlite"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+besu = { workspace = true, features = ["derive", "migrate"] }
+besu-sqlite = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

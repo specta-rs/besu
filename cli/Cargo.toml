@@ -16,10 +16,14 @@ name = "besu"
 path = "src/main.rs"
 
 [dependencies]
+besu = { workspace = true, features = ["derive", "migrate"] }
 besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu-postgres = { workspace = true, features = ["sqlx"] }
 besu-mysql = { workspace = true, features = ["sqlx"] }
 besu-sqlite = { workspace = true, features = ["sqlx"] }
-clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite", "postgres", "mysql", "runtime-tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

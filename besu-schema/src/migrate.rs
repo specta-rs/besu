@@ -182,7 +182,9 @@ impl Migrator {
             "checksum VARCHAR(64) NOT NULL",
             ")"
         ));
-        exec.execute(&mut create).await.map_err(MigrationError::Driver)?;
+        exec.execute(&mut create)
+            .await
+            .map_err(MigrationError::Driver)?;
 
         // 2. Read what has already run.
         let mut select = Sql::raw(concat!(

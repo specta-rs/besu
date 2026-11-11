@@ -31,7 +31,11 @@ impl Ddl for SQLiteDdl {
     }
 
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
-        let mut sql = format!("{} {}", self.quote(&column.name), self.type_name(&column.ty));
+        let mut sql = format!(
+            "{} {}",
+            self.quote(&column.name),
+            self.type_name(&column.ty)
+        );
 
         // SQLite only accepts `AUTOINCREMENT` on `INTEGER PRIMARY KEY`, and it must be
         // written inline.

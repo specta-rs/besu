@@ -109,8 +109,8 @@ impl SelectQuery {
             }
             None => {
                 let mut first = true;
-                for table in core::iter::once(self.from)
-                    .chain(self.joins.iter().map(|join| join.table))
+                for table in
+                    core::iter::once(self.from).chain(self.joins.iter().map(|join| join.table))
                 {
                     for column in table.columns {
                         if !first {

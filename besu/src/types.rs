@@ -4,9 +4,8 @@ use core::marker::PhantomData;
 
 use alloc::string::String;
 
-use besu_core::value::Value;
 use besu_core::TypeDef;
-
+use besu_core::value::Value;
 
 /// A SQL column type, expressed as a Rust type.
 ///

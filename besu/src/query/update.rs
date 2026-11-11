@@ -10,7 +10,7 @@ use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor, TableDef, V
 
 use crate::types::{Column, Nullability, SqlType};
 
-use crate::expr::{ExprKind, IntoCondition};
+use crate::expr::{ExprKind, IntoCondition, IntoExpr};
 use crate::query::push_table;
 use crate::selection::Selection;
 use crate::table::Table;
@@ -18,7 +18,7 @@ use crate::table::Table;
 #[derive(Debug, Clone)]
 pub(crate) struct UpdateQuery {
     pub(crate) table: &'static TableDef,
-    pub(crate) sets: Vec<(&'static str, Value)>,
+    pub(crate) sets: Vec<(&'static str, crate::expr::ExprKind)>,
     pub(crate) filter: Vec<ExprKind>,
     pub(crate) returning: Option<Vec<ExprKind>>,
 }
@@ -52,7 +52,7 @@ impl UpdateQuery {
             }
             out.push_ident(column);
             out.push_raw(" = ");
-            out.bind(value.clone());
+            value.render(&mut out);
         }
 
         render_where(&mut out, &self.filter);
@@ -149,7 +149,26 @@ impl<'a, E: Executor, T, const SAFE: bool> Update<'a, E, T, SAFE> {
         N: Nullability,
         V: Into<Value> + Into<N::Wrap<S::Rust>>,
     {
-        self.query.sets.push((column.name(), value.into()));
+        self.query
+            .sets
+            .push((column.name(), crate::expr::ExprKind::Value(value.into())));
+        self
+    }
+
+    /// `SET column = <expression>`.
+    ///
+    /// Use this to compute the new value in the database, for example
+    /// `.set_expr(users.age, users.age.as_expr().plus(1))`.
+    pub fn set_expr<S, N, V, M>(mut self, column: Column<T, S, N>, value: V) -> Self
+    where
+        T: Table,
+        S: SqlType,
+        N: Nullability,
+        V: IntoExpr<(T,), S, M>,
+    {
+        self.query
+            .sets
+            .push((column.name(), value.into_expr().into_kind()));
         self
     }
 

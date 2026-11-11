@@ -257,12 +257,10 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
                 }
             },
             None => {
-                self.query
-                    .conflict
-                    .get_or_insert(OnConflict {
-                        target: Vec::new(),
-                        action: ConflictAction::Update(Vec::new()),
-                    });
+                self.query.conflict.get_or_insert(OnConflict {
+                    target: Vec::new(),
+                    action: ConflictAction::Update(Vec::new()),
+                });
                 if let Some(conflict) = &mut self.query.conflict {
                     conflict.action = ConflictAction::Update(alloc::vec![(column, value.into())]);
                 }

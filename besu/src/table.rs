@@ -96,6 +96,21 @@ impl<T> From<T> for Set<T> {
     }
 }
 
+// Text and binary literals are common enough that requiring `.to_string()` everywhere would
+// be noise. These do not overlap with the blanket impl because the `Set` type parameter
+// differs.
+impl From<&str> for Set<String> {
+    fn from(value: &str) -> Self {
+        Self::Value(value.into())
+    }
+}
+
+impl From<&[u8]> for Set<Vec<u8>> {
+    fn from(value: &[u8]) -> Self {
+        Self::Value(value.into())
+    }
+}
+
 impl<T> From<Option<T>> for Set<T> {
     fn from(value: Option<T>) -> Self {
         match value {

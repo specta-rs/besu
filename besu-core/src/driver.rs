@@ -63,8 +63,9 @@ pub trait TransactionDriver: Driver {
     ) -> impl Future<Output = Result<Self::Transaction<'a>, Self::Error>> + Send;
 
     /// Commit, consuming the transaction.
-    fn commit<'a>(tx: Self::Transaction<'a>)
-    -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn commit<'a>(
+        tx: Self::Transaction<'a>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Roll back, consuming the transaction.
     fn rollback<'a>(
