@@ -652,7 +652,6 @@ impl Codegen {
             }
         });
 
-        let column_names: Vec<_> = columns.iter().map(|column| &column.sql_name).collect();
         let insert_columns = columns.iter().map(|column| &column.sql_name);
         let insert_values = columns.iter().map(|column| {
             let ident = &column.ident;
@@ -691,31 +690,6 @@ impl Codegen {
                         #insert_struct_ident {
                             #(#insert_initialisers,)*
                         }
-                    }
-                }
-
-                impl<RowSet, Path> #besu::Selection<RowSet, Path> for #table_struct_ident
-                where
-                    RowSet: #besu::Contains<Path, #table_struct_ident>,
-                {
-                    type Out = super::#model;
-
-                    fn into_projection(
-                        self,
-                    ) -> (
-                        ::std::vec::Vec<#besu::ExprKind>,
-                        usize,
-                    ) {
-                        let mut exprs = ::std::vec::Vec::new();
-                        let mut columns = 0;
-                        #(
-                            exprs.push(#besu::ExprKind::Column {
-                                table: #table_name,
-                                column: #column_names,
-                            });
-                            columns += 1;
-                        )*
-                        (exprs, columns)
                     }
                 }
 

@@ -29,6 +29,21 @@ impl Ddl for PostgresDdl {
         Postgres::type_name(ty.clone()).into_owned()
     }
 
+    fn normalise_type(&self, ty: &TypeDef) -> TypeDef {
+        // PostgreSQL has no unsigned integers, so each `UInt` is stored as the signed type
+        // that holds it. Folding them here is what makes a schema declaring `u16` converge
+        // against the `INTEGER` the database reports back.
+        match ty {
+            TypeDef::UInt(8) => TypeDef::Int2,
+            TypeDef::UInt(16) => TypeDef::Int4,
+            TypeDef::UInt(32) => TypeDef::Int8,
+            // `u64` lives in `NUMERIC(20,0)`, which is indistinguishable from a
+            // `Decimal(20, 0)`; folding both together lets either converge.
+            TypeDef::UInt(64) => TypeDef::Decimal(20, 0),
+            other => other.clone(),
+        }
+    }
+
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
         let mut sql = format!(
             "{} {}",

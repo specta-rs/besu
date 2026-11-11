@@ -311,7 +311,7 @@ The common aggregate functions:
 | `concat(a, b)` | `Text` | Two arguments |
 | `coalesce(a, fallback)` | Same as `a` | |
 | `round`, `ceil`, `floor` | Same as the argument | |
-| `abs` | Same as the argument | Exported as `besu::expr::abs`, not in the prelude |
+| `abs` | Same as the argument | In the prelude |
 | `now()` | `TimestampTz` | `CURRENT_TIMESTAMP` |
 
 `sum` returning `f64` is deliberate: SQL integer sums overflow silently in some databases, so

@@ -12,7 +12,7 @@ transaction model on top of it.
 let mut tx = db.begin().await?;
 
 tx.insert(users)
-    .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+    .value(users.insert("oscar@example.com", "Oscar", 21))
     .await?;
 
 tx.update(users)
@@ -59,7 +59,7 @@ let user_id: i64 = db
     .transaction(async |tx| {
         let user = tx
             .insert(users)
-            .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+            .value(users.insert("oscar@example.com", "Oscar", 21))
             .returning(users)
             .await?
             .remove(0);

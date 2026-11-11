@@ -1006,6 +1006,56 @@ where
     )
 }
 
+/// A `CASE` expression under construction.
+///
+/// The result type is a type parameter because a bare literal could equally be `TEXT`,
+/// `VARCHAR(n)` or `CHAR(n)`. Write it when the compiler cannot infer it:
+///
+/// ```ignore
+/// case::<_, Text>()
+///     .when(users.age.gte(18), "adult")
+///     .otherwise("minor")
+/// ```
+pub struct CaseBuilder<T, S: SqlType> {
+    branches: Vec<(ExprKind, ExprKind)>,
+    phantom: PhantomData<fn() -> (T, S)>,
+}
+
+/// Start a `CASE` expression.
+pub fn case<T, S: SqlType>() -> CaseBuilder<T, S> {
+    CaseBuilder {
+        branches: Vec::new(),
+        phantom: PhantomData,
+    }
+}
+
+impl<T, S: SqlType> CaseBuilder<T, S> {
+    /// `WHEN condition THEN value`.
+    pub fn when<F, PF, V, M>(mut self, condition: F, value: V) -> Self
+    where
+        F: IntoCondition<T, PF>,
+        V: IntoExpr<T, S, M>,
+    {
+        let _ = PhantomData::<(PF, M)>;
+        self.branches
+            .push((condition.into_condition(), value.into_expr().into_kind()));
+        self
+    }
+
+    /// `ELSE value`, which finishes the expression.
+    pub fn otherwise<V, M>(self, value: V) -> Expr<T, S>
+    where
+        V: IntoExpr<T, S, M>,
+    {
+        let _ = PhantomData::<M>;
+        Expr::from_kind(ExprKind::Case {
+            operand: None,
+            branches: self.branches,
+            fallback: Some(Box::new(value.into_expr().into_kind())),
+        })
+    }
+}
+
 /// The database's current timestamp.
 pub fn now<T>() -> Expr<T, TimestampTz> {
     Expr::from_kind(ExprKind::Raw("CURRENT_TIMESTAMP".into()))

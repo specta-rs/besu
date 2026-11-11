@@ -247,7 +247,12 @@ impl<'a, E: Executor> RawQuery<'a, E> {
     /// Run the statement and return the first row, if any.
     pub async fn first<R: Decode<E::Driver>>(self) -> Result<Option<R>, ErrorOf<E>> {
         let mut rows = self.all::<R>().await?;
-        Ok(rows.pop())
+        // `swap_remove(0)` is O(1) and returns the first row, unlike `pop`.
+        Ok(if rows.is_empty() {
+            None
+        } else {
+            Some(rows.swap_remove(0))
+        })
     }
 }
 

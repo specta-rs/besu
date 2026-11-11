@@ -44,6 +44,11 @@ async fn every_type_round_trips() {
     common::reset(&db).await;
     db.push([things.def()]).await.unwrap();
 
+    // Every declared type maps onto a native type that introspection reports back, so a
+    // second push changes nothing.
+    let second = db.push([things.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+
     let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
     let original = Thing {
         id,
@@ -100,7 +105,6 @@ async fn every_type_round_trips() {
     let stored: Vec<Thing> = db.select(things).await.unwrap();
     assert_eq!(stored.len(), 1);
     let stored = &stored[0];
-
     assert_eq!(stored.id, original.id);
     assert_eq!(stored.flag, original.flag);
     assert_eq!(stored.tiny, original.tiny);

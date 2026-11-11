@@ -542,3 +542,91 @@ async fn raw_sql_accepts_runtime_values() {
         .unwrap();
     assert_eq!(rows.len(), 1);
 }
+
+#[tokio::test]
+async fn pick_whole_tables_from_a_left_join() {
+    let db = setup().await;
+    let alice = db
+        .insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    db.insert(users)
+        .value(users.insert("lonely@example.com", "Lonely", 30))
+        .await
+        .unwrap();
+    db.insert(posts)
+        .value(posts.insert("Hello", alice.id))
+        .await
+        .unwrap();
+
+    // Selecting a whole table from the outer side widens to `Option` for the same reason a
+    // single column does.
+    let rows: Vec<(User, Option<Post>)> = db
+        .select(users)
+        .left_join(posts, eq(users.id, posts.author_id))
+        .pick((users, posts))
+        .order_by(users.name.asc())
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0.name, "Alice");
+    assert_eq!(rows[0].1.as_ref().unwrap().title, "Hello");
+    assert_eq!(rows[1].0.name, "Lonely");
+    assert!(rows[1].1.is_none());
+}
+
+#[tokio::test]
+async fn raw_query_first_returns_the_first_row() {
+    let db = setup().await;
+    for (name, age) in [("Alice", 30), ("Bob", 20)] {
+        db.insert(users)
+            .value(users.insert(format!("{name}@example.com"), name, age))
+            .await
+            .unwrap();
+    }
+
+    let first = db
+        .execute(sql!("SELECT name FROM users ORDER BY name ASC"))
+        .first::<(String,)>()
+        .await
+        .unwrap()
+        .map(|(name,)| name);
+    assert_eq!(first.as_deref(), Some("Alice"));
+}
+
+#[tokio::test]
+async fn case_expressions() {
+    let db = setup().await;
+    for (name, age) in [("Alice", 30), ("Bob", 12)] {
+        db.insert(users)
+            .value(users.insert(format!("{name}@example.com"), name, age))
+            .await
+            .unwrap();
+    }
+
+    let rows: Vec<(String, String)> = db
+        .select(users)
+        .pick((
+            users.name,
+            // The result type is written out because a bare `"adult"` could equally be a
+            // `TEXT`, `VARCHAR(n)` or `CHAR(n)` value; the branches are checked against it.
+            case::<_, besu::Text>()
+                .when(users.age.gte(18), "adult")
+                .otherwise("minor"),
+        ))
+        .order_by(users.name.asc())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows,
+        [
+            ("Alice".to_string(), "adult".to_string()),
+            ("Bob".to_string(), "minor".to_string()),
+        ]
+    );
+}
