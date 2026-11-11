@@ -197,10 +197,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 
     /// A `CROSS JOIN`, which pairs every row with every row.
-    pub fn cross_join<T: Table>(
-        mut self,
-        _table: T,
-    ) -> Select<'a, E, (M, T), (R, T::Model)> {
+    pub fn cross_join<T: Table>(mut self, _table: T) -> Select<'a, E, (M, T), (R, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Cross,
             table: T::DEF,

@@ -43,10 +43,7 @@ impl<Dr: Driver> Executor for &Dr {
     type Driver = Dr;
     type Output = Dr::Output;
 
-    async fn query(
-        &mut self,
-        sql: &Sql<Dr::Dialect>,
-    ) -> Result<Vec<Dr::Row>, Dr::Error> {
+    async fn query(&mut self, sql: &Sql<Dr::Dialect>) -> Result<Vec<Dr::Row>, Dr::Error> {
         let driver: &Dr = self;
         driver.query(sql).await
     }
@@ -108,7 +105,9 @@ impl<D: Dialect> Copy for DryDriver<D> {}
 
 impl<D: Dialect> core::fmt::Debug for DryDriver<D> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DryDriver").field("dialect", &D::NAME).finish()
+        f.debug_struct("DryDriver")
+            .field("dialect", &D::NAME)
+            .finish()
     }
 }
 

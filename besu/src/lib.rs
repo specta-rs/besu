@@ -49,11 +49,17 @@
 //! # }
 //! ```
 //!
+//! # What the compiler stops you doing
+//!
+//! Column types, table membership and unsafe bulk statements are all rejected at compile
+//! time rather than at run time. The `besu-sqlite` crate's documentation contains doc tests
+//! that pin those guarantees down.
+//!
 //! # Where things live
 //!
 //! - [`besu_core`] holds the traits and the SQL primitives. Read that first if you are
 //!   writing a driver.
-//! - [`sql!`] builds a raw, safely-parameterised statement.
+//! - [`sql!`](crate::sql) builds a raw, safely-parameterised statement.
 //! - [`Database`] is the entry point for running queries.
 //!
 //! # Crates
@@ -78,36 +84,38 @@ mod selection;
 mod table;
 
 pub mod types;
-pub use types::{Column, Nullability, Nullable, NonNull, SqlType};
 pub use crate::types::*;
+pub use besu_core::schema::{ColumnDef, DefaultValue, ForeignKey, Index, ReferenceAction};
 pub use besu_core::{
     self, Decode, Dialect, Driver, Error, Executor, Sql, TableDef, TransactionDriver, TypeDef,
     Value,
 };
+#[cfg(feature = "migrate")]
+pub use besu_schema as schema;
 pub use condition::{Contains, Literal, LiteralPath, SameType};
+pub use database::{Database, RawQuery, Transaction, dry};
 #[doc(hidden)]
 pub use expr::ExprKind;
 pub use expr::{
-    and, avg, between, ceil, coalesce, concat, count, count_all, count_distinct, eq, floor, gt,
-    gte, ilike, in_list, is_false, is_not_null, is_null, is_true, length, like, lower, lt, lte,
-    max, min, ne, not, not_between, not_ilike, not_in, not_like, now, or, raw, round, sum, trim,
-    upper, Expr, IntoCondition, IntoExpr, IntoOrder, NullsOrder, Order, OrderClause,
+    Expr, IntoCondition, IntoExpr, IntoOrder, NullsOrder, Order, OrderClause, and, avg, between,
+    ceil, coalesce, concat, count, count_all, count_distinct, eq, floor, gt, gte, ilike, in_list,
+    is_false, is_not_null, is_null, is_true, length, like, lower, lt, lte, max, min, ne, not,
+    not_between, not_ilike, not_in, not_like, now, or, raw, round, sum, trim, upper,
 };
-pub use database::{dry, Database, RawQuery, Transaction};
-pub use macros::Fragment;
 #[doc(hidden)]
 pub use macros::__private;
-pub use query::{Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnConflict, Select, Update, UpdateReturning};
-pub use selection::Selection;
-pub use table::{Insertable, Set, Table};
-pub use besu_core::schema::{ColumnDef, DefaultValue, ForeignKey, Index, ReferenceAction};
-#[cfg(feature = "migrate")]
-pub use besu_schema as schema;
+pub use macros::Fragment;
 #[cfg(feature = "migrate")]
 pub use migrate::{PushResult, SchemaDriver, SchemaError};
+pub use query::{
+    Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnConflict, Select, Update,
+    UpdateReturning,
+};
+pub use selection::Selection;
+pub use table::{Insertable, Set, Table};
+pub use types::{Column, NonNull, Nullability, Nullable, SqlType};
 
 /// Derive a [`Table`] from a struct.
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use besu_macros::Table;
-

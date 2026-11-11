@@ -9,6 +9,44 @@
 //! # Ok(())
 //! # }
 //! ```
+//! # What the compiler stops you doing
+//!
+//! These doc tests fail to compile on purpose: they pin down the guarantees that make Besu
+//! worth using.
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64, pub age: i32 }
+//! # #[derive(Table)] #[besu(table = "posts")] struct Post { pub id: i64, pub title: String }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // `posts` was never joined into this query.
+//! let _ = db.select(users).filter(posts.title.eq("hello"));
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64, pub age: i32 }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // `age` is an integer column, so it will never compare equal to a string.
+//! let _ = db.select(users).filter(users.age.eq("old"));
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64, pub age: i32 }
+//! # async fn demo(db: &besu_sqlite::Database) {
+//! // A delete with no filter would remove every row, so it does not compile.
+//! db.delete(users).await.unwrap();
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! // `sql!` counts its placeholders against its arguments at compile time.
+//! let _ = besu::sql!("SELECT * FROM users WHERE id = ?");
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 

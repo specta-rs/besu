@@ -22,6 +22,25 @@ use crate::types::{
 };
 
 use crate::condition::{Contains, Literal};
+
+macro_rules! expr_comparisons {
+    ($( $(#[$attr:meta])* fn $name:ident => $op:literal ),* $(,)?) => {
+        $(
+            $(#[$attr])*
+            pub fn $name<A, M>(self, other: A) -> Expr<T, Bool>
+            where
+                A: IntoExpr<T, S, M>,
+            {
+                Expr::from_kind(ExprKind::Binary {
+                    op: $op,
+                    left: Box::new(self.into_kind()),
+                    right: Box::new(other.into_expr().into_kind()),
+                })
+            }
+        )*
+    };
+}
+
 use crate::table::Table;
 
 /// The kinds of expression Besu knows how to render.
@@ -86,10 +105,7 @@ pub enum ExprKind {
         fallback: Option<Box<ExprKind>>,
     },
     /// `CAST(expr AS type)`.
-    Cast {
-        expr: Box<ExprKind>,
-        ty: TypeDef,
-    },
+    Cast { expr: Box<ExprKind>, ty: TypeDef },
 }
 
 impl ExprKind {
@@ -247,6 +263,77 @@ impl<T, S: SqlType> Expr<T, S> {
         Expr::from_kind(ExprKind::Cast {
             expr: Box::new(self.into_kind()),
             ty: S2::DEF,
+        })
+    }
+
+    expr_comparisons! {
+        /// `=` comparison.
+        fn eq => "=",
+        /// `<>` comparison.
+        fn ne => "<>",
+        /// `>` comparison.
+        fn gt => ">",
+        /// `>=` comparison.
+        fn gte => ">=",
+        /// `<` comparison.
+        fn lt => "<",
+        /// `<=` comparison.
+        fn lte => "<=",
+        /// `LIKE` comparison.
+        fn like => "LIKE",
+        /// `NOT LIKE` comparison.
+        fn not_like => "NOT LIKE",
+        /// `ILIKE` comparison.
+        fn ilike => "ILIKE",
+        /// `NOT ILIKE` comparison.
+        fn not_ilike => "NOT ILIKE",
+    }
+
+    /// `this + other`.
+    pub fn plus<A, M>(self, other: A) -> Expr<T, S>
+    where
+        A: IntoExpr<T, S, M>,
+    {
+        self.binary("+", other.into_expr().into_kind())
+    }
+
+    /// `this - other`.
+    pub fn minus<A, M>(self, other: A) -> Expr<T, S>
+    where
+        A: IntoExpr<T, S, M>,
+    {
+        self.binary("-", other.into_expr().into_kind())
+    }
+
+    /// `this * other`.
+    pub fn times<A, M>(self, other: A) -> Expr<T, S>
+    where
+        A: IntoExpr<T, S, M>,
+    {
+        self.binary("*", other.into_expr().into_kind())
+    }
+
+    /// `this / other`.
+    pub fn divide<A, M>(self, other: A) -> Expr<T, S>
+    where
+        A: IntoExpr<T, S, M>,
+    {
+        self.binary("/", other.into_expr().into_kind())
+    }
+
+    /// `this % other`.
+    pub fn modulo<A, M>(self, other: A) -> Expr<T, S>
+    where
+        A: IntoExpr<T, S, M>,
+    {
+        self.binary("%", other.into_expr().into_kind())
+    }
+
+    fn binary(self, op: &'static str, right: ExprKind) -> Self {
+        Expr::from_kind(ExprKind::Binary {
+            op,
+            left: Box::new(self.into_kind()),
+            right: Box::new(right),
         })
     }
 
@@ -686,7 +773,7 @@ where
     RowSet: Contains<P, T>,
 {
     fn into_condition(self) -> ExprKind {
-                ExprKind::Column {
+        ExprKind::Column {
             table: T::DEF.name,
             column: self.name(),
         }
@@ -1027,7 +1114,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     where
         RowSet: Contains<P, T>,
     {
-                Expr::from_kind(ExprKind::Postfix {
+        Expr::from_kind(ExprKind::Postfix {
             op: "IS NULL",
             expr: Box::new(self.into_expr_kind()),
         })
@@ -1038,22 +1125,19 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     where
         RowSet: Contains<P, T>,
     {
-                Expr::from_kind(ExprKind::Postfix {
+        Expr::from_kind(ExprKind::Postfix {
             op: "IS NOT NULL",
             expr: Box::new(self.into_expr_kind()),
         })
     }
 
     /// `IN (values...)`.
-    pub fn in_list<RowSet, P, V>(
-        self,
-        values: impl IntoIterator<Item = V>,
-    ) -> Expr<RowSet, Bool>
+    pub fn in_list<RowSet, P, V>(self, values: impl IntoIterator<Item = V>) -> Expr<RowSet, Bool>
     where
         RowSet: Contains<P, T>,
         V: Into<Value>,
     {
-                Expr::from_kind(ExprKind::InList {
+        Expr::from_kind(ExprKind::InList {
             expr: Box::new(self.into_expr_kind()),
             list: values
                 .into_iter()
@@ -1064,15 +1148,12 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     }
 
     /// `NOT IN (values...)`.
-    pub fn not_in<RowSet, P, V>(
-        self,
-        values: impl IntoIterator<Item = V>,
-    ) -> Expr<RowSet, Bool>
+    pub fn not_in<RowSet, P, V>(self, values: impl IntoIterator<Item = V>) -> Expr<RowSet, Bool>
     where
         RowSet: Contains<P, T>,
         V: Into<Value>,
     {
-                Expr::from_kind(ExprKind::InList {
+        Expr::from_kind(ExprKind::InList {
             expr: Box::new(self.into_expr_kind()),
             list: values
                 .into_iter()
@@ -1088,7 +1169,7 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         RowSet: Contains<P, T>,
         V: Into<Value>,
     {
-                Expr::from_kind(ExprKind::Between {
+        Expr::from_kind(ExprKind::Between {
             expr: Box::new(self.into_expr_kind()),
             low: Box::new(ExprKind::Value(low.into())),
             high: Box::new(ExprKind::Value(high.into())),
@@ -1102,10 +1183,64 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         RowSet: Contains<P, T>,
         V: Into<S::Rust>,
     {
-                Expr::from_kind(ExprKind::Function {
+        Expr::from_kind(ExprKind::Function {
             name: "COALESCE",
-            args: alloc::vec![self.into_expr_kind(), ExprKind::Value(fallback.into().into())],
+            args: alloc::vec![
+                self.into_expr_kind(),
+                ExprKind::Value(fallback.into().into())
+            ],
             distinct: false,
+        })
+    }
+
+    /// `this + other`.
+    pub fn plus<RowSet, A, M>(self, other: A) -> Expr<RowSet, S>
+    where
+        A: IntoExpr<RowSet, S, M>,
+    {
+        self.binary::<RowSet, A, M>("+", other)
+    }
+
+    /// `this - other`.
+    pub fn minus<RowSet, A, M>(self, other: A) -> Expr<RowSet, S>
+    where
+        A: IntoExpr<RowSet, S, M>,
+    {
+        self.binary::<RowSet, A, M>("-", other)
+    }
+
+    /// `this * other`.
+    pub fn times<RowSet, A, M>(self, other: A) -> Expr<RowSet, S>
+    where
+        A: IntoExpr<RowSet, S, M>,
+    {
+        self.binary::<RowSet, A, M>("*", other)
+    }
+
+    /// `this / other`.
+    pub fn divide<RowSet, A, M>(self, other: A) -> Expr<RowSet, S>
+    where
+        A: IntoExpr<RowSet, S, M>,
+    {
+        self.binary::<RowSet, A, M>("/", other)
+    }
+
+    /// `this % other`.
+    pub fn modulo<RowSet, A, M>(self, other: A) -> Expr<RowSet, S>
+    where
+        A: IntoExpr<RowSet, S, M>,
+    {
+        self.binary::<RowSet, A, M>("%", other)
+    }
+
+    fn binary<RowSet, A, M>(self, op: &'static str, other: A) -> Expr<RowSet, S>
+    where
+        A: IntoExpr<RowSet, S, M>,
+    {
+        Expr::from_kind(ExprKind::Binary {
+            op,
+            left: Box::new(self.into_expr_kind()),
+            right: Box::new(other.into_expr().into_kind()),
         })
     }
 

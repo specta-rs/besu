@@ -2,9 +2,10 @@ use std::{path::Path, str::from_utf8};
 
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use sqlx::{
-    Arguments, Row,
-    sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult, SqliteRow},
-    Sqlite, SqlitePool,
+    Arguments, Row, Sqlite, SqlitePool,
+    sqlite::{
+        SqliteArguments, SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult, SqliteRow,
+    },
 };
 
 use crate::SQLite;
@@ -127,12 +128,16 @@ impl Driver for Sqlx {
 
     async fn query(&self, sql: &Sql<SQLite>) -> Result<Vec<Self::Row>, Self::Error> {
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments).fetch_all(&self.pool).await
+        sqlx::query_with(sql.sql(), arguments)
+            .fetch_all(&self.pool)
+            .await
     }
 
     async fn execute(&self, sql: &Sql<SQLite>) -> Result<Self::Output, Self::Error> {
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments).execute(&self.pool).await
+        sqlx::query_with(sql.sql(), arguments)
+            .execute(&self.pool)
+            .await
     }
 }
 
@@ -165,7 +170,9 @@ impl TransactionDriver for Sqlx {
         sql: &Sql<SQLite>,
     ) -> Result<Vec<Self::Row>, Self::Error> {
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments).fetch_all(&mut **tx).await
+        sqlx::query_with(sql.sql(), arguments)
+            .fetch_all(&mut **tx)
+            .await
     }
 
     async fn txn_execute<'c, 'a>(
@@ -173,7 +180,9 @@ impl TransactionDriver for Sqlx {
         sql: &Sql<SQLite>,
     ) -> Result<Self::Output, Self::Error> {
         let arguments = arguments(sql)?;
-        sqlx::query_with(sql.sql(), arguments).execute(&mut **tx).await
+        sqlx::query_with(sql.sql(), arguments)
+            .execute(&mut **tx)
+            .await
     }
 }
 

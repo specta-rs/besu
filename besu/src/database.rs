@@ -1,16 +1,16 @@
 use core::{
     future::{Future, IntoFuture},
-    ops::AsyncFnOnce,
     marker::PhantomData,
+    ops::AsyncFnOnce,
     pin::Pin,
 };
 
 use alloc::vec::Vec;
 
-use besu_core::{Decode, Dialect, DialectOf, DryDriver, Driver, ErrorOf, Executor};
+use besu_core::{Decode, Dialect, DialectOf, Driver, DryDriver, ErrorOf, Executor};
 
-use crate::query::{Delete, Insert, Select, Update};
 use crate::macros::Fragment;
+use crate::query::{Delete, Insert, Select, Update};
 use crate::table::Table;
 
 /// A database you can run queries against.
@@ -85,7 +85,10 @@ impl<Dr: Driver> Executor for &Database<Dr> {
     type Driver = Dr;
     type Output = Dr::Output;
 
-    async fn query(&mut self, sql: &besu_core::Sql<Dr::Dialect>) -> Result<Vec<Dr::Row>, Dr::Error> {
+    async fn query(
+        &mut self,
+        sql: &besu_core::Sql<Dr::Dialect>,
+    ) -> Result<Vec<Dr::Row>, Dr::Error> {
         self.driver.query(sql).await
     }
 
@@ -160,7 +163,10 @@ impl<'a, Dr: TransactionDriver> Executor for &mut Transaction<'a, Dr> {
     type Driver = Dr;
     type Output = Dr::Output;
 
-    async fn query(&mut self, sql: &besu_core::Sql<Dr::Dialect>) -> Result<Vec<Dr::Row>, Dr::Error> {
+    async fn query(
+        &mut self,
+        sql: &besu_core::Sql<Dr::Dialect>,
+    ) -> Result<Vec<Dr::Row>, Dr::Error> {
         Dr::txn_query(&mut self.inner, sql).await
     }
 

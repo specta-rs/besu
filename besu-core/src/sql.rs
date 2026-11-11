@@ -1,9 +1,4 @@
-use alloc::{
-    borrow::Cow,
-    fmt,
-    string::String,
-    vec::Vec,
-};
+use alloc::{borrow::Cow, fmt, string::String, vec::Vec};
 
 use crate::{Dialect, Error, Value};
 
@@ -322,4 +317,3 @@ impl<D: Dialect> fmt::Display for Inspect<'_, D> {
 fn render_param<D: Dialect>(value: &D::Value) -> String {
     alloc::format!("{value:?}")
 }
-

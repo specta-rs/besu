@@ -92,11 +92,7 @@ async fn filters_and_ordering() {
     let db = setup().await;
     for (name, age) in [("Alice", 30), ("Bob", 17), ("Carol", 25)] {
         db.insert(users)
-            .value(users.insert(
-                format!("{name}@example.com"),
-                name.to_string(),
-                age,
-            ))
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
             .await
             .unwrap();
     }
@@ -133,11 +129,7 @@ async fn projection_and_aggregates() {
     let db = setup().await;
     for (name, age) in [("Alice", 30), ("Bob", 20)] {
         db.insert(users)
-            .value(users.insert(
-                format!("{name}@example.com"),
-                name.to_string(),
-                age,
-            ))
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
             .await
             .unwrap();
     }
@@ -307,10 +299,7 @@ async fn schema_push_converges() {
     assert_eq!(first.changes.len(), 2);
     assert!(first.statements[0].contains("CREATE TABLE \"users\""));
     assert!(
-        first
-            .statements
-            .iter()
-            .any(|s| s.contains("AUTOINCREMENT")),
+        first.statements.iter().any(|s| s.contains("AUTOINCREMENT")),
         "auto-incrementing primary keys must be inline in SQLite: {:?}",
         first.statements
     );
@@ -329,10 +318,170 @@ async fn schema_push_converges() {
     assert_eq!(introspected.tables.len(), 2);
     let users_table = introspected.table("users").unwrap();
     assert_eq!(users_table.columns.len(), 5);
-    assert!(users_table.columns.iter().any(|c| c.name == "id" && c.auto_increment));
-    assert!(users_table.columns.iter().any(|c| c.name == "email" && c.unique));
-    assert!(users_table.columns.iter().any(|c| c.name == "bio" && c.nullable));
+    assert!(
+        users_table
+            .columns
+            .iter()
+            .any(|c| c.name == "id" && c.auto_increment)
+    );
+    assert!(
+        users_table
+            .columns
+            .iter()
+            .any(|c| c.name == "email" && c.unique)
+    );
+    assert!(
+        users_table
+            .columns
+            .iter()
+            .any(|c| c.name == "bio" && c.nullable)
+    );
     let posts_table = introspected.table("posts").unwrap();
     assert_eq!(posts_table.foreign_keys.len(), 1);
     assert_eq!(posts_table.foreign_keys[0].references_table, "users");
+}
+
+#[tokio::test]
+async fn null_handling() {
+    let db = setup().await;
+
+    // Not providing a nullable column lets the database default apply, which is `NULL`.
+    let unset = db
+        .insert(users)
+        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(unset.bio, None);
+
+    // Providing `None` explicitly writes `NULL`, which is a different statement but the
+    // same result for a column with no other default.
+    let explicit = db
+        .insert(users)
+        .value(
+            users
+                .insert("b@example.com".into(), "Bob".into(), 25)
+                .bio(None::<String>),
+        )
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(explicit.bio, None);
+
+    let with_bio = db
+        .insert(users)
+        .value(
+            users
+                .insert("c@example.com".into(), "Carol".into(), 40)
+                .bio("Rust"),
+        )
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(with_bio.bio.as_deref(), Some("Rust"));
+
+    let missing: Vec<User> = db.select(users).filter(users.bio.is_null()).await.unwrap();
+    assert_eq!(missing.len(), 2);
+
+    let present: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_not_null())
+        .await
+        .unwrap();
+    assert_eq!(present.len(), 1);
+}
+
+#[tokio::test]
+async fn expressions_and_grouping() {
+    let db = setup().await;
+    for (name, age) in [("Alice", 30), ("Bob", 25), ("Carol", 30)] {
+        db.insert(users)
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
+            .await
+            .unwrap();
+    }
+
+    // Compute the new value in the database instead of in Rust.
+    db.update(users)
+        .set_expr(users.age, users.age.as_expr().plus(5))
+        .all_rows()
+        .await
+        .unwrap();
+    let ages: Vec<i32> = db
+        .select(users)
+        .pick(users.age)
+        .order_by(users.age.asc())
+        .await
+        .unwrap();
+    assert_eq!(ages, [30, 35, 35]);
+
+    let grouped: Vec<(i32, i64)> = db
+        .select(users)
+        .pick((users.age, count_all()))
+        .group_by(users.age)
+        .having(count_all().gt(1))
+        .order_by(users.age.asc())
+        .await
+        .unwrap();
+    assert_eq!(grouped, [(35, 2)]);
+
+    let distinct: Vec<i32> = db
+        .select(users)
+        .pick(users.age)
+        .distinct()
+        .order_by(users.age.asc())
+        .await
+        .unwrap();
+    assert_eq!(distinct, [30, 35]);
+
+    let page: Vec<String> = db
+        .select(users)
+        .pick(users.name)
+        .order_by(users.name.asc())
+        .limit(1)
+        .offset(1)
+        .await
+        .unwrap();
+    assert_eq!(page, ["Bob"]);
+
+    let between: Vec<String> = db
+        .select(users)
+        .filter(users.age.between(28, 32))
+        .pick(users.name)
+        .await
+        .unwrap();
+    assert_eq!(between.len(), 1);
+
+    let casted: Vec<String> = db
+        .select(users)
+        .pick(users.age.as_expr().cast::<besu::Text>())
+        .order_by(users.age.asc())
+        .limit(1)
+        .await
+        .unwrap();
+    assert_eq!(casted, ["30"]);
+}
+
+#[tokio::test]
+async fn upsert_roundtrip_and_conflict_target_tuple() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .await
+        .unwrap();
+
+    // A composite conflict target is accepted as a tuple.
+    db.insert(users)
+        .value(users.insert("a@example.com".into(), "Alice".into(), 31))
+        .on_conflict(users.email)
+        .do_update(users.age, 31)
+        .await
+        .unwrap();
+
+    let all: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].age, 31);
 }

@@ -4,8 +4,7 @@
 /// casts), by schema generation (for DDL) and by migrations (for diffing). It is
 /// deliberately *not* a database-native type: each [`Dialect`](crate::Dialect) maps a
 /// [`TypeDef`] onto its own native spelling.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum TypeDef {
     /// `BOOLEAN`
@@ -54,4 +53,3 @@ pub enum TypeDef {
     /// [`Cow`] rather than a plain `&'static str`.
     Custom(alloc::borrow::Cow<'static, str>),
 }
-

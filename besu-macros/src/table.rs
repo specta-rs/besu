@@ -1,6 +1,6 @@
 use heck::ToSnakeCase;
-use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitStr, Result, Type,
@@ -77,10 +77,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     );
     let table_struct_ident = format_ident!("{}Table", struct_ident);
     let insert_struct_ident = format_ident!("{}Insert", struct_ident);
-    let module_ident = format_ident!(
-        "__besu_table_{}",
-        struct_ident.to_string().to_snake_case()
-    );
+    let module_ident = format_ident!("__besu_table_{}", struct_ident.to_string().to_snake_case());
 
     let mut columns = Vec::new();
     let mut skipped = Vec::new();
@@ -426,10 +423,7 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
             quote!(#besu::TimestampTz),
             quote!(#besu::TypeDef::TimestampTz),
         ),
-        "NaiveDateTime" => (
-            quote!(#besu::Timestamp),
-            quote!(#besu::TypeDef::Timestamp),
-        ),
+        "NaiveDateTime" => (quote!(#besu::Timestamp), quote!(#besu::TypeDef::Timestamp)),
         "NaiveDate" => (quote!(#besu::Date), quote!(#besu::TypeDef::Date)),
         "NaiveTime" => (quote!(#besu::Time), quote!(#besu::TypeDef::Time)),
         "Value" => (quote!(#besu::Json), quote!(#besu::TypeDef::Json)),
@@ -550,7 +544,11 @@ impl Codegen {
 
         let index_defs = columns.iter().filter(|column| column.index).map(|column| {
             let name = LitStr::new(
-                &format!("{}_{}_idx", self.table_name.value(), column.sql_name.value()),
+                &format!(
+                    "{}_{}_idx",
+                    self.table_name.value(),
+                    column.sql_name.value()
+                ),
                 column.ident.span(),
             );
             let column_name = &column.sql_name;
@@ -566,7 +564,11 @@ impl Codegen {
         let foreign_keys = columns.iter().filter_map(|column| {
             let reference = column.reference.as_ref()?;
             let name = LitStr::new(
-                &format!("{}_{}_fkey", self.table_name.value(), column.sql_name.value()),
+                &format!(
+                    "{}_{}_fkey",
+                    self.table_name.value(),
+                    column.sql_name.value()
+                ),
                 column.ident.span(),
             );
             let column_name = &column.sql_name;
@@ -592,9 +594,10 @@ impl Codegen {
             let ty = &column.full_ty;
             quote!(#ident: <#ty as #besu::Decode<Dr>>::decode(row, offset)?)
         });
-        let skipped_fields = self.skipped.iter().map(|ident| {
-            quote!(#ident: ::core::default::Default::default())
-        });
+        let skipped_fields = self
+            .skipped
+            .iter()
+            .map(|ident| quote!(#ident: ::core::default::Default::default()));
         let decode_bounds = columns.iter().map(|column| {
             let ty = &column.full_ty;
             quote!(#ty: #besu::Decode<Dr>)
@@ -610,9 +613,7 @@ impl Codegen {
 
         let required: Vec<&Column> = columns
             .iter()
-            .filter(|column| {
-                !column.nullable && !column.auto_increment && column.default.is_none()
-            })
+            .filter(|column| !column.nullable && !column.auto_increment && column.default.is_none())
             .collect();
 
         let required_args = required.iter().map(|column| {
@@ -623,7 +624,10 @@ impl Codegen {
 
         let insert_initialisers = columns.iter().map(|column| {
             let ident = &column.ident;
-            if required.iter().any(|required| required.ident == column.ident) {
+            if required
+                .iter()
+                .any(|required| required.ident == column.ident)
+            {
                 quote!(#ident: #besu::Set::Value(#ident))
             } else {
                 quote!(#ident: #besu::Set::Unset)

@@ -1,5 +1,5 @@
-use besu_core::schema::ReferenceAction;
 use besu_core::TypeDef;
+use besu_core::schema::ReferenceAction;
 use besu_schema::{Column, ForeignKey, Index, Schema, Table};
 
 use crate::Sqlx;
@@ -17,7 +17,9 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
 
     let mut schema = Schema::new();
     for (name, create_sql) in tables {
-        schema.tables.push(introspect_table(db, name, create_sql).await?);
+        schema
+            .tables
+            .push(introspect_table(db, name, create_sql).await?);
     }
     schema.sort();
     Ok(schema)
@@ -43,16 +45,18 @@ async fn introspect_table(
         schema: None,
         columns: columns
             .into_iter()
-            .map(|(_, column_name, ty, not_null, default, primary_key)| Column {
-                name: column_name,
-                ty: parse_type(&ty),
-                nullable: not_null == 0 && primary_key == 0,
-                auto_increment: auto_increment && primary_key != 0,
-                primary_key: primary_key != 0,
-                unique: false,
-                default: default.map(normalise_default),
-                comment: None,
-            })
+            .map(
+                |(_, column_name, ty, not_null, default, primary_key)| Column {
+                    name: column_name,
+                    ty: parse_type(&ty),
+                    nullable: not_null == 0 && primary_key == 0,
+                    auto_increment: auto_increment && primary_key != 0,
+                    primary_key: primary_key != 0,
+                    unique: false,
+                    default: default.map(normalise_default),
+                    comment: None,
+                },
+            )
             .collect(),
         indexes: Vec::new(),
         foreign_keys: Vec::new(),
@@ -118,7 +122,16 @@ async fn introspect_foreign_keys(
     // (id, seq, table, from, to, on_update, on_delete, match)
     let rows = db
         .execute(besu::Fragment::new(pragma))
-        .all::<(i64, i64, String, String, Option<String>, String, String, String)>()
+        .all::<(
+            i64,
+            i64,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        )>()
         .await?;
 
     let mut current: Option<ForeignKey> = None;
@@ -140,7 +153,8 @@ async fn introspect_foreign_keys(
         }
         if let Some(fk) = &mut current {
             fk.columns.push(from);
-            fk.references_columns.push(to.unwrap_or_else(|| "id".into()));
+            fk.references_columns
+                .push(to.unwrap_or_else(|| "id".into()));
         }
         let _ = id;
     }

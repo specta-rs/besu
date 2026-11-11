@@ -1,0 +1,10 @@
+[package]
+name = "example-postgres"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+besu = { workspace = true, features = ["derive", "migrate"] }
+besu-postgres = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

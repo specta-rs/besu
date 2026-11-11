@@ -136,7 +136,7 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         tables: impl IntoIterator<Item = &'static TableDef>,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        self.push_inner(tables, false).await
+        self.push_schema(&Self::schema(tables)).await
     }
 
     /// Like [`Database::push`], but drops columns and tables when the schema no longer
@@ -145,17 +145,39 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         tables: impl IntoIterator<Item = &'static TableDef>,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        self.push_inner(tables, true).await
+        self.push_schema_inner(&Self::schema(tables), true).await
     }
 
-    async fn push_inner(
+    /// Diff a schema against the live database and apply the difference.
+    pub async fn push_schema(
         &self,
+        desired: &Schema,
+    ) -> Result<PushResult, SchemaError<Dr::Error>> {
+        self.push_schema_inner(desired, false).await
+    }
+
+    /// Like [`Database::push_schema`], but applies destructive changes too.
+    pub async fn push_schema_destructive(
+        &self,
+        desired: &Schema,
+    ) -> Result<PushResult, SchemaError<Dr::Error>> {
+        self.push_schema_inner(desired, true).await
+    }
+
+    /// The JSON snapshot of a schema, ready to hand to `besu push`.
+    pub fn schema_snapshot(
         tables: impl IntoIterator<Item = &'static TableDef>,
+    ) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(&Self::schema(tables))
+    }
+
+    async fn push_schema_inner(
+        &self,
+        desired: &Schema,
         allow_destructive: bool,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        let desired = Self::schema(tables);
         let current = self.introspect().await.map_err(SchemaError::Driver)?;
-        let changes = besu_schema::diff::diff(&current, &desired);
+        let changes = besu_schema::diff::diff(&current, desired);
 
         if !allow_destructive {
             let destructive: Vec<Change> = changes
