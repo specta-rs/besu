@@ -203,6 +203,34 @@ impl_decode!(
     chrono::DateTime<chrono::Utc>,
 );
 
+/// Decode an integer column as `i64`, whichever signedness MySQL reports for it.
+///
+/// Most columns are signed, but MySQL marks a few computed values — `COUNT(*)` for
+/// instance — as `BIGINT UNSIGNED`, and `sqlx` refuses to decode an unsigned column
+/// through a signed type. Trying signed first and unsigned second covers both without
+/// looking at the column metadata.
+fn decode_integer(row: &MySqlRow, offset: &mut usize) -> Result<i64, sqlx::Error> {
+    let index = *offset;
+
+    if let Ok(value) = row.try_get::<i64, _>(index) {
+        *offset += 1;
+        return Ok(value);
+    }
+
+    if let Ok(value) = row.try_get::<u64, _>(index) {
+        *offset += 1;
+        return i64::try_from(value).map_err(|_| {
+            <Sqlx as Driver>::error(Error::decode(
+                index,
+                "a MySQL unsigned integer is larger than i64::MAX",
+            ))
+        });
+    }
+
+    // Neither type matches; decode once more so the caller gets sqlx's own explanation.
+    decode_via_sqlx::<i64>(row, offset)
+}
+
 /// MySQL narrows integers on the wire: a `BIGINT` and a `TINYINT` both arrive as a
 /// little-endian buffer of one to eight bytes. Decoding through `i64` and range-checking
 /// keeps a wrong-width value an error rather than a silent truncation.
@@ -212,7 +240,7 @@ macro_rules! impl_decode_int {
             impl Decode<Sqlx> for $ty {
                 fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
                     let index = *offset;
-                    let value = decode_via_sqlx::<i64>(row, offset)?;
+                    let value = decode_integer(row, offset)?;
                     <$ty>::try_from(value).map_err(|_| {
                         <Sqlx as Driver>::error(Error::decode(
                             index,
@@ -246,7 +274,7 @@ impl Decode<Sqlx> for u64 {
             return Ok(value);
         }
 
-        let value = decode_via_sqlx::<i64>(row, offset)?;
+        let value = decode_integer(row, offset)?;
         u64::try_from(value).map_err(|_| {
             <Sqlx as Driver>::error(Error::decode(
                 index,

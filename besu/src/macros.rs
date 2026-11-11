@@ -15,7 +15,7 @@ use besu_core::{Dialect, Error, Sql, Value};
 
 /// A raw SQL statement with its parameters.
 ///
-/// Construct one with [`sql!`] or [`Fragment::new`].
+/// Construct one with [`sql!`](crate::sql) or [`Fragment::new`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fragment {
     sql: Cow<'static, str>,

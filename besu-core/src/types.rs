@@ -50,6 +50,6 @@ pub enum TypeDef {
     /// An arbitrary type the user asked for verbatim, for example a Postgres enum.
     ///
     /// Introspection uses this for database-native types Besu does not model, so it holds a
-    /// [`Cow`] rather than a plain `&'static str`.
+    /// `Cow` rather than a plain `&'static str`.
     Custom(alloc::borrow::Cow<'static, str>),
 }

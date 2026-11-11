@@ -54,7 +54,7 @@ async fn insert_and_select() {
 
     let created = db
         .insert(users)
-        .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+        .value(users.insert("oscar@example.com", "Oscar", 21))
         .returning(users)
         .await
         .unwrap();
@@ -152,7 +152,7 @@ async fn projection_and_aggregates() {
 async fn update_and_delete() {
     let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
@@ -183,13 +183,13 @@ async fn joins() {
     let db = setup().await;
     let author = db
         .insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .returning(users)
         .await
         .unwrap()
         .remove(0);
     db.insert(posts)
-        .value(posts.insert("Hello".into(), author.id))
+        .value(posts.insert("Hello", author.id))
         .await
         .unwrap();
 
@@ -215,13 +215,13 @@ async fn joins() {
 async fn upsert() {
     let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
     let rows = db
         .insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 31))
+        .value(users.insert("a@example.com", "Alice", 31))
         .on_conflict(users.email)
         .do_update(users.age, 31)
         .returning(users)
@@ -236,7 +236,7 @@ async fn transactions() {
 
     db.transaction(async |tx| {
         tx.insert(users)
-            .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+            .value(users.insert("a@example.com", "Alice", 30))
             .await?;
         Ok(())
     })
@@ -258,7 +258,7 @@ async fn transactions() {
 async fn raw_sql() {
     let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
@@ -348,7 +348,7 @@ async fn null_handling() {
     // Not providing a nullable column lets the database default apply, which is `NULL`.
     let unset = db
         .insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .returning(users)
         .await
         .unwrap()
@@ -359,11 +359,7 @@ async fn null_handling() {
     // same result for a column with no other default.
     let explicit = db
         .insert(users)
-        .value(
-            users
-                .insert("b@example.com".into(), "Bob".into(), 25)
-                .bio(None::<String>),
-        )
+        .value(users.insert("b@example.com", "Bob", 25).bio(None::<String>))
         .returning(users)
         .await
         .unwrap()
@@ -372,11 +368,7 @@ async fn null_handling() {
 
     let with_bio = db
         .insert(users)
-        .value(
-            users
-                .insert("c@example.com".into(), "Carol".into(), 40)
-                .bio("Rust"),
-        )
+        .value(users.insert("c@example.com", "Carol", 40).bio("Rust"))
         .returning(users)
         .await
         .unwrap()
@@ -469,13 +461,13 @@ async fn expressions_and_grouping() {
 async fn upsert_roundtrip_and_conflict_target_tuple() {
     let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
     // A composite conflict target is accepted as a tuple.
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 31))
+        .value(users.insert("a@example.com", "Alice", 31))
         .on_conflict(users.email)
         .do_update(users.age, 31)
         .await

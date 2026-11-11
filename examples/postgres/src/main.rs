@@ -36,7 +36,7 @@ pub struct Post {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = besu::Database::new(Sqlx::connect(
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://besu:besu@localhost:55432/besu".into()),
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://besu:besu@localhost:55432/besu"),
     )
     .await?);
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Inserts return the rows the database actually wrote, including generated columns.
     let oscar = db
         .insert(users)
-        .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+        .value(users.insert("oscar@example.com", "Oscar", 21))
         .returning(users)
         .await?
         .remove(0);
@@ -55,8 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert(users)
         .value(
             users
-                .insert("monty@example.com".into(), "Monty".into(), 7)
-                .bio("Woof woof".into()),
+                .insert("monty@example.com", "Monty", 7)
+                .bio("Woof woof"),
         )
         .returning(users)
         .await?
@@ -64,9 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     db.insert(posts)
         .values([
-            posts.insert("Hello, world".into(), oscar.id),
-            posts.insert("A second post".into(), oscar.id),
-            posts.insert("Monty's first post".into(), monty.id),
+            posts.insert("Hello, world", oscar.id),
+            posts.insert("A second post", oscar.id),
+            posts.insert("Monty's first post", monty.id),
         ])
         .await?;
 
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Upsert: insert, or update when the unique column already exists.
     db.insert(users)
-        .value(users.insert("oscar@example.com".into(), "Oscar".into(), 22))
+        .value(users.insert("oscar@example.com", "Oscar", 22))
         .on_conflict(users.email)
         .do_update(users.age, 22)
         .await?;
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // error. `begin` is there for when you want to commit or roll back by hand.
     let mut tx = db.begin().await?;
     tx.insert(posts)
-        .value(posts.insert("Will be rolled back".into(), oscar.id))
+        .value(posts.insert("Will be rolled back", oscar.id))
         .await?;
     tx.rollback().await?;
 
