@@ -67,6 +67,7 @@ impl Dialect for BacktickDialect {
     const SUPPORTS_FULL_JOIN: bool = false;
     const SUPPORTS_INTERSECT_ALL: bool = false;
     const SUPPORTS_EXCEPT_ALL: bool = false;
+    const JSON_PATH: besu_core::JsonPathStyle = besu_core::JsonPathStyle::Mysql;
     const UPSERT: UpsertStyle = UpsertStyle::OnDuplicateKey;
 
     fn bind(value: Value) -> Result<Self::Value, Error> {
@@ -663,4 +664,23 @@ fn mixing_intersect_with_union_is_rejected() {
         .to_sql()
         .unwrap();
     assert!(sql.error().is_none(), "{:?}", sql.error());
+}
+
+#[test]
+fn mysql_json_paths_are_quoted() {
+    // The path is rendered as a string literal, and the closing quote is easy to drop: it
+    // was missing until a documentation pass tried to execute the statement.
+    let db = dry::<BacktickDialect>();
+    let sql = db
+        .select(events)
+        .pick(besu::json_text(events.payload, "user.name"))
+        .to_sql()
+        .unwrap();
+
+    assert!(
+        sql.sql()
+            .contains(r#"JSON_UNQUOTE(JSON_EXTRACT(`events`.`payload`, '$.user.name'))"#),
+        "got: {}",
+        sql.sql()
+    );
 }
