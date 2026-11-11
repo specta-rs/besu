@@ -353,6 +353,9 @@ impl ExprKind {
                         expr.render(out);
                         out.push_raw(", '$.");
                         out.push_raw(path);
+                        // The path is a quoted string literal, so it needs its closing
+                        // quote — the first version of this arm simply forgot it.
+                        out.push_raw("'");
                         out.push_raw(")");
                         if *as_text {
                             out.push_raw(")");
