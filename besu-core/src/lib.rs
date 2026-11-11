@@ -42,7 +42,7 @@ pub mod types;
 pub mod value;
 
 pub use decode::Decode;
-pub use dialect::{Dialect, Placeholder, UpsertStyle};
+pub use dialect::{Dialect, JsonPathStyle, Placeholder, UpsertStyle};
 pub use driver::{Driver, TransactionDriver};
 pub use error::Error;
 pub use executor::{DialectOf, Dry, DryDriver, DryRow, ErrorOf, Executor, RowOf};

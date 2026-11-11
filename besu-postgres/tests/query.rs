@@ -505,3 +505,27 @@ async fn json_existence_operator_with_an_escaped_question_mark() {
         .unwrap();
     assert_eq!(rows, [(true,)]);
 }
+
+#[tokio::test]
+async fn json_path_access() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let text: Vec<(String,)> = db
+        .execute(sql!(
+            "SELECT ?::jsonb #>> '{user,name}' AS name",
+            r#"{"user": {"name": "Oscar"}}"#
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(text, [("Oscar".to_string(),)]);
+
+    // The same operator comes out of the typed helper.
+    let rendered = besu::dry::<besu_postgres::Postgres>();
+    let sql = rendered
+        .execute(sql!("SELECT ?::jsonb #>> '{user,name}'", ""))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains("#>>"), "got {}", sql.sql());
+}

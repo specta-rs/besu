@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use besu_core::{Dialect, Error, Placeholder, TypeDef, UpsertStyle, Value};
+use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The PostgreSQL dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,7 @@ impl Dialect for Postgres {
     const SUPPORTS_NULLS_ORDER: bool = true;
     const SUPPORTS_DEFAULT_IN_VALUES: bool = true;
     const MAX_PARAMS: usize = 65_535;
+    const JSON_PATH: JsonPathStyle = JsonPathStyle::Postgres;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
 
     fn bind(value: Value) -> Result<Self::Value, Error> {

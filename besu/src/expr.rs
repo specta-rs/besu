@@ -106,6 +106,13 @@ pub enum ExprKind {
     },
     /// `CAST(expr AS type)`.
     Cast { expr: Box<ExprKind>, ty: TypeDef },
+    /// A value inside a JSON document, reached by a dotted path.
+    JsonPath {
+        expr: Box<ExprKind>,
+        path: &'static str,
+        /// `true` for the text form (`->>`), `false` for the JSON form (`->`).
+        as_text: bool,
+    },
 }
 
 impl ExprKind {
@@ -231,6 +238,48 @@ impl ExprKind {
                 out.push_raw(" AS ");
                 out.push_raw(&D::type_name(ty.clone()));
                 out.push_raw(")");
+            }
+            Self::JsonPath {
+                expr,
+                path,
+                as_text,
+            } => {
+                use besu_core::JsonPathStyle;
+                match D::JSON_PATH {
+                    JsonPathStyle::Postgres => {
+                        expr.render(out);
+                        out.push_raw(if *as_text { " #>> '{" } else { " #> '{" });
+                        for (i, segment) in path.split('.').enumerate() {
+                            if i != 0 {
+                                out.push_raw(",");
+                            }
+                            out.push_raw(segment.replace('\'', "''").as_str());
+                        }
+                        out.push_raw("}'");
+                    }
+                    JsonPathStyle::Sqlite => {
+                        // `->` and `->>` have been available since SQLite 3.38 and keep the
+                        // JSON/text distinction that `json_extract` does not: it returns a
+                        // native scalar, which cannot decode as JSON.
+                        expr.render(out);
+                        out.push_raw(if *as_text { " ->> '$." } else { " -> '$." });
+                        out.push_raw(path);
+                        out.push_raw("'");
+                    }
+                    JsonPathStyle::Mysql => {
+                        if *as_text {
+                            out.push_raw("JSON_UNQUOTE(");
+                        }
+                        out.push_raw("JSON_EXTRACT(");
+                        expr.render(out);
+                        out.push_raw(", '$.");
+                        out.push_raw(path);
+                        out.push_raw(")");
+                        if *as_text {
+                            out.push_raw(")");
+                        }
+                    }
+                }
             }
         }
     }
@@ -1048,6 +1097,37 @@ impl<T, S: SqlType> CaseBuilder<T, S> {
             fallback: Some(Box::new(value.into_expr().into_kind())),
         })
     }
+}
+
+/// The JSON value at `path` inside `document`, keeping its JSON type.
+///
+/// `path` is a dotted key path — `"a.b"` reaches `document["a"]["b"]` — and must be a
+/// literal, because it is rendered into the SQL rather than bound. Keys containing a dot are
+/// not expressible; use [`raw`] for those.
+pub fn json_get<RowSet, A, MA>(document: A, path: &'static str) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonPath {
+        expr: Box::new(document.into_typed().into_kind()),
+        path,
+        as_text: false,
+    })
+}
+
+/// The text at `path` inside `document`, unquoted.
+///
+/// This is `->>` rather than `->`: a JSON string comes back without its quotes, which is
+/// almost always what you want when comparing against a `String` column or parameter.
+pub fn json_text<RowSet, A, MA>(document: A, path: &'static str) -> Expr<RowSet, Text>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonPath {
+        expr: Box::new(document.into_typed().into_kind()),
+        path,
+        as_text: true,
+    })
 }
 
 /// The database's current timestamp.

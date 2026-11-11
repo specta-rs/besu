@@ -13,6 +13,17 @@ pub enum Placeholder {
     Dollar,
 }
 
+/// How a dialect spells access to a value inside a JSON document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonPathStyle {
+    /// `doc #> '{a,b}'` for JSON and `doc #>> '{a,b}'` for text, as in PostgreSQL.
+    Postgres,
+    /// `json_extract(doc, '$.a.b')`, which returns text for a scalar, as in SQLite.
+    Sqlite,
+    /// `JSON_EXTRACT(doc, '$.a.b')`, wrapped in `JSON_UNQUOTE` for text, as in MySQL.
+    Mysql,
+}
+
 /// How a dialect spells an upsert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsertStyle {
@@ -80,6 +91,9 @@ pub trait Dialect: 'static + Sized {
 
     /// How the dialect spells an upsert.
     const UPSERT: UpsertStyle;
+
+    /// How the dialect spells access to a value inside a JSON document.
+    const JSON_PATH: JsonPathStyle = JsonPathStyle::Sqlite;
 
     /// Whether `DELETE ... LIMIT n` is available. PostgreSQL has no such statement.
     const SUPPORTS_DELETE_LIMIT: bool = true;

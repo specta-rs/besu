@@ -10,11 +10,10 @@ would actually require. The order is a judgement about impact versus cost, not a
 | 3 | [Custom column types](#custom-column-types) | `DECIMAL`, enums and domain types are only partly reachable | Medium |
 | 4 | [Runtime driver switching](#runtime-driver-switching) | Config-driven applications cannot pick a backend | Medium |
 | 5 | [Full text search](#full-text-search) | No typed `MATCH` / `tsquery` | Medium |
-| 6 | [JSON path operators](#json-path-operators) | JSON is stored but not queryable in a typed way | Medium |
-| 7 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
-| 8 | [wasm support](#wasm-support) | The builder could run in a browser; execution cannot | Large |
-| 9 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
-| 10 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
+| 6 | [u128 support](#u128-support) | Large identifiers have no lossless type | Small–medium |
+| 7 | [wasm support](#wasm-support) | The builder could run in a browser; execution cannot | Large |
+| 8 | [Table name prefixes](#table-name-prefixes) | Multi-tenant naming needs runtime prefixes | Small–medium |
+| 9 | [Studio UI](#studio-ui) | No visual schema/data browser | Large |
 
 ## Eager loading / relations
 
@@ -125,24 +124,6 @@ What it would take:
 - Language configuration (PostgreSQL's `regconfig`) as a parameter, not a hard-coded string.
 - Ranking (`ts_rank`) and highlighting are separate functions.
 
-## JSON path operators
-
-Tracked as [#58](https://github.com/specta-rs/besu/issues/58).
-
-`serde_json::Value` columns are stored and decoded, but there is no typed `->`, `->>`, `#>`,
-`#>>` or `@>`. A query has to use `raw`, which loses the type check and cannot contain a
-literal `?` because that is the placeholder marker.
-
-What it would take:
-
-- `ExprKind` variants for JSON access and containment, with dialect-specific rendering:
-  PostgreSQL `jsonb -> 'key'`, SQLite `json_extract`, MySQL `JSON_EXTRACT` / `->>`.
-- A path type (`&[&str]` or a small builder) and a result type: `->` returns JSON, `->>`
-  returns text. That is two methods, not one, because the SQL types differ.
-- A literal `?` escape in `sql!` for PostgreSQL's JSON existence operator, which needs the
-  scanner to understand an escape sequence.
-- Indexing support: a JSON path index is a DDL feature the schema IR cannot express.
-
 ## u128 support
 
 Tracked as [#59](https://github.com/specta-rs/besu/issues/59).
@@ -251,6 +232,8 @@ Kept here so the history is visible rather than deleted:
 - **#75, publish metadata.** Every crate has a README, keywords and categories, and the
   publish order is written down in `CONTRIBUTING.md`.
 - **#76, update from model.** `Update::set_model`.
+- **#58, JSON path operators.** `json_get` and `json_text` with a dotted path, rendered per
+  dialect.
 - **#54, rename detection.** `#[besu(renamed_from = "...")]` turns a drop plus an add into one
   `ALTER TABLE ... RENAME COLUMN`. Renaming a table still is not modelled.
 
