@@ -276,6 +276,15 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
 
     /// Insert many rows in a single statement.
     pub fn values(mut self, values: impl IntoIterator<Item = I>) -> Self {
+        let values = values.into_iter();
+        // `Vec::into_iter` and slices report an exact length, which is the common case for
+        // a bulk insert: reserving once is one allocation and no copying, where growing
+        // from empty reallocates and copies the whole buffer a dozen times.
+        let (rows, _) = values.size_hint();
+        self.query
+            .values
+            .reserve(rows.saturating_mul(self.query.stride()));
+
         for value in values {
             value.write_values(&mut self.query.values);
         }
@@ -343,7 +352,9 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         // One flat buffer for the whole iterator, drained one statement at a time. Building
         // a row at a time and pushing it into a `VecDeque` allocated per row for no reason:
         // nothing here needs to revisit a value.
-        let mut pending = Vec::new();
+        let values = values.into_iter();
+        let (rows, _) = values.size_hint();
+        let mut pending = Vec::with_capacity(rows.saturating_mul(stride));
         for value in values {
             value.write_values(&mut pending);
         }
