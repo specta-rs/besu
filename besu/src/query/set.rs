@@ -363,7 +363,7 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
     /// Like [`Select::to_sql`], a capability the dialect lacks is recorded as
     /// [`Sql::error`] rather than returned here.
     pub fn to_sql(&self) -> Result<Sql<DialectOf<E>>, Error> {
-        Ok(self.render().seal())
+        Ok(self.render())
     }
 
     /// Render the SQL with its parameters inlined, for logging.
@@ -376,7 +376,9 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
         let mut out = Sql::with_capacity(query.capacity_hint());
         out.set_table_prefix(self.exec.table_prefix());
         query.render_into(&mut out);
-        out
+        // Sealed here, so the text `to_sql` shows and the text the driver runs are the same
+        // string — which is what the prepared-statement cache key depends on.
+        out.seal()
     }
 }
 
@@ -386,12 +388,8 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<Vec<R>, ErrorOf<E>> {
-        let prefix = self.exec.table_prefix();
-        let (mut exec, mut query) = (self.exec, self.query);
-        let mut out = Sql::with_capacity(query.capacity_hint());
-        out.set_table_prefix(prefix);
-        query.render_into(&mut out);
-        let sql = out.finish().map_err(<E::Driver as Driver>::error)?;
+        let sql = self.render().finish().map_err(<E::Driver as Driver>::error)?;
+        let mut exec = self.exec;
         let rows = exec.query(&sql).await?;
         decode_rows::<E, R>(&rows)
     }
