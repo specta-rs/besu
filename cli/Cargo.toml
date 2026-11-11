@@ -1,16 +1,25 @@
 [package]
 name = "besu-cli"
-description = "The Besu CLI for managing migrations, codegen and more"
-version = "0.0.1"
-authors = ["Oscar Beaumont <oscar@otbeaumont.me>"]
-edition = "2021"
-license = "MIT"
-repository = "https://github.com/specta-rs/besu"
-keywords = ["async", "database", "query-builder", "typesafe", "cli"]
-categories = ["web-programming", "asynchronous"]
+description = "Command line tooling for Besu."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "besu"
+path = "src/main.rs"
 
 [dependencies]
-tracing = { version = "0.1" }
-
-clap = { version = "4.5.16", features = ["derive"] }
-tracing-subscriber = "0.3.18"
+besu-core = { workspace = true }
+besu-schema = { workspace = true }
+besu-postgres = { workspace = true, features = ["sqlx"] }
+besu-mysql = { workspace = true, features = ["sqlx"] }
+besu-sqlite = { workspace = true, features = ["sqlx"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

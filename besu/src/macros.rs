@@ -1,110 +1,195 @@
-// TODO: This macro should ensure the correct number of args are supplied like `format!`
-/// A macro for constructing an SQL query with escaped arguments.
+//! Raw SQL that is still safe.
+//!
+//! [`sql!`] builds a [`Fragment`]: SQL text plus bound parameters. The `?` placeholders are
+//! rewritten to whatever the target dialect uses (`$1` for PostgreSQL, `?` elsewhere) when
+//! the fragment is rendered, so one call site works against every backend.
+//!
+//! The number of `?` placeholders is checked against the number of arguments at compile
+//! time, so an arity mistake is a compile error rather than a runtime surprise.
+
+use alloc::borrow::Cow;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use besu_core::{Dialect, Error, Sql, Value};
+
+/// A raw SQL statement with its parameters.
 ///
-/// TODO: Example usage
-#[macro_export]
-macro_rules! sql {
-    ($query:literal $(, $arg:expr )* $(,)?) => {
-        (
-            {
-                let query: &'static str = $query;
-                query
-            },
-            ($($arg,)*),
-        )
-    };
+/// Construct one with [`sql!`] or [`Fragment::new`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fragment {
+    sql: Cow<'static, str>,
+    args: Vec<Value>,
 }
 
-/// A macro for constructing a selection of a [`Table`].
-///
-/// TODO: Example usage
-#[macro_export]
-macro_rules! select {
-    // TODO: The error for a missing field is on the whole macro. Can we make it span to the specific field?
-    // TODO: The error also links to the `derive(Table)` not the `select!` invocation. Can we fix that???
-
-    // TODO: Can we trick the LSP into *any* hints
-    // TODO: Support nested structs?? (Eg. { user: { }, post: { } })
-    // TODO: `$m` not being a `path` is cringe!
-
-    // TODO: Can we deduplicate some of this logic with the derive macros???
-
-    ($s:ident, { $($k:ident: $m:ident . $f:ident),* $(,)? }) => {
-        const _: () = {
-            $( $m!(@verify; $f); )*
-        };
-
-
-        #[derive(Debug, Clone, Default)] // TODO: Can the user configure these somehow so we can avoid a custom Specta integration?
-        pub struct $s {
-            $(pub $k: $m!(@field; $f)),*
+impl Fragment {
+    /// A fragment with no parameters.
+    pub fn new(sql: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            sql: sql.into(),
+            args: Vec::new(),
         }
+    }
 
-        #[automatically_derived]
-        impl<D: $crate::Driver> $crate::DecodeRow<D> for $s
-        where
-            $( <D as $crate::Driver>::ValueDecoder: $crate::DecodeValue<D, $m!(@field; $f)> ),*
-        {
-            fn decode(row: D::Row) -> ::std::result::Result<Self, ::std::boxed::Box<dyn ::std::error::Error + Send + Sync + 'static>>
-            where
-                Self: ::std::marker::Sized
-            {
-                let mut i = D::row_len(&row);
-                if i != 0 { i -= 1 };
-                Ok(Self {
-                    $(
-                        $k: {
-                            let v = D::get_value(&row, i)?;
-                            if i != 0 { i -= 1 };
-                            <D::ValueDecoder as $crate::DecodeValue<D, $m!(@field; $f)>>::decode(v)?
-                        }
-                    ),*
-                })
-            }
+    /// A fragment with parameters. The SQL must contain one `?` per argument.
+    pub fn with_args(sql: impl Into<Cow<'static, str>>, args: Vec<Value>) -> Self {
+        Self {
+            sql: sql.into(),
+            args,
         }
+    }
 
-        // TODO: Hide these within a submodule
+    /// Append another fragment.
+    pub fn push(&mut self, other: Fragment) {
+        self.sql.to_mut().push_str(&other.sql);
+        self.args.extend(other.args);
+    }
 
-        mod fields {
-            $(
-                pub struct $k;
+    /// The raw SQL text, with the source dialect's `?` placeholders.
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
 
-                #[automatically_derived]
-                impl $crate::Column<super::Model> for $k {
-                    const NAME: &'static str = stringify!($k); // TODO: This should come from whatever it is defined as on the root model
+    /// The bound parameters.
+    pub fn args(&self) -> &[Value] {
+        &self.args
+    }
 
-                    type Type = $m!(@field; $f);
+    /// Render for a specific dialect.
+    #[track_caller]
+    pub fn render<D: Dialect>(&self) -> Sql<D> {
+        let mut sql = String::with_capacity(self.sql.len() + 8);
+        let mut index = 0usize;
+        let mut quote: Option<char> = None;
+        let mut chars = self.sql.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if let Some(q) = quote {
+                sql.push(ch);
+                if ch == q {
+                    if chars.peek() == Some(&q) {
+                        // A doubled quote is an escape, not the end of the literal.
+                        sql.push(chars.next().unwrap_or(ch));
+                    } else {
+                        quote = None;
+                    }
                 }
-            )*
-        }
-
-        pub struct Model {
-            ____besu_table_name: &'static str,
-            $(pub $k: fields::$k),*
-        }
-
-        #[automatically_derived]
-        impl $crate::Selection for Model {
-            type Model = $s;
-            type Insert = SelectionsCantBeUsedForInsertion;
-
-            fn name(&self) -> &'static str {
-                self.____besu_table_name
+                continue;
             }
 
-            fn selection(&self) -> &'static [&'static str] {
-                &[
-                    // $( <fields::$k as $crate::Column<_>>::NAME ),*
-                ]
+            match ch {
+                '\'' | '"' | '`' => {
+                    quote = Some(ch);
+                    sql.push(ch);
+                }
+                '?' => {
+                    D::write_placeholder(&mut sql, index);
+                    index += 1;
+                }
+                _ => sql.push(ch),
             }
         }
 
-        // TODO: Enforce `T` is contained in the selection???
-        pub fn $s<T: $crate::Selection>(from: T) -> Model {
-            Model {
-                ____besu_table_name: from.name(),
-                $( $k: fields::$k ),*
-            }
+        let mut out = Sql::<D>::raw(sql);
+        for arg in &self.args {
+            out.push_arg(arg.clone());
         }
-    };
+        if index != self.args.len() {
+            out.set_error(Error::invalid_query(alloc::format!(
+                "raw SQL has {index} placeholder(s) but {} parameter(s) were bound",
+                self.args.len()
+            )));
+        }
+        out
+    }
+}
+
+impl From<&'static str> for Fragment {
+    fn from(sql: &'static str) -> Self {
+        Self::new(sql)
+    }
+}
+
+impl From<String> for Fragment {
+    fn from(sql: String) -> Self {
+        Self::new(sql)
+    }
+}
+
+/// Count `?` placeholders outside of quotes.
+///
+/// This is a `const fn` so the `sql!` macro can compare it against the argument count while
+/// compiling.
+pub const fn count_placeholders(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    let mut count = 0;
+    let mut quote: u8 = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quote != 0 {
+            if byte == quote {
+                if index + 1 < bytes.len() && bytes[index + 1] == quote {
+                    index += 1;
+                } else {
+                    quote = 0;
+                }
+            }
+        } else if byte == b'\'' || byte == b'"' || byte == b'`' {
+            quote = byte;
+        } else if byte == b'?' {
+            count += 1;
+        }
+        index += 1;
+    }
+
+    count
+}
+
+/// Build a [`Fragment`] from raw SQL and bound parameters.
+///
+/// The SQL must be a string literal so the placeholder count can be checked at compile time.
+/// Every `?` is a parameter, and `??` is a literal question mark.
+///
+/// ```ignore
+/// let sql = besu::sql!(
+///     "SELECT * FROM users WHERE age > ? AND name LIKE ?",
+///     18,
+///     "%oscar%",
+/// );
+/// let users: Vec<User> = db.execute(sql).all().await?;
+/// ```
+///
+/// Passing the wrong number of parameters is a compile error.
+#[macro_export]
+macro_rules! sql {
+    ($sql:literal $(, $arg:expr )* $(,)?) => {{
+        const _: () = {
+            let placeholders = $crate::__private::count_placeholders($sql);
+            let provided = 0usize $(+ { let _ = &$arg; 1usize })*;
+            ::core::assert!(
+                placeholders == provided,
+                "besu::sql!: the SQL has a different number of `?` placeholders than arguments"
+            );
+        };
+        let args: $crate::__private::Vec<$crate::Value> =
+            $crate::__private::Vec::from([$($crate::__private::into_value($arg)),*]);
+        $crate::Fragment::with_args($sql, args)
+    }};
+}
+
+/// Items the macros need but users should not touch.
+#[doc(hidden)]
+pub mod __private {
+    pub use alloc::vec::Vec;
+
+    use besu_core::Value;
+
+    /// Convert an arbitrary value into a bound SQL value.
+    pub fn into_value(value: impl Into<Value>) -> Value {
+        value.into()
+    }
+
+    pub use super::count_placeholders;
 }

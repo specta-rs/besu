@@ -1,13 +1,40 @@
 [workspace]
-resolver = "2"
-members = ["./besu", "./mysql", "./sqlite", "./postgres", "./macros", "./cli", "./examples/*"]
+resolver = "3"
+members = [
+    "./besu-core",
+    "./besu",
+    "./besu-macros",
+    "./besu-schema",
+    "./besu-sqlite",
+    "./besu-postgres",
+    "./besu-mysql",
+    "./cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Oscar Beaumont <oscar@otbeaumont.me>"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/specta-rs/besu"
+rust-version = "1.85"
 
 [workspace.dependencies]
-besu = { path = "./besu", version = "0.0.1" }
-besu-macros = { path = "./macros", version = "0.0.1" }
-besu-sqlite = { path = "./sqlite", version = "0.0.1" }
-besu-mysql = { path = "./mysql", version = "0.0.1" }
-besu-postgres = { path = "./postgres", version = "0.0.1" }
+besu = { path = "./besu", version = "0.1.0", default-features = false }
+besu-core = { path = "./besu-core", version = "0.1.0" }
+besu-macros = { path = "./besu-macros", version = "0.1.0" }
+besu-schema = { path = "./besu-schema", version = "0.1.0" }
+besu-sqlite = { path = "./besu-sqlite", version = "0.1.0", default-features = false }
+besu-postgres = { path = "./besu-postgres", version = "0.1.0", default-features = false }
+besu-mysql = { path = "./besu-mysql", version = "0.1.0", default-features = false }
+
+uuid = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sqlx = { version = "0.8", default-features = false }
+futures-core = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = { level = "forbid", priority = -1 }
@@ -19,7 +46,6 @@ cargo = { level = "warn", priority = -2 }
 unwrap_used = { level = "warn", priority = -3 }
 panic = { level = "warn", priority = -4 }
 todo = { level = "warn", priority = -5 }
-panic_in_result_fn = { level = "warn", priority = -6 }
 
 # Problems in downstream dependencies
 multiple_crate_versions = { level = "allow", priority = 1 }

@@ -1,0 +1,33 @@
+[package]
+name = "besu-schema"
+description = "Schema IR, migrations and DDL generation for Besu."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/besu-schema/latest/besu-schema"
+keywords = ["database", "migrations", "schema", "ddl"]
+categories = ["database", "development-tools"]
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["fs", "uuid", "chrono", "json"]
+fs = []
+uuid = ["besu-core/uuid", "dep:uuid"]
+chrono = ["besu-core/chrono", "dep:chrono"]
+json = ["besu-core/json", "dep:serde_json"]
+
+[lints]
+workspace = true
+
+[dependencies]
+besu-core = { workspace = true, features = ["uuid", "chrono", "json"] }
+serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }

@@ -1,0 +1,27 @@
+[package]
+name = "besu-macros"
+description = "Derive macros for Besu, a typesafe SQL query builder for Rust."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/besu-macros/latest/besu-macros"
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+heck = "0.5"
+proc-macro-crate = "3"
