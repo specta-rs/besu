@@ -32,7 +32,7 @@ impl DeleteQuery {
     }
 
     pub(crate) fn build<D: besu_core::Dialect>(
-        &self,
+        mut self,
         prefix: Option<alloc::sync::Arc<str>>,
     ) -> besu_core::Sql<D> {
         let mut out = besu_core::Sql::new();
@@ -40,7 +40,7 @@ impl DeleteQuery {
 
         out.push_raw("DELETE FROM ");
         push_table(&mut out, self.table);
-        render_where(&mut out, &self.filter);
+        render_where(&mut out, &mut self.filter);
 
         if let Some(limit) = self.limit {
             if !D::SUPPORTS_DELETE_LIMIT {
@@ -54,7 +54,7 @@ impl DeleteQuery {
             out.bind(limit);
         }
 
-        if let Some(returning) = &self.returning {
+        if let Some(returning) = &mut self.returning {
             if !D::SUPPORTS_RETURNING {
                 out.set_error(Error::unsupported(alloc::format!(
                     "`{}` does not support `RETURNING`",
@@ -63,7 +63,7 @@ impl DeleteQuery {
                 return out;
             }
             out.push_raw(" RETURNING ");
-            for (i, expr) in returning.iter().enumerate() {
+            for (i, expr) in returning.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(", ");
                 }
@@ -129,7 +129,7 @@ impl<'a, E: Executor, T, const SAFE: bool> Delete<'a, E, T, SAFE> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build(self.exec.table_prefix()).seal())
+        Ok(self.query.clone().build(self.exec.table_prefix()).seal())
     }
 }
 

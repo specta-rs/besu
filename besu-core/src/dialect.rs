@@ -166,7 +166,7 @@ pub trait Dialect: 'static + Sized {
     /// The dialect's name for a canonical type, used by `CAST` and as the basis of DDL.
     fn type_name(ty: TypeDef) -> Cow<'static, str>;
 
-    /// A comment appended to a finished statement that carries no meaning to the database.
+    /// Append a comment to a finished statement that carries no meaning to the database.
     ///
     /// This exists for one reason: a driver caches prepared statements per SQL *string*, and
     /// some databases fix the parameter types at prepare time. Two statements with identical
@@ -174,8 +174,33 @@ pub trait Dialect: 'static + Sized {
     /// bytes for the wrong type. A suffix that encodes the type shape makes the cache key
     /// match what is actually being bound.
     ///
-    /// PostgreSQL needs this. Nothing else does, and the default returns `None`.
-    fn statement_suffix(_args: &[Self::Value]) -> Option<String> {
-        None
+    /// It writes into `out` rather than returning a `String` so that sealing a statement
+    /// costs nothing when the dialect has nothing to add, and one growable buffer when it
+    /// does.
+    ///
+    /// PostgreSQL needs this. Nothing else does, and the default writes nothing.
+    fn write_statement_suffix(_out: &mut String, _args: &[Self::Value]) {}
+}
+
+/// Write `value` as decimal digits, without allocating.
+///
+/// Placeholders are written once per bound parameter, which makes this one of the hottest
+/// few instructions in query building. `value.to_string()` would allocate a `String` for
+/// every parameter purely to copy a handful of bytes into a buffer that already exists.
+pub fn write_index(out: &mut String, mut value: usize) {
+    let mut digits = [0_u8; 20];
+    let mut len = digits.len();
+    loop {
+        len -= 1;
+        digits[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    // `digits` holds ASCII decimal digits only, so this is always valid UTF-8. The fallback
+    // cannot be reached, and writing nothing would be worse than a compile-time panic.
+    for digit in &digits[len..] {
+        out.push(char::from(*digit));
     }
 }

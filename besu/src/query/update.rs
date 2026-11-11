@@ -34,7 +34,7 @@ impl UpdateQuery {
     }
 
     pub(crate) fn build<D: besu_core::Dialect>(
-        &self,
+        mut self,
         prefix: Option<alloc::sync::Arc<str>>,
     ) -> besu_core::Sql<D> {
         let mut out = besu_core::Sql::new();
@@ -50,7 +50,7 @@ impl UpdateQuery {
         out.push_raw("UPDATE ");
         push_table(&mut out, self.table);
         out.push_raw(" SET ");
-        for (i, (column, value)) in self.sets.iter().enumerate() {
+        for (i, (column, value)) in self.sets.iter_mut().enumerate() {
             if i != 0 {
                 out.push_raw(", ");
             }
@@ -59,9 +59,9 @@ impl UpdateQuery {
             value.render(&mut out);
         }
 
-        render_where(&mut out, &self.filter);
+        render_where(&mut out, &mut self.filter);
 
-        if let Some(returning) = &self.returning {
+        if let Some(returning) = &mut self.returning {
             if !D::SUPPORTS_RETURNING {
                 out.set_error(Error::unsupported(alloc::format!(
                     "`{}` does not support `RETURNING`",
@@ -70,7 +70,7 @@ impl UpdateQuery {
                 return out;
             }
             out.push_raw(" RETURNING ");
-            for (i, expr) in returning.iter().enumerate() {
+            for (i, expr) in returning.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(", ");
                 }
@@ -84,13 +84,13 @@ impl UpdateQuery {
 
 pub(crate) fn render_where<D: besu_core::Dialect>(
     out: &mut besu_core::Sql<D>,
-    filter: &[ExprKind],
+    filter: &mut [ExprKind],
 ) {
     if filter.is_empty() {
         return;
     }
     out.push_raw(" WHERE ");
-    for (i, condition) in filter.iter().enumerate() {
+    for (i, condition) in filter.iter_mut().enumerate() {
         if i != 0 {
             out.push_raw(" AND ");
         }
@@ -203,7 +203,7 @@ impl<'a, E: Executor, T, const SAFE: bool> Update<'a, E, T, SAFE> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build(self.exec.table_prefix()).seal())
+        Ok(self.query.clone().build(self.exec.table_prefix()).seal())
     }
 }
 

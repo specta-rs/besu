@@ -55,6 +55,19 @@ pub(crate) fn push_table<D: Dialect>(out: &mut Sql<D>, table: &TableDef) {
     out.push_table(table.schema, table.name);
 }
 
+/// The bytes a table contributes to a `SELECT` list, quoted and comma-separated.
+///
+/// This is only ever an estimate used to size the output buffer. Six bytes covers the two
+/// quote pairs, the dot and the separator, so it errs high rather than low, which is the
+/// direction that saves a copy.
+pub(crate) fn table_list_bytes(table: &TableDef) -> usize {
+    table
+        .columns
+        .iter()
+        .map(|column| table.name.len() + column.name.len() + 6)
+        .sum()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SelectQuery {
     pub(crate) from: &'static TableDef,
@@ -105,8 +118,13 @@ impl SelectQuery {
         }
     }
 
-    pub(crate) fn build<D: Dialect>(&self, prefix: Option<alloc::sync::Arc<str>>) -> Sql<D> {
-        let mut out = Sql::new();
+    /// Render the query.
+    ///
+    /// Takes `self` because rendering moves the bound values into the statement instead of
+    /// cloning them. [`Select::to_sql`](crate::Select::to_sql) clones the query first, so a
+    /// builder can still be rendered and then run.
+    pub(crate) fn build<D: Dialect>(mut self, prefix: Option<alloc::sync::Arc<str>>) -> Sql<D> {
+        let mut out = Sql::with_capacity(self.capacity_hint());
         out.set_table_prefix(prefix);
 
         out.push_raw("SELECT ");
@@ -114,9 +132,9 @@ impl SelectQuery {
             out.push_raw("DISTINCT ");
         }
 
-        match &self.projection {
+        match &mut self.projection {
             Some(projection) => {
-                for (i, expr) in projection.iter().enumerate() {
+                for (i, expr) in projection.iter_mut().enumerate() {
                     if i != 0 {
                         out.push_raw(", ");
                     }
@@ -142,7 +160,7 @@ impl SelectQuery {
         out.push_raw(" FROM ");
         push_table(&mut out, self.from);
 
-        for join in &self.joins {
+        for join in &mut self.joins {
             if join.kind == JoinKind::Full && !D::SUPPORTS_FULL_JOIN {
                 out.set_error(besu_core::Error::unsupported(alloc::format!(
                     "`{}` has no `FULL OUTER JOIN`",
@@ -159,7 +177,7 @@ impl SelectQuery {
             out.push_raw(join.kind.as_sql());
             out.push_raw(" ");
             push_table(&mut out, join.table);
-            if let Some(on) = &join.on {
+            if let Some(on) = &mut join.on {
                 out.push_raw(" ON ");
                 on.render(&mut out);
             }
@@ -167,7 +185,7 @@ impl SelectQuery {
 
         if !self.filter.is_empty() {
             out.push_raw(" WHERE ");
-            for (i, condition) in self.filter.iter().enumerate() {
+            for (i, condition) in self.filter.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(" AND ");
                 }
@@ -177,7 +195,7 @@ impl SelectQuery {
 
         if !self.group_by.is_empty() {
             out.push_raw(" GROUP BY ");
-            for (i, expr) in self.group_by.iter().enumerate() {
+            for (i, expr) in self.group_by.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(", ");
                 }
@@ -187,7 +205,7 @@ impl SelectQuery {
 
         if !self.having.is_empty() {
             out.push_raw(" HAVING ");
-            for (i, condition) in self.having.iter().enumerate() {
+            for (i, condition) in self.having.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(" AND ");
                 }
@@ -197,7 +215,7 @@ impl SelectQuery {
 
         if !self.order_by.is_empty() {
             out.push_raw(" ORDER BY ");
-            for (i, clause) in self.order_by.iter().enumerate() {
+            for (i, clause) in self.order_by.iter_mut().enumerate() {
                 if i != 0 {
                     out.push_raw(", ");
                 }
@@ -230,7 +248,31 @@ impl SelectQuery {
         out
     }
 
-    fn render_limit<D: Dialect>(&self, out: &mut Sql<D>) {
+    /// A rough upper bound on the bytes this query will render to.
+    fn capacity_hint(&self) -> usize {
+        // "SELECT " and the clauses that never vary in wording.
+        let mut bytes = 32;
+
+        match &self.projection {
+            Some(projection) => bytes += projection.len() * 24,
+            None => {
+                bytes += table_list_bytes(self.from);
+                for join in &self.joins {
+                    bytes += table_list_bytes(join.table);
+                }
+            }
+        }
+
+        // A condition is at worst a few dozen bytes of quoting and operators around its
+        // parameters, which do not appear in the text at all.
+        bytes
+            + (self.filter.len() + self.having.len()) * 40
+            + self.joins.len() * 48
+            + self.group_by.len() * 24
+            + self.order_by.len() * 24
+    }
+
+    fn render_limit<D: Dialect>(&mut self, out: &mut Sql<D>) {
         match (self.limit, self.offset) {
             (Some(limit), _) => {
                 out.push_raw(" LIMIT ");
@@ -253,7 +295,7 @@ impl SelectQuery {
     }
 }
 
-fn render_order<D: Dialect>(out: &mut Sql<D>, clause: &OrderClause) {
+fn render_order<D: Dialect>(out: &mut Sql<D>, clause: &mut OrderClause) {
     // MySQL has no `NULLS FIRST` / `NULLS LAST`, so the standard emulation is to sort by
     // `expr IS NULL` first. That produces the same ordering for the common cases.
     if !D::SUPPORTS_NULLS_ORDER {
