@@ -136,7 +136,7 @@ flowchart LR
 
 Step by step, for a select:
 
-1. **Builder.** `db.select(users)` creates `Select` with `from = User::DEF` and an empty
+1. **Builder.** `db.select(users)` creates `Select` with `from = users.def()` and an empty
    `SelectQuery`. `.filter(users.age.gt(18))` converts the condition to an `ExprKind` and
    pushes it. The type parameters `M` and `R` track the row set and the result type; they are
    erased at runtime.

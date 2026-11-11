@@ -5,11 +5,7 @@ An insert starts from the table handle and takes either one row or many:
 ```rust
 let created: Vec<User> = db
     .insert(users)
-    .value(users.insert(
-        "oscar@example.com".into(),
-        "Oscar".into(),
-        21,
-    ))
+    .value(users.insert("oscar@example.com", "Oscar", 21))
     .returning(users)
     .await?;
 ```
@@ -49,22 +45,28 @@ pub struct UserInsert {
 }
 
 impl UserTable {
-    pub fn insert(email: String, name: String, age: i32) -> UserInsert { /* ... */ }
+    pub fn insert(
+        email: impl Into<String>,
+        name: impl Into<String>,
+        age: impl Into<i32>,
+    ) -> UserInsert { /* ... */ }
 }
 ```
 
 The requirement rule is: **not nullable, not auto-incrementing and no default**. Everything
-else starts as `Set::Unset` and is left to the database.
+else starts as `Set::Unset` and is left to the database. Required arguments are
+`impl Into<T>`, so `users.insert("a@example.com", "Oscar", 21)` works without `.into()`
+noise; a `String` or an `i32` works too.
 
 Every column also gets a setter, so you can fill in the optional ones after construction:
 
 ```rust
-users.insert("oscar@example.com".into(), "Oscar".into(), 21)
+users.insert("oscar@example.com", "Oscar", 21)
     .bio("Rust")
 ```
 
 ```rust
-users.insert("oscar@example.com".into(), "Oscar".into(), 21)
+users.insert("oscar@example.com", "Oscar", 21)
     .bio(None::<String>)
 ```
 
@@ -101,8 +103,8 @@ lets the default run, while passing `None` overrides the default with `NULL`.
 ```rust
 db.insert(posts)
     .values([
-        posts.insert("Hello, world".into(), oscar.id),
-        posts.insert("A second post".into(), oscar.id),
+        posts.insert("Hello, world", oscar.id),
+        posts.insert("A second post", oscar.id),
     ])
     .await?;
 ```
@@ -131,7 +133,7 @@ Without `returning`, awaiting an insert resolves to the driver's output — for 
 ```rust
 let rows: Vec<User> = db
     .insert(users)
-    .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+    .value(users.insert("a@example.com", "Alice", 30))
     .returning(users)
     .await?;
 ```
@@ -140,12 +142,12 @@ let rows: Vec<User> = db
 
 ```rust
 let ids: Vec<i64> = db.insert(users)
-    .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+    .value(users.insert("a@example.com", "Alice", 30))
     .returning(users.id)
     .await?;
 
 let names: Vec<(i64, String)> = db.insert(users)
-    .value(users.insert("b@example.com".into(), "Bob".into(), 20))
+    .value(users.insert("b@example.com", "Bob", 20))
     .returning((users.id, users.name))
     .await?;
 ```
@@ -165,7 +167,7 @@ conflict target:
 
 ```rust
 db.insert(users)
-    .value(users.insert("oscar@example.com".into(), "Oscar".into(), 22))
+    .value(users.insert("oscar@example.com", "Oscar", 22))
     .on_conflict(users.email)
     .do_update(users.age, 22)
     .await?;
@@ -180,7 +182,7 @@ ON CONFLICT ("email") DO UPDATE SET "age" = ?
 
 ```rust
 db.insert(users)
-    .value(users.insert("oscar@example.com".into(), "Oscar".into(), 22))
+    .value(users.insert("oscar@example.com", "Oscar", 22))
     .on_conflict(users.email)
     .do_nothing()
     .await?;
@@ -228,7 +230,7 @@ means a `None` in the model is written as `NULL`, not left to a default.
 
 ```rust
 let sql = db.insert(users)
-    .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+    .value(users.insert("oscar@example.com", "Oscar", 21))
     .to_sql()?;
 
 assert_eq!(
@@ -259,6 +261,9 @@ With `returning(users)`, the same statement ends in
 - **`do_update` without `on_conflict` is a build error.** It emits
   ``ON CONFLICT needs a target column; call `.on_conflict(column)` first``. Call
   `on_conflict` first, even on MySQL where the target is ignored.
+- **Do not write `.into()` on insert arguments.** The parameter is `impl Into<String>` (or
+  `impl Into<i32>`), so the target type is not concrete and the compiler sees several
+  `From<&str>` impls in scope. Pass the literal or a value of the exact type.
 - **Bulk inserts have a parameter ceiling.** Every value is a bound parameter, and each
   dialect has a limit (`SQLITE_MAX_VARIABLE_NUMBER` is 32,766 by default; the others default
   to 65,535). An insert that exceeds it is a build error that reports the largest batch size

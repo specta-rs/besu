@@ -33,6 +33,28 @@ impl<M, S: SqlType> Selection<M, LiteralPath> for Expr<M, S> {
     }
 }
 
+impl<M, T, Path> Selection<M, Path> for T
+where
+    M: Contains<Path, T>,
+    T: Table,
+    Path: PathNullability,
+{
+    // The outer side of a join yields `None` for the whole row, so selecting the table there
+    // has to widen to `Option<T::Model>` just like a single column does.
+    type Out = <Path::Nullability as Nullability>::Wrap<T::Model>;
+
+    fn into_projection(self) -> (Vec<ExprKind>, usize) {
+        let mut exprs = Vec::with_capacity(T::DEF.columns.len());
+        for column in T::DEF.columns {
+            exprs.push(ExprKind::Column {
+                table: T::DEF.name,
+                column: column.name,
+            });
+        }
+        (exprs, T::DEF.columns.len())
+    }
+}
+
 impl<M, T, S, N, P> Selection<M, P> for Column<T, S, N>
 where
     M: Contains<P, T>,

@@ -2,6 +2,12 @@
 //!
 //! Every test that needs a server gets its own database so the suite can run in parallel
 //! and `cargo test` can be repeated without cleaning anything up first.
+#![allow(
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_arguments
+)]
 
 use besu::prelude::*;
 use besu::schema::Ddl;

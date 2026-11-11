@@ -195,7 +195,9 @@ async fn introspect_constraints(
                 column.unique = true;
             }
         } else {
-            // A composite `UNIQUE` has no per-column spelling; keep it as a unique index.
+            // A composite `UNIQUE` has no per-column spelling, so keep it as a unique index.
+            // (PostgreSQL owns the index through the constraint, so dropping it needs a
+            // migration that drops the constraint instead.)
             table.indexes.push(Index {
                 name: constraint.name,
                 columns: constraint.columns,

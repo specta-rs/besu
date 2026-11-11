@@ -14,9 +14,13 @@ impl Dialect for Postgres {
     const SUPPORTS_RETURNING: bool = true;
     const SUPPORTS_ILIKE: bool = true;
     const SUPPORTS_FULL_JOIN: bool = true;
+    const SUPPORTS_RIGHT_JOIN: bool = true;
+    const SUPPORTS_ROW_LOCKING: bool = true;
+    const SUPPORTS_DELETE_LIMIT: bool = false;
     const REQUIRES_LIMIT_WITH_OFFSET: bool = false;
     const SUPPORTS_NULLS_ORDER: bool = true;
     const SUPPORTS_DEFAULT_IN_VALUES: bool = true;
+    const MAX_PARAMS: usize = 65_535;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
 
     fn bind(value: Value) -> Result<Self::Value, Error> {

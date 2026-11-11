@@ -125,11 +125,7 @@ is `email`, `name` and `age`, in declaration order.
 # let db = besu::Database::new(Sqlx::memory().await?);
 let created: Vec<User> = db
     .insert(users)
-    .value(users.insert(
-        "oscar@example.com".into(),
-        "Oscar".into(),
-        21,
-    ))
+    .value(users.insert("oscar@example.com", "Oscar", 21))
     .returning(users)
     .await?;
 
@@ -215,17 +211,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let oscar = db
         .insert(users)
-        .value(users.insert(
-            "oscar@example.com".into(),
-            "Oscar".into(),
-            21,
-        ))
+        .value(users.insert("oscar@example.com", "Oscar", 21))
         .returning(users)
         .await?
         .remove(0);
 
     db.insert(users)
-        .value(users.insert("monty@example.com".into(), "Monty".into(), 7))
+        .value(users.insert("monty@example.com", "Monty", 7))
         .await?;
 
     let adults: Vec<User> = db
