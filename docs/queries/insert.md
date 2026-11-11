@@ -124,8 +124,8 @@ failure is a build error rather than a compile error:
 
 ## Upserts
 
-`on_conflict` starts an `ON CONFLICT` clause. It takes a column, or a tuple of up to four
-columns, as the target.
+`on_conflict` starts the clause. The target is a column, a tuple of up to four columns, or
+nothing at all:
 
 ```rust
 db.insert(users)
@@ -140,15 +140,97 @@ INSERT INTO "users" ("email", "name", "age") VALUES (?, ?, ?)
 ON CONFLICT ("email") DO UPDATE SET "age" = ?
 ```
 
-`.do_nothing()` is the other action, and `on_conflict` alone is already `DO NOTHING`.
-`do_update` may be called more than once, and a composite unique key uses a tuple,
-`.on_conflict((users.email, users.team_id))`. Besu checks the columns exist, not that the
-database has a unique constraint over them.
+`.do_nothing()` is the other action, and so is `on_conflict(..)` on its own. A composite unique
+key uses a tuple, `.on_conflict((users.email, users.team_id))`, and a conflict with *any* unique
+constraint uses `.on_conflict_all()`:
 
-MySQL spells the clause differently: ``INSERT ... ON DUPLICATE KEY UPDATE `age` = ?``. It has no
-target on its upsert, so the value passed to `on_conflict` is ignored there, and it has no safe
-equivalent of `DO NOTHING` (`INSERT IGNORE` swallows other errors), so `do_nothing` is a build
-error on MySQL.
+```rust
+db.insert(users)
+    .value(users.insert("oscar@example.com", "Oscar", 22))
+    .on_conflict_all()
+    .do_nothing()
+```
+
+```sql
+INSERT INTO "users" ("email", "name", "age") VALUES (?, ?, ?) ON CONFLICT DO NOTHING
+```
+
+Besu checks that the target columns exist, not that the database has a unique constraint over
+them.
+
+### Updating from the incoming row
+
+`excluded(column)` is the row that was proposed for insertion — the standard SQL spelling, and
+`new_row(column)` is an alias for the same thing.
+
+```rust
+db.insert(users)
+    .value(users.insert("oscar@example.com", "Oscar", 22))
+    .on_conflict(users.email)
+    .do_update(users.name, excluded(users.name))
+```
+
+```sql
+INSERT INTO "users" (...) VALUES (...) ON CONFLICT ("email")
+DO UPDATE SET "name" = "excluded"."name"
+```
+
+`do_update` takes a value *or* an expression, so `users.times_seen.plus(1)` and `now()` work
+too. `do_update_expr` is the same thing spelled explicitly when the argument's type is
+ambiguous.
+
+### Predicates
+
+`on_conflict_where` renders the index predicate, and `do_update_filter` decides whether the
+update runs:
+
+```rust
+db.insert(users)
+    .value(users.insert("oscar@example.com", "Oscar", 22))
+    .on_conflict(users.email)
+    .on_conflict_where(users.deleted_at.is_null())
+    .do_update(users.name, excluded(users.name))
+    .do_update_filter(users.updated_at.lt(now()))
+```
+
+```sql
+INSERT INTO "users" (...) VALUES (...) ON CONFLICT ("email") WHERE ("users"."deleted_at" IS NULL)
+DO UPDATE SET "name" = "excluded"."name" WHERE ("users"."updated_at" < CURRENT_TIMESTAMP)
+```
+
+Both take a `Bool` condition and may be repeated, which joins them with `AND`. SQLite supports
+them too; MySQL supports neither, because its upsert has no index inference and no update
+predicate — both are recorded as `unsupported` rather than dropped.
+
+### MySQL
+
+MySQL spells the clause `ON DUPLICATE KEY UPDATE`, fires it for **every** unique key rather than
+the one you name, and has no `excluded` keyword. Instead, the inserted row is named with a row
+alias (8.0.19+), which `row_alias` sets and which defaults to `new`:
+
+```rust
+db.insert(users)
+    .value(users.insert("oscar@example.com", "Oscar", 22))
+    .on_conflict(users.email)
+    .row_alias("incoming")
+    .do_update(users.name, new_row(users.name))
+```
+
+```sql
+INSERT INTO `users` (...) VALUES (...) AS `incoming`
+ON DUPLICATE KEY UPDATE `name` = `incoming`.`name`
+```
+
+`do_nothing` on MySQL renders the narrow self-assignment, which is the only safe emulation of
+"ignore a duplicate key". It needs a target, because the column to assign back to is the target:
+
+```sql
+INSERT INTO `users` (...) VALUES (...) ON DUPLICATE KEY UPDATE `email` = `email`
+```
+
+A *targetless* `do_nothing` is an error. `INSERT IGNORE` would swallow truncation, foreign-key
+and `NOT NULL` errors along with the duplicate, which is not what "do nothing on conflict"
+means.
 
 ## Inserting a model
 
@@ -185,13 +267,18 @@ attach it to.
 | Setting a column to a value of the wrong type | Compile error at the setter |
 | Inserting zero rows | Build error |
 | More parameters than the dialect allows | Build error with a suggested batch size |
-| `RETURNING` or `do_nothing` on MySQL | Build error |
-| `do_update` with no target on PostgreSQL or SQLite | Build error |
+| `RETURNING` on MySQL, or a targetless `do_nothing` | Build error |
+| `do_update` with no target on PostgreSQL | Build error |
+| A predicate on MySQL's upsert | Build error |
 
 ## Gotchas
 
-- **`do_update` without `on_conflict` compiles and then fails** on PostgreSQL and SQLite with
-  ``ON CONFLICT needs a target column; call `.on_conflict(column)` first``.
+- **`do_update` without a target compiles and then fails** on PostgreSQL with
+  ``ON CONFLICT DO UPDATE requires a target; call `.on_conflict(column)` first``. SQLite accepts
+  a targetless `DO UPDATE`, so the same code runs there — which is another reason to test on
+  the database you deploy to.
+- **`on_conflict` replaces the whole clause.** Call `on_conflict_where`, `do_update` and
+  `do_update_filter` after it.
 - **Do not write `.into()` on insert arguments.** The parameter is `impl Into<String>`, so the
   target type is not concrete and the compiler sees several `From` implementations.
 - **`to_sql()` is not available once you call `returning`.** The builder changes type, so assert

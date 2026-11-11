@@ -17,9 +17,10 @@ pub use crate::database::{Database, RawQuery, Transaction, dry};
 pub use crate::expr::{
     CaseBuilder, Expr, IntoCondition, IntoExpr, IntoOrder, IntoSubquery, NullsOrder, Order,
     OrderClause, abs, and, avg, between, case, ceil, coalesce, concat, count, count_all,
-    count_distinct, eq, exists, floor, gt, gte, ilike, in_list, is_false, is_not_null, is_null,
-    is_true, json_get, json_text, length, like, lower, lt, lte, matches, max, min, ne, not,
-    not_between, not_exists, not_ilike, not_in, not_like, now, or, raw, round, sum, trim, upper,
+    count_distinct, eq, excluded, exists, floor, gt, gte, ilike, in_list, is_false, is_not_null,
+    is_null, is_true, json_get, json_text, length, like, lower, lt, lte, matches, max, min, ne,
+    new_row, not, not_between, not_exists, not_ilike, not_in, not_like, now, or, raw, round, sum,
+    trim, upper,
 };
 pub use crate::macros::Fragment;
 pub use crate::query::{Delete, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update};

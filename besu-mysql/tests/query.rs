@@ -9,6 +9,7 @@
     clippy::too_many_arguments
 )]
 
+use besu::Driver;
 use besu::prelude::*;
 use besu::schema::Ddl;
 use besu_mysql::Sqlx;
@@ -955,7 +956,11 @@ async fn subqueries() {
 
     let non_authors: Vec<User> = db
         .select(users)
-        .filter(users.id.not_in_query(db.select(posts).pick(posts.author_id)))
+        .filter(
+            users
+                .id
+                .not_in_query(db.select(posts).pick(posts.author_id)),
+        )
         .order_by(users.name.asc())
         .all()
         .await
@@ -1009,4 +1014,131 @@ async fn set_operation_and_subquery_sql() {
         sql.sql(),
         "SELECT `users`.`id` FROM `users` WHERE (`users`.`id` IN (SELECT `posts`.`author_id` FROM `posts`))"
     );
+}
+
+/// MySQL 8.0.19 reads the row the insert is trying to add through a row alias, so
+/// `excluded` and `new_row` both render `new.column` here. `do_nothing` has no MySQL
+/// spelling, so it becomes a self-assignment on the conflict target.
+#[tokio::test]
+async fn upsert_from_the_incoming_row() {
+    let db = setup("besu_test_upsert_row_alias").await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice Updated", 31))
+        .on_conflict(users.email)
+        .do_update(users.name, new_row(users.name))
+        .do_update(users.age, excluded(users.age))
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Alice Updated");
+    assert_eq!(rows[0].age, 31);
+
+    // The alias is chosen per statement, and the custom name is used at render time.
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 40))
+        .row_alias("incoming")
+        .on_conflict(users.email)
+        .do_update(users.age, new_row(users.age))
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows[0].name, "Alice Updated");
+    assert_eq!(rows[0].age, 40);
+
+    // `do_nothing` assigns the conflict target to itself, which leaves the row alone
+    // without the error-swallowing of `INSERT IGNORE`.
+    db.insert(users)
+        .value(users.insert("a@example.com", "Nope", 1))
+        .on_conflict(users.email)
+        .do_nothing()
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Alice Updated");
+    assert_eq!(rows[0].age, 40);
+}
+
+/// An empty `IN` list is a syntax error, so it renders as a constant predicate instead.
+#[tokio::test]
+async fn empty_in_lists_execute() {
+    let db = setup("besu_test_empty_in_lists").await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    let none: Vec<User> = db
+        .select(users)
+        .filter(users.id.in_list(Vec::<i64>::new()))
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+
+    let all: Vec<User> = db
+        .select(users)
+        .filter(users.id.not_in(Vec::<i64>::new()))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+}
+
+/// Every `SqlType` marker the crate ships has to survive a trip through `CAST`. MySQL is
+/// the dialect whose `CAST` grammar is a closed list, so this is where a DDL spelling would
+/// have been a syntax error.
+#[tokio::test]
+async fn cast_to_every_marker_executes() {
+    let db = setup("besu_test_cast_markers").await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+
+    // The results are not decoded: the point is that the server accepts the statement, so
+    // the SQL is executed through the driver directly.
+    macro_rules! cast {
+        ($literal:literal, $ty:ty) => {{
+            let sql = db
+                .select(users)
+                .pick(raw::<(UserTable,)>($literal).cast::<$ty>())
+                .to_sql()
+                .unwrap();
+            db.driver().query(&sql).await.unwrap();
+        }};
+    }
+
+    cast!("1", besu::Bool);
+    cast!("1", besu::Int1);
+    cast!("1", besu::Int2);
+    cast!("1", besu::Int4);
+    cast!("1", besu::Int8);
+    cast!("1", besu::UInt1);
+    cast!("1", besu::UInt2);
+    cast!("1", besu::UInt4);
+    cast!("1", besu::UInt8);
+    cast!("1", besu::U128);
+    cast!("1", besu::I128);
+    cast!("1.5", besu::Float4);
+    cast!("1.5", besu::Float8);
+    cast!("'x'", besu::Text);
+    cast!("'x'", besu::Char<8>);
+    cast!("'x'", besu::VarChar<8>);
+    cast!("'x'", besu::Bytes);
+    cast!("'00000000-0000-0000-0000-000000000000'", besu::Uuid);
+    cast!("'{}'", besu::Json);
+    cast!("'{}'", besu::Jsonb);
+    cast!("'2020-01-01'", besu::Date);
+    cast!("'12:00:00'", besu::Time);
+    cast!("'2020-01-01 12:00:00'", besu::Timestamp);
+    cast!("'2020-01-01 12:00:00'", besu::TimestampTz);
+    cast!("1.5", besu::Decimal<10, 2>);
 }

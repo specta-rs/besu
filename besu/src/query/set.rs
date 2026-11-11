@@ -388,7 +388,10 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<Vec<R>, ErrorOf<E>> {
-        let sql = self.render().finish().map_err(<E::Driver as Driver>::error)?;
+        let sql = self
+            .render()
+            .finish()
+            .map_err(<E::Driver as Driver>::error)?;
         let mut exec = self.exec;
         let rows = exec.query(&sql).await?;
         decode_rows::<E, R>(&rows)

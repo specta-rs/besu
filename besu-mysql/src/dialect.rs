@@ -125,6 +125,51 @@ impl Dialect for MySql {
             }),
         }
     }
+
+    /// MySQL's `CAST` grammar is a short, closed list, and most of the DDL spellings above
+    /// are not on it: `INT`, `BIGINT`, `VARCHAR(n)`, `TEXT`, `BLOB` and `BOOLEAN` are all
+    /// syntax errors after `AS`. The target here is chosen from that list, so a cast that
+    /// maps several canonically distinct types onto one MySQL storage type (a `UUID` and a
+    /// blob are both `BINARY`, for instance) still renders.
+    ///
+    /// The spelling is about syntax, not conversion: `CAST(text AS BINARY(16))` truncates
+    /// the text's bytes rather than turning a UUID string into its 16-byte form. That
+    /// conversion is `UUID_TO_BIN`, a function rather than a cast, so write it with
+    /// [`raw`](https://docs.rs/besu/latest/besu/fn.raw.html) instead.
+    fn cast_type_name(ty: TypeDef) -> Cow<'static, str> {
+        match ty {
+            TypeDef::Char(n) | TypeDef::VarChar(n) => Cow::Owned(format!("CHAR({n})")),
+            TypeDef::Decimal(precision, scale) => {
+                Cow::Owned(format!("DECIMAL({precision},{scale})"))
+            }
+            // A user-declared type is the caller's to know: MySQL accepts an enum or a
+            // spatial type in `CAST`, and Besu cannot tell which it is, so the name is
+            // passed through exactly as the DDL would write it.
+            TypeDef::Custom(name) => name,
+            other => Cow::Borrowed(match other {
+                // `SIGNED` is MySQL's integer cast; a boolean is the integer `0` or `1`
+                // there, so this is the same value, not a different one.
+                TypeDef::Bool => "SIGNED",
+                TypeDef::Int2 | TypeDef::Int4 | TypeDef::Int8 => "SIGNED",
+                TypeDef::UInt(128) => "DECIMAL(39,0)",
+                TypeDef::UInt(_) => "UNSIGNED",
+                // `DOUBLE` widens a `FLOAT` value without changing it, and `FLOAT` is
+                // single precision: the wider target never loses digits the column held.
+                TypeDef::Float4 | TypeDef::Float8 => "DOUBLE",
+                // `CHAR` with no length keeps the whole string, which is what `TEXT` means.
+                TypeDef::Text => "CHAR",
+                // `BINARY` with no length keeps every byte, and `BINARY(16)` matches what a
+                // UUID column is stored as.
+                TypeDef::Bytes => "BINARY",
+                TypeDef::Uuid => "BINARY(16)",
+                TypeDef::Json | TypeDef::Jsonb => "JSON",
+                TypeDef::Date => "DATE",
+                TypeDef::Time | TypeDef::TimeTz => "TIME",
+                TypeDef::Timestamp | TypeDef::TimestampTz => "DATETIME(6)",
+                _ => "CHAR",
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +191,28 @@ mod tests {
         assert_eq!(MySql::type_name(TypeDef::Decimal(10, 2)), "DECIMAL(10,2)");
         assert_eq!(MySql::type_name(TypeDef::Uuid), "BINARY(16)");
         assert_eq!(MySql::type_name(TypeDef::TimestampTz), "DATETIME(6)");
+    }
+
+    /// The DDL spelling is mostly not legal after `CAST(... AS ...)`, which accepts only
+    /// `BINARY`, `CHAR`, `DATE`, `DATETIME`, `DECIMAL`, `DOUBLE`, `FLOAT`, `JSON`, `NCHAR`,
+    /// `REAL`, `SIGNED`, `TIME`, `UNSIGNED`, `YEAR` and the spatial types.
+    #[test]
+    fn casts_are_spelled_from_the_cast_grammar() {
+        assert_eq!(MySql::cast_type_name(TypeDef::Bool), "SIGNED");
+        assert_eq!(MySql::cast_type_name(TypeDef::Int4), "SIGNED");
+        assert_eq!(MySql::cast_type_name(TypeDef::UInt(32)), "UNSIGNED");
+        assert_eq!(MySql::cast_type_name(TypeDef::UInt(128)), "DECIMAL(39,0)");
+        assert_eq!(MySql::cast_type_name(TypeDef::Float8), "DOUBLE");
+        assert_eq!(MySql::cast_type_name(TypeDef::Text), "CHAR");
+        assert_eq!(MySql::cast_type_name(TypeDef::VarChar(255)), "CHAR(255)");
+        assert_eq!(MySql::cast_type_name(TypeDef::Bytes), "BINARY");
+        assert_eq!(MySql::cast_type_name(TypeDef::Uuid), "BINARY(16)");
+        assert_eq!(MySql::cast_type_name(TypeDef::Json), "JSON");
+        assert_eq!(MySql::cast_type_name(TypeDef::Time), "TIME");
+        assert_eq!(MySql::cast_type_name(TypeDef::TimestampTz), "DATETIME(6)");
+        assert_eq!(
+            MySql::cast_type_name(TypeDef::Decimal(10, 2)),
+            "DECIMAL(10,2)"
+        );
     }
 }
