@@ -269,8 +269,12 @@ pub const fn count_placeholders(sql: &str) -> usize {
 /// Build a [`Fragment`] from raw SQL and bound parameters.
 ///
 /// The SQL must be a string literal so the placeholder count can be checked at compile time.
-/// Every `?` outside a quoted string or a `--` comment is a parameter, and `??` is an escaped
-/// literal question mark — needed for operators such as PostgreSQL's `jsonb ? 'key'`.
+/// Every `?` outside a quoted string is a parameter, and `??` is an escaped literal question
+/// mark — needed for operators such as PostgreSQL's `jsonb ? 'key'`.
+///
+/// The count is taken from the literal, so a `?` inside a `--` comment still counts as a
+/// placeholder even though the server never sees it. Write the comment without one, or pass
+/// the value through `??` and bind nothing.
 ///
 /// ```ignore
 /// let sql = besu::sql!(

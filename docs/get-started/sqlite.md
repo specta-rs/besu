@@ -151,7 +151,7 @@ cannot quietly pretend a write succeeded.
 - [SQLite column types](../schema/column-types/sqlite.md) — what each Rust type round-trips to.
 - [Indexes and constraints](../schema/indexes-constraints.md) — uniqueness, foreign keys, checks.
 - [Connecting to SQLite](../connect/sqlite.md) — pools, files and transactions.
-- [Get started with PostgreSQL](postgresql.md) or [MySQL](mysql.md) — the same code, a different driver.
+- [Get started with PostgreSQL](postgresql.md) or [MySQL](mysql.md).
 
 ## Gotchas
 

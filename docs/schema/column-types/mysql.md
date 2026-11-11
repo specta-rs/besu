@@ -118,7 +118,7 @@ reported as `Bytes`, so the declared length is what identifies the type.
 
 `Decimal<PRECISION, SCALE>` renders `DECIMAL(p,s)`. Its Rust type is `String`, and no driver
 decodes MySQL's `NEWDECIMAL` into a `String` yet, so use `sql!` with an explicit `CAST(... AS
-CHAR)` or keep the column out of the model. See the [roadmap](../roadmap.md).
+CHAR)` or keep the column out of the model. See the [roadmap](../../roadmap.md).
 
 ## 128-bit integers
 
@@ -162,8 +162,8 @@ MySQL's inline `ENUM(...)` and `SET(...)` keep their native spelling, so `<name>
 the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` for the same reason. The
 DDL round-trips; the value cannot be decoded into Rust.
 
-Custom column types are on the [roadmap](../roadmap.md); the rest of the gap against Drizzle is
-in [the scoreboard](../parity.md).
+Custom column types are on the [roadmap](../../roadmap.md); the rest of the gap against Drizzle is
+in [the scoreboard](../../parity.md).
 
 ## Gotchas
 

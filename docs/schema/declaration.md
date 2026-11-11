@@ -94,7 +94,7 @@ A separate, non-unique, single-column index named `{table}_{column}_idx`, render
 pub created_at: chrono::DateTime<chrono::Utc>,
 ```
 
-Composite and partial indexes have no attribute; see [indexes and constraints](indexes-constraints.md).
+Composite and partial indexes have no attribute; see [the constraints page](indexes-constraints.md).
 
 ## Defaults: `default`, `default_now`, `default_sql`
 
