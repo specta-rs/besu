@@ -1119,6 +1119,42 @@ async fn upsert_from_the_incoming_row_and_a_predicate() {
     assert_eq!(rows[0].age, 31);
 }
 
+/// SQLite has no catalogue entry for a partial index's predicate, so the only way to know
+/// the rendered `ON CONFLICT (col) WHERE ...` matches one is to create the index and run it.
+#[tokio::test]
+async fn a_conflict_target_matches_a_partial_index() {
+    let db = setup().await;
+    db.execute(sql!(
+        r#"CREATE UNIQUE INDEX "users_email_active" ON "users" ("email") WHERE "age" > 0"#
+    ))
+    .await
+    .unwrap();
+
+    db.insert(users)
+        .value(users.insert("partial@example.com", "First", 30))
+        .await
+        .unwrap();
+
+    let query = db
+        .insert(users)
+        .value(users.insert("partial@example.com", "Second", 40))
+        .on_conflict(users.email)
+        .on_conflict_where(users.age.gt(0))
+        .do_update(users.name, excluded(users.name));
+    let sql = query.to_sql().unwrap();
+    assert!(
+        sql.sql()
+            .contains(r#"ON CONFLICT ("email") WHERE ("users"."age" > ?)"#),
+        "got: {}",
+        sql.sql()
+    );
+    query.await.unwrap();
+
+    let rows: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Second");
+}
+
 /// An empty `IN` list is a syntax error, so it renders as a constant predicate instead. If
 /// the rewrite were wrong the statement would not parse at all.
 #[tokio::test]

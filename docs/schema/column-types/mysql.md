@@ -87,10 +87,10 @@ pub recorded: chrono::DateTime<chrono::Utc>,     // DATETIME(6), no offset store
 There is no timezone-aware column: the offset is dropped, and the driver relies on the session
 being pinned to UTC. `Sqlx::new` does that; `Sqlx::connect` does not.
 
-Introspection reports a `DATETIME` as `Timestamp`, and MySQL's type normalisation does not fold
-`TimestampTz` onto `Timestamp`. A `DateTime<Utc>` column therefore reports an `AlterColumn` on
-every push, which reissues the same `MODIFY COLUMN ... DATETIME(6)` and never converges. Use
-`NaiveDateTime` on MySQL.
+Introspection reports a `DATETIME` as `Timestamp`. Both `Timestamp` and `TimestampTz` render
+`DATETIME(6)`, and type normalisation folds the two, so a `DateTime<Utc>` column converges:
+`push` is a no-op the second time. The offset is still not stored — it is the session's job,
+and `Sqlx::new` pins the session to UTC.
 
 ## JSON
 
@@ -140,7 +140,7 @@ so a declared `u128` converges against the `DECIMAL(39,0)` reported back.
 
 | Native type | `TypeDef` |
 | --- | --- |
-| `tinyint(1)` | `Bool` |
+| `tinyint(1)` | `Bool` (`UInt(8)` when `unsigned`) |
 | `tinyint` / `smallint` / `mediumint` / `int` / `bigint` | `Int2`, `Int2`, `Int4`, `Int4`, `Int8` |
 | any of those `UNSIGNED` | `UInt(8)`, `UInt(16)`, `UInt(32)`, `UInt(32)`, `UInt(64)` |
 | `float` | `Float4` |
@@ -169,13 +169,12 @@ in [the scoreboard](../../parity.md).
 
 ## Gotchas
 
-- `BOOLEAN` is an alias for `TINYINT(1)`, and any `tinyint(1)` column introspects as `Bool`.
-  A `tinyint` of another width is `Int2`.
+- `BOOLEAN` is an alias for `TINYINT(1)`. A `tinyint(1)` column introspects as `Bool`, except
+  `tinyint(1) unsigned`, which is a `u8` and introspects as `UInt(8)`. A `tinyint` of another
+  width is `Int2`.
 - A `UNIQUE` on a `String` is a prefix key over 255 characters. Two rows that agree in the first
   255 characters collide even when the full values differ.
 - A `UNIQUE` on a `JSON` column renders nothing, so the schema reports drift on every push.
-- `DateTime<Utc>` does not converge: introspection says `Timestamp` and the declared type is
-  `TimestampTz`. Prefer `NaiveDateTime`.
 - `TIMESTAMP` columns introspect as `TimestampTz`, so a snapshot of one renders `DATETIME(6)`
   when it is used to create a fresh table. Keep the choice of column type in a migration rather
   than round-tripping it.

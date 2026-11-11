@@ -385,7 +385,9 @@ impl ExprKind {
                         // native scalar, which cannot decode as JSON.
                         expr.render(out);
                         out.push_raw(if *as_text { " ->> '$." } else { " -> '$." });
-                        out.push_raw(path);
+                        // A quoted literal, so a quote in the path has to be doubled —
+                        // the same rule the PostgreSQL arm applies to each segment.
+                        out.push_raw(&path.replace('\'', "''"));
                         out.push_raw("'");
                     }
                     JsonPathStyle::Mysql => {
@@ -395,7 +397,7 @@ impl ExprKind {
                         out.push_raw("JSON_EXTRACT(");
                         expr.render(out);
                         out.push_raw(", '$.");
-                        out.push_raw(path);
+                        out.push_raw(&path.replace('\'', "''"));
                         // The path is a quoted string literal, so it needs its closing
                         // quote — the first version of this arm simply forgot it.
                         out.push_raw("'");

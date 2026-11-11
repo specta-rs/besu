@@ -45,22 +45,31 @@ fn representative_statement() -> Sql<Postgres> {
         "INSERT INTO bench (a, b, c, d, e, f, g, h, i, j, k, l) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     );
-    sql.bind(7i32);
-    sql.bind(i64::MIN + 1);
-    sql.bind(18_446_744_073_709_551_615u64);
-    sql.bind(340_282_366_920_938_463_463_374_607_431_768_211_455u128);
-    sql.bind("a moderately sized piece of text, long enough to be interesting");
-    sql.bind(vec![0u8; 64]);
-    sql.bind(uuid::Uuid::from_u128(
-        0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+    // `push_arg` rather than `bind`: the placeholders are already in the text, so binding
+    // would append twelve more. What is measured is encoding, but a fixture that is a valid
+    // statement is one less trap.
+    sql.push_arg(Value::from(7i32));
+    sql.push_arg(Value::from(i64::MIN + 1));
+    sql.push_arg(Value::from(18_446_744_073_709_551_615u64));
+    sql.push_arg(Value::from(
+        340_282_366_920_938_463_463_374_607_431_768_211_455u128,
     ));
-    sql.bind(1.5f64);
-    sql.bind(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap());
-    sql.bind_value(Value::Json(
+    sql.push_arg(Value::from(
+        "a moderately sized piece of text, long enough to be interesting",
+    ));
+    sql.push_arg(Value::from(vec![0u8; 64]));
+    sql.push_arg(Value::from(uuid::Uuid::from_u128(
+        0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+    )));
+    sql.push_arg(Value::from(1.5f64));
+    sql.push_arg(Value::from(
+        chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+    ));
+    sql.push_arg(Value::Json(
         br#"{"name":"bench","tags":["a","b","c"],"nested":{"n":1,"ok":true}}"#.to_vec(),
     ));
-    sql.bind_value(Value::Null);
-    sql.bind(true);
+    sql.push_arg(Value::Null);
+    sql.push_arg(Value::from(true));
     sql.seal()
 }
 

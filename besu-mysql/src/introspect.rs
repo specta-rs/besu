@@ -367,3 +367,20 @@ fn parse_default(default: Option<&str>, extra: &str) -> Option<String> {
         None => Some(default.to_owned()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tinyint_one_unsigned_is_a_byte_not_a_boolean() {
+        // `BOOLEAN` is an alias for `TINYINT(1)`, so the width alone cannot decide. The
+        // `unsigned` test has to come first or a legacy `u8` column decodes as `bool`.
+        assert_eq!(parse_type("tinyint", "tinyint(1)"), TypeDef::Bool);
+        assert_eq!(
+            parse_type("tinyint", "tinyint(1) unsigned"),
+            TypeDef::UInt(8)
+        );
+        assert_eq!(parse_type("tinyint", "tinyint(4)"), TypeDef::Int2);
+    }
+}

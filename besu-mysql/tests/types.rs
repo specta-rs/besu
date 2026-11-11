@@ -187,3 +187,28 @@ async fn an_unsigned_column_decodes_through_both_integer_paths() {
         .await;
     assert!(too_wide.is_err(), "got {too_wide:?}");
 }
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "stamped")]
+pub struct Stamped {
+    #[besu(primary_key)]
+    pub id: i64,
+    /// `DateTime<Utc>` maps to `TimestampTz`, which MySQL stores as `DATETIME(6)` and
+    /// reports back as `Timestamp`. The second `push` is what proves normalisation folds
+    /// the two; before it did, this column reported a type change on every push.
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub naive: chrono::NaiveDateTime,
+}
+
+#[tokio::test]
+async fn a_timestamp_with_a_zone_converges() {
+    let db = fresh("besu_test_stamped").await;
+    db.push([stamped.def()]).await.unwrap();
+
+    let second = db.push([stamped.def()]).await.unwrap();
+    assert!(
+        second.is_empty(),
+        "push must be a no-op, got: {:?}",
+        second.changes
+    );
+}
