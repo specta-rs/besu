@@ -1,4 +1,4 @@
-use crate::{Column, Enum, ForeignKey, Index, Schema, Table, Unique};
+use crate::{Check, Column, Enum, ForeignKey, Index, Schema, Table, Unique};
 
 /// How much damage applying a [`Change`] can do.
 ///
@@ -128,6 +128,20 @@ pub enum Change {
         /// The constraint.
         foreign_key: ForeignKey,
     },
+    /// A `CHECK` constraint was added.
+    AddCheck {
+        /// The table.
+        table: String,
+        /// The constraint.
+        check: Check,
+    },
+    /// A `CHECK` constraint was removed.
+    DropCheck {
+        /// The table.
+        table: String,
+        /// The constraint.
+        check: Check,
+    },
 }
 
 impl Change {
@@ -149,6 +163,7 @@ impl Change {
             Self::AddIndex { .. }
             | Self::AddUnique { .. }
             | Self::AddForeignKey { .. }
+            | Self::AddCheck { .. }
             // Appending an enum value cannot break an existing row; it can only be slow.
             | Self::AddEnumValue { .. } => Safety::Risky,
             Self::AlterColumn { from, to, .. } => {
@@ -168,6 +183,9 @@ impl Change {
             // Losing a unique constraint loses the guarantee, exactly like dropping a unique
             // index, and it is the only way to reach the desired schema.
             | Self::DropUnique { .. }
+            // A check enforces the shape of every new row; removing it is the same kind of
+            // loss as removing a uniqueness guarantee, so it needs the same explicit flag.
+            | Self::DropCheck { .. }
             // Rows that still hold an enum value no longer in the type are unreadable.
             | Self::DropEnum { .. }
             | Self::RemoveEnumValue { .. } => Safety::Destructive,
@@ -193,7 +211,9 @@ impl Change {
             | Self::AddUnique { table, .. }
             | Self::DropUnique { table, .. }
             | Self::AddForeignKey { table, .. }
-            | Self::DropForeignKey { table, .. } => Some(table.clone()),
+            | Self::DropForeignKey { table, .. }
+            | Self::AddCheck { table, .. }
+            | Self::DropCheck { table, .. } => Some(table.clone()),
         }
     }
 }
@@ -233,6 +253,8 @@ impl core::fmt::Display for Change {
             Self::DropForeignKey { table, foreign_key } => {
                 write!(f, "drop foreign key {} on {table}", foreign_key.name)
             }
+            Self::AddCheck { table, check } => write!(f, "add check {} on {table}", check.name),
+            Self::DropCheck { table, check } => write!(f, "drop check {} on {table}", check.name),
         }
     }
 }
@@ -368,10 +390,11 @@ pub fn diff_with(
         });
     }
 
-    // Order within a table: additive first, then destructive. Enums bracket the tables they
-    // belong to. `sort_by_key` is stable, so changes that share a key keep the order the
-    // loops above produced: a `CreateEnum` still precedes the `CreateTable` that uses it,
-    // and a `DropTable` still precedes the `DropEnum` it was the last user of.
+    // Order within a table. Tables and types come first, then per-table changes, then the
+    // destructive tail. A replaced object (an index or constraint whose definition changed)
+    // must have its `Drop` run before its `Add`, because both use the same name and the
+    // database rejects a second object with it, so the drops of those objects are keyed
+    // before their adds.
     changes.sort_by_key(|change| match change {
         Change::CreateEnum(_) => 0,
         Change::CreateTable(_) => 1,
@@ -379,16 +402,21 @@ pub fn diff_with(
         Change::RenameColumn { .. } => 3,
         Change::AlterColumn { .. } => 4,
         Change::AddEnumValue { .. } => 5,
-        Change::AddIndex { .. } => 6,
-        Change::AddUnique { .. } => 7,
-        Change::AddForeignKey { .. } => 8,
-        Change::DropForeignKey { .. } => 9,
-        Change::DropUnique { .. } => 10,
-        Change::DropIndex { .. } => 11,
-        Change::DropColumn { .. } => 12,
-        Change::DropTable { .. } => 13,
-        Change::RemoveEnumValue { .. } => 14,
-        Change::DropEnum { .. } => 15,
+        Change::DropForeignKey { .. } => 6,
+        // Dropping a check before the column it names avoids "constraint does not exist":
+        // the database drops a constraint of its own when its last column goes.
+        Change::DropCheck { .. } => 7,
+        Change::DropUnique { .. } => 8,
+        Change::DropIndex { .. } => 9,
+        Change::AddIndex { .. } => 10,
+        Change::AddUnique { .. } => 11,
+        Change::AddForeignKey { .. } => 12,
+        // A check may name a column added above, so it comes after every additive change.
+        Change::AddCheck { .. } => 13,
+        Change::DropColumn { .. } => 14,
+        Change::DropTable { .. } => 15,
+        Change::RemoveEnumValue { .. } => 16,
+        Change::DropEnum { .. } => 17,
     });
 
     changes
@@ -566,6 +594,40 @@ fn diff_table(
             });
         }
     }
+
+    // `CHECK` constraints. Matched by name, because that is how the statement that drops one
+    // finds it, and compared after normalising parentheses: PostgreSQL reports
+    // `CHECK (value > 0)` as `(value > 0)`, which must equal the declared `value > 0`.
+    fn same_check(a: &Check, b: &Check) -> bool {
+        crate::normalise_expression(&a.expression) == crate::normalise_expression(&b.expression)
+    }
+    for check in &desired.checks {
+        match current.checks.iter().find(|c| c.name == check.name) {
+            Some(existing) if same_check(existing, check) => {}
+            Some(_) => {
+                changes.push(Change::DropCheck {
+                    table: table.clone(),
+                    check: check.clone(),
+                });
+                changes.push(Change::AddCheck {
+                    table: table.clone(),
+                    check: check.clone(),
+                });
+            }
+            None => changes.push(Change::AddCheck {
+                table: table.clone(),
+                check: check.clone(),
+            }),
+        }
+    }
+    for check in &current.checks {
+        if !desired.checks.iter().any(|c| c.name == check.name) {
+            changes.push(Change::DropCheck {
+                table: table.clone(),
+                check: check.clone(),
+            });
+        }
+    }
 }
 
 /// The most dangerous change in a list, if any.
@@ -605,6 +667,7 @@ mod tests {
             indexes: Vec::new(),
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
+            checks: Vec::new(),
             comment: None,
         }
     }
@@ -613,6 +676,7 @@ mod tests {
         Schema {
             tables,
             enums: Vec::new(),
+            views: Vec::new(),
         }
     }
 
@@ -683,6 +747,7 @@ mod tests {
         let desired = Schema {
             tables: vec![reviews],
             enums: vec![mood(&["sad", "happy"])],
+            views: Vec::new(),
         };
 
         let changes = diff(&Schema::new(), &desired);
@@ -695,10 +760,12 @@ mod tests {
         let current = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad", "happy"])],
+            views: Vec::new(),
         };
         let desired = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad", "happy", "ecstatic"])],
+            views: Vec::new(),
         };
 
         let changes = diff(&current, &desired);
@@ -717,10 +784,12 @@ mod tests {
         let current = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad", "happy"])],
+            views: Vec::new(),
         };
         let desired = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad"])],
+            views: Vec::new(),
         };
 
         let changes = diff(&current, &desired);
@@ -742,6 +811,7 @@ mod tests {
                 vec![column("mood", TypeDef::Custom("mood".into()))],
             )],
             enums: vec![mood(&["sad"])],
+            views: Vec::new(),
         };
 
         let changes = diff(&current, &Schema::new());
@@ -756,6 +826,7 @@ mod tests {
         let current = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad"])],
+            views: Vec::new(),
         };
         assert!(diff(&current, &Schema::new()).is_empty());
     }
@@ -838,5 +909,106 @@ mod tests {
 
         let desired = schema(vec![table("things", vec![column("id", TypeDef::Int8)])]);
         assert!(diff(&current, &desired).is_empty());
+    }
+
+    fn check(name: &str, expression: &str) -> crate::Check {
+        crate::Check {
+            name: name.into(),
+            expression: expression.into(),
+        }
+    }
+
+    #[test]
+    fn a_check_is_added_risky_and_dropped_destructively() {
+        let before = table("accounts", vec![column("balance", TypeDef::Int8)]);
+        let mut after = before.clone();
+        after
+            .checks
+            .push(check("accounts_balance_check", "balance >= 0"));
+
+        let added = diff(&schema(vec![before.clone()]), &schema(vec![after.clone()]));
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0],
+            Change::AddCheck {
+                table: "accounts".into(),
+                check: check("accounts_balance_check", "balance >= 0"),
+            }
+        );
+        assert_eq!(added[0].safety(), Safety::Risky);
+
+        let dropped = diff(&schema(vec![after]), &schema(vec![before]));
+        assert_eq!(
+            dropped,
+            [Change::DropCheck {
+                table: "accounts".into(),
+                check: check("accounts_balance_check", "balance >= 0"),
+            }]
+        );
+        assert_eq!(dropped[0].safety(), Safety::Destructive);
+    }
+
+    #[test]
+    fn a_check_converges_despite_extra_parentheses() {
+        // PostgreSQL reports `CHECK (balance >= 0)` as `(balance >= 0)`.
+        let mut current = table("accounts", vec![column("balance", TypeDef::Int8)]);
+        current
+            .checks
+            .push(check("accounts_balance_check", "(balance >= 0)"));
+
+        let mut desired = current.clone();
+        desired.checks[0].expression = "balance >= 0".into();
+
+        assert!(diff(&schema(vec![current]), &schema(vec![desired])).is_empty());
+    }
+
+    #[test]
+    fn a_changed_check_is_replaced() {
+        let mut before = table("accounts", vec![column("balance", TypeDef::Int8)]);
+        before
+            .checks
+            .push(check("accounts_balance_check", "balance >= 0"));
+        let mut after = before.clone();
+        after.checks[0].expression = "balance > 0".into();
+
+        let changes = diff(&schema(vec![before]), &schema(vec![after]));
+        // The drop has to run first: both statements use the same constraint name.
+        assert!(matches!(&changes[0], Change::DropCheck { .. }));
+        assert!(matches!(&changes[1], Change::AddCheck { .. }));
+        assert_eq!(worst_safety(&changes), Safety::Destructive);
+    }
+
+    #[test]
+    fn an_index_predicate_is_part_of_the_index() {
+        let mut before = table("events", vec![column("kind", TypeDef::Text)]);
+        before.indexes.push(crate::Index {
+            name: "events_kind_idx".into(),
+            columns: vec!["kind".into()],
+            unique: false,
+            predicate: None,
+        });
+        let mut after = before.clone();
+        after.indexes[0].predicate = Some("kind = 'error'".into());
+
+        // The name is the same, but the index covers different rows, so it is recreated.
+        let changes = diff(&schema(vec![before.clone()]), &schema(vec![after.clone()]));
+        assert!(matches!(&changes[0], Change::DropIndex { .. }));
+        assert!(matches!(&changes[1], Change::AddIndex { .. }));
+
+        assert!(diff(&schema(vec![after.clone()]), &schema(vec![after])).is_empty());
+    }
+
+    #[test]
+    fn views_are_never_diffed() {
+        let current = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        let mut desired = current.clone();
+        desired.views.push(crate::View {
+            name: "active_users".into(),
+            definition: "SELECT * FROM users WHERE active".into(),
+        });
+
+        // Neither creating nor dropping a view is a change `push` can make.
+        assert!(diff(&current, &desired).is_empty());
+        assert!(diff(&desired, &current).is_empty());
     }
 }

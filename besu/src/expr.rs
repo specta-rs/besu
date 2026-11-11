@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use besu_core::{Dialect, Sql, TypeDef, Value};
 
 use crate::types::{
-    Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, Int1, Int2, Int4, Int8, Json, Jsonb,
-    Nullability, SqlType, Text, Time, Timestamp, TimestampTz, UInt1, UInt2, UInt4, UInt8, Uuid,
-    VarChar,
+    Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, I128, Int1, Int2, Int4, Int8, Json,
+    Jsonb, Nullability, SqlType, Text, Time, Timestamp, TimestampTz, U128, UInt1, UInt2, UInt4,
+    UInt8, Uuid, VarChar,
 };
 
 use crate::condition::Contains;
@@ -569,6 +569,8 @@ numeric_values!(u8, [UInt1, Int2, Int4, Int8]);
 numeric_values!(u16, [UInt2, Int4, Int8]);
 numeric_values!(u32, [UInt4, Int8]);
 numeric_values!(u64, [UInt8]);
+numeric_values!(u128, [U128]);
+numeric_values!(i128, [I128]);
 numeric_values!(f32, [Float4, Float8]);
 numeric_values!(f64, [Float8]);
 
@@ -1175,6 +1177,37 @@ where
     })
 }
 
+/// A full-text match: `column` contains the search `query`.
+///
+/// The query is bound as a parameter, so untrusted input never becomes SQL and each database
+/// parses it with its own search grammar. Every dialect spells the match differently:
+///
+/// | Dialect | Rendered |
+/// | --- | --- |
+/// | PostgreSQL | `to_tsvector('english', col) @@ plainto_tsquery('english', $1)` |
+/// | MySQL | `MATCH(col) AGAINST ($1 IN BOOLEAN MODE)` |
+/// | SQLite | `col MATCH $1` |
+///
+/// The differences go beyond spelling, so what the schema needs differs too. MySQL requires a
+/// `FULLTEXT` index over exactly the matched columns. SQLite matches an FTS5 virtual table,
+/// which the schema layer cannot declare; create it with [`sql!`](crate::sql) and select it
+/// through a table handle. PostgreSQL needs nothing: `to_tsvector` builds the vector per row,
+/// so an unindexed query is correct and merely slow.
+///
+/// PostgreSQL's text search configuration is fixed at `english` for now, which is why a
+/// stemmed search such as `"borrow"` still finds `"borrowing"`. A parameter for it, and
+/// ranking and highlighting alongside it, are the rest of
+/// [#57](https://github.com/specta-rs/besu/issues/57).
+pub fn matches<RowSet, A, MA>(column: A, query: impl Into<String>) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::FullText {
+        column: Box::new(column.into_typed().into_kind()),
+        query: Value::Text(query.into()),
+    })
+}
+
 /// The database's current timestamp.
 pub fn now<T>() -> Expr<T, TimestampTz> {
     Expr::from_kind(ExprKind::Raw("CURRENT_TIMESTAMP".into()))
@@ -1323,6 +1356,21 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
         fn ilike => "ILIKE",
         /// `NOT ILIKE` comparison.
         fn not_ilike => "NOT ILIKE",
+    }
+
+    /// Full-text match against `query`, as [`matches`](crate::expr::matches) renders it.
+    ///
+    /// This is the method form, so the column is checked against the query's row set:
+    ///
+    /// ```ignore
+    /// db.select(posts).filter(posts.title.matches("rust")).await?;
+    /// ```
+    pub fn matches<RowSet, P>(self, query: impl Into<String>) -> Expr<RowSet, Bool>
+    where
+        RowSet: Contains<P, T>,
+    {
+        let _ = PhantomData::<P>;
+        crate::expr::matches(self, query)
     }
 
     /// `IS NULL`.

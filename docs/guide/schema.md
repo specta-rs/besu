@@ -236,6 +236,8 @@ reference type, not a path, and is rejected; use `String`.
 | `u16` | `UInt2` | `UInt(16)` | `INTEGER` | `INTEGER` | `SMALLINT UNSIGNED` |
 | `u32` | `UInt4` | `UInt(32)` | `INTEGER` | `BIGINT` | `INT UNSIGNED` |
 | `u64` | `UInt8` | `UInt(64)` | `INTEGER` | `NUMERIC(20,0)` | `BIGINT UNSIGNED` |
+| `u128` | `U128` | `UInt(128)` | `TEXT` | `NUMERIC(39,0)` | `DECIMAL(39,0)` |
+| `i128` | `I128` | `Decimal(39,0)` | `TEXT` | `NUMERIC(39,0)` | `DECIMAL(39,0)` |
 | `f32` | `Float4` | `Float4` | `REAL` | `REAL` | `FLOAT` |
 | `f64` | `Float8` | `Float8` | `REAL` | `DOUBLE PRECISION` | `DOUBLE` |
 | `String` | `Text` | `Text` | `TEXT` | `TEXT` | `TEXT` |
@@ -256,6 +258,11 @@ Three details are easy to get wrong:
   the driver encodes the whole `u64` range into it; MySQL uses `BIGINT UNSIGNED`; SQLite has
   only signed 64-bit integers, so binding a `u64` above `i64::MAX` is an encode error at
   runtime rather than a wrapped value.
+- `u128` is `NUMERIC(39,0)` on PostgreSQL and `DECIMAL(39,0)` on MySQL, both exact and wide
+  enough for `u128::MAX`. SQLite has nothing that wide, so the column is `TEXT` and the
+  driver stores the decimal digits; comparisons and ordering on that column are
+  lexicographic unless it is cast to a number. `i128` is modelled as `Decimal(39,0)`, which
+  renders the same way on every dialect.
 - `DateTime` is matched by name, not by its full type. `chrono::DateTime<Local>` is declared
   as `TimestampTz`, but no driver implements `Decode` for it, so a query that returns the
   model does not compile. Use `DateTime<Utc>`.
@@ -288,7 +295,7 @@ helpers for filtering on it.
 
 | Mistake | When it fails |
 | --- | --- |
-| A field type with no mapping (`u128`, `i128`, `char`) | Compile error listing the supported types |
+| A field type with no mapping (`char`, `f16`, an array) | Compile error listing the supported types |
 | A generic table (`struct Foo<T>`) | Compile error |
 | An enum, union, tuple struct or unit struct | Compile error |
 | A table whose every field is `skip`ped | Compile error |

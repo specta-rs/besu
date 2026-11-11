@@ -160,6 +160,7 @@ dependencies = [
  "besu-core",
  "besu-schema",
  "chrono",
+ "num-traits",
  "serde_json",
  "sqlx",
  "tokio",

@@ -52,11 +52,7 @@ pub(crate) struct JoinClause {
 
 /// Write a possibly schema-qualified table name.
 pub(crate) fn push_table<D: Dialect>(out: &mut Sql<D>, table: &TableDef) {
-    if let Some(schema) = table.schema {
-        out.push_raw(&D::quote(schema));
-        out.push_raw(".");
-    }
-    out.push_raw(&D::quote(table.name));
+    out.push_table(table.schema, table.name);
 }
 
 #[derive(Debug, Clone)]
@@ -109,8 +105,9 @@ impl SelectQuery {
         }
     }
 
-    pub(crate) fn build<D: Dialect>(&self) -> Sql<D> {
+    pub(crate) fn build<D: Dialect>(&self, prefix: Option<alloc::sync::Arc<str>>) -> Sql<D> {
         let mut out = Sql::new();
+        out.set_table_prefix(prefix);
 
         out.push_raw("SELECT ");
         if self.distinct {

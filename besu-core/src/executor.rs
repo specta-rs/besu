@@ -38,6 +38,14 @@ pub trait Executor {
         sql: &Sql<DialectOf<Self>>,
     ) -> impl Future<Output = Result<Self::Output, ErrorOf<Self>>> + Send;
 
+    /// The prefix every table name in a statement carries, if any.
+    ///
+    /// A shared physical database with one set of tables per tenant needs it; everything
+    /// else returns `None` and pays nothing for the capability.
+    fn table_prefix(&self) -> Option<alloc::sync::Arc<str>> {
+        None
+    }
+
     /// Run a query and hand back its rows as they arrive.
     ///
     /// The borrow is `'a` on both `self` and the statement: a cursor keeps the connection and

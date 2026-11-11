@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use besu_core::dialect::FullTextStyle;
 use besu_core::{Dialect, Error, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The SQLite dialect.
@@ -12,8 +13,12 @@ pub(crate) fn sqlite_bind(value: Value) -> Result<Value, Error> {
     match &value {
         Value::UInt(v) if i64::try_from(*v).is_err() => Err(Error::encode(
             v,
-            "SQLite integers are signed 64-bit, so this value does not fit",
+            "SQLite integers are signed 64-bit, so this value does not fit; use u128 for a \
+             value this large",
         )),
+        // A 128-bit value is stored as decimal text rather than a SQLite integer, so it is
+        // not range-checked against the signed 64-bit limit.
+        Value::UInt128(_) | Value::Int128(_) => Ok(value),
         _ => Ok(value),
     }
 }
@@ -31,6 +36,10 @@ impl Dialect for SQLite {
     const SUPPORTS_DEFAULT_IN_VALUES: bool = false;
     const UNBOUNDED_LIMIT: i64 = -1;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
+
+    /// SQLite's `MATCH` is provided by the table, not the expression: it only works against
+    /// an FTS5 virtual table, which the schema layer cannot create.
+    const FULL_TEXT: FullTextStyle = FullTextStyle::Sqlite;
     const SUPPORTS_ROW_LOCKING: bool = false;
     // SQLITE_MAX_VARIABLE_NUMBER, the default since 3.32.
     const MAX_PARAMS: usize = 32_766;
@@ -47,6 +56,10 @@ impl Dialect for SQLite {
         Cow::Borrowed(match ty {
             TypeDef::Bool => "BOOLEAN",
             TypeDef::Int2 | TypeDef::Int4 | TypeDef::Int8 => "INTEGER",
+            // SQLite has no integer wider than `i64`, so a 128-bit value is stored as its
+            // decimal digits. `TEXT` affinity keeps the digits exact; comparisons and
+            // ordering are lexicographic unless the column is cast to a number.
+            TypeDef::UInt(128) => "TEXT",
             TypeDef::UInt(_) => "INTEGER",
             TypeDef::Float4 | TypeDef::Float8 => "REAL",
             TypeDef::Text | TypeDef::Char(_) | TypeDef::VarChar(_) => "TEXT",

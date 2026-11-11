@@ -20,12 +20,38 @@ use crate::table::Table;
 /// transaction and a database with no connection at all.
 pub struct Database<Dr: Driver> {
     driver: Dr,
+    prefix: Option<alloc::sync::Arc<str>>,
 }
 
 impl<Dr: Driver> Database<Dr> {
     /// Wrap a driver.
     pub fn new(driver: Dr) -> Self {
-        Self { driver }
+        Self {
+            driver,
+            prefix: None,
+        }
+    }
+
+    /// Wrap a driver and prefix every table name it mentions.
+    ///
+    /// This is for deployments that share one physical database between tenants and name
+    /// their tables `tenant_42_users`. The prefix is applied when a statement is rendered —
+    /// `FROM`, `JOIN`, and every qualified column reference — and it is applied to the
+    /// declared and introspected schemas by `push`, so migrations see the same names the
+    /// queries do.
+    ///
+    /// Hand-written migration SQL is not rewritten, because it is not built by Besu; write it
+    /// with the prefix already in place.
+    pub fn prefixed(driver: Dr, prefix: impl Into<alloc::sync::Arc<str>>) -> Self {
+        Self {
+            driver,
+            prefix: Some(prefix.into()),
+        }
+    }
+
+    /// The prefix applied to table names, if any.
+    pub fn prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
     }
 
     /// A reference to the underlying driver, for anything Besu does not cover.
@@ -127,6 +153,10 @@ impl<Dr: Driver> Executor for &Database<Dr> {
     {
         let driver: &'c Dr = &self.driver;
         driver.query_stream(sql)
+    }
+
+    fn table_prefix(&self) -> Option<alloc::sync::Arc<str>> {
+        self.prefix.clone()
     }
 }
 

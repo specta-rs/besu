@@ -184,3 +184,99 @@ async fn declared_types_are_reflected_in_the_schema() {
     assert!(table.column("maybe").unwrap().nullable);
     assert!(!table.column("text").unwrap().nullable);
 }
+
+/// A table holding 128-bit integers, which PostgreSQL spells `NUMERIC(39,0)`.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "wide_numbers")]
+pub struct WideNumber {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub value: u128,
+    pub signed: i128,
+}
+
+#[tokio::test]
+async fn u128_round_trips_at_the_extremes() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([wide_numbers.def()]).await.unwrap();
+
+    for (id, value) in [0, 1, u64::MAX as u128, u128::MAX].into_iter().enumerate() {
+        db.insert(wide_numbers)
+            .value(wide_numbers.insert(id as i64, value, 0))
+            .await
+            .unwrap();
+
+        let stored: Vec<WideNumber> = db
+            .select(wide_numbers)
+            .filter(wide_numbers.id.eq(id as i64))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].value, value);
+    }
+}
+
+#[tokio::test]
+async fn i128_round_trips_at_the_extremes() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([wide_numbers.def()]).await.unwrap();
+
+    for (id, signed) in [0, -1, i128::MIN, i128::MAX].into_iter().enumerate() {
+        db.insert(wide_numbers)
+            .value(wide_numbers.insert(id as i64, 0u128, signed))
+            .await
+            .unwrap();
+
+        let stored: Vec<WideNumber> = db
+            .select(wide_numbers)
+            .filter(wide_numbers.id.eq(id as i64))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].signed, signed);
+    }
+}
+
+#[tokio::test]
+async fn u128_round_trips_through_a_transaction() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([wide_numbers.def()]).await.unwrap();
+
+    db.transaction(async |tx| {
+        tx.insert(wide_numbers)
+            .value(wide_numbers.insert(1, u128::MAX, i128::MIN))
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let stored: Vec<WideNumber> = db.select(wide_numbers).await.unwrap();
+    assert_eq!(stored[0].value, u128::MAX);
+    assert_eq!(stored[0].signed, i128::MIN);
+}
+
+#[tokio::test]
+async fn declared_type_is_a_128_bit_unsigned_integer() {
+    let schema = besu::Database::<Sqlx>::schema([wide_numbers.def()]);
+    let table = schema.table("wide_numbers").unwrap();
+    assert_eq!(table.column("value").unwrap().ty, besu::TypeDef::UInt(128));
+    assert_eq!(
+        table.column("signed").unwrap().ty,
+        besu::TypeDef::Decimal(39, 0)
+    );
+
+    let db = common::database().await;
+    common::reset(&db).await;
+    let first = db.push([wide_numbers.def()]).await.unwrap();
+    assert!(
+        first.statements[0].contains("\"value\" NUMERIC(39,0)"),
+        "a u128 column must be declared as NUMERIC(39,0): {:?}",
+        first.statements
+    );
+
+    // `NUMERIC(39,0)` introspects back as the same width, so a second push is a no-op.
+    let second = db.push([wide_numbers.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+}

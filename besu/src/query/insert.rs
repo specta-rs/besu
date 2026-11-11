@@ -51,8 +51,12 @@ impl InsertQuery {
         self.rows.push(values);
     }
 
-    pub(crate) fn build<D: besu_core::Dialect>(&self) -> besu_core::Sql<D> {
+    pub(crate) fn build<D: besu_core::Dialect>(
+        &self,
+        prefix: Option<alloc::sync::Arc<str>>,
+    ) -> besu_core::Sql<D> {
         let mut out = besu_core::Sql::new();
+        out.set_table_prefix(prefix);
 
         if self.rows.is_empty() {
             out.set_error(Error::invalid_query(
@@ -314,6 +318,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         values: impl IntoIterator<Item = I>,
         rows_per_statement: usize,
     ) -> Result<Vec<E::Output>, ErrorOf<E>> {
+        let prefix = self.exec.table_prefix();
         let mut exec = self.exec;
         let mut pending: alloc::collections::VecDeque<Option<alloc::vec::Vec<Option<Value>>>> =
             values
@@ -333,7 +338,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
                 }
             }
             let sql = query
-                .build::<DialectOf<E>>()
+                .build::<DialectOf<E>>(prefix.clone())
                 .finish()
                 .map_err(<E::Driver as Driver>::error)?;
             outputs.push(exec.execute(&sql).await?);
@@ -362,7 +367,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
 
     /// Render the exact SQL this query will run.
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
-        Ok(self.query.build().seal())
+        Ok(self.query.build(self.exec.table_prefix()).seal())
     }
 
     fn into_parts(self) -> (E, InsertQuery) {
@@ -381,9 +386,10 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            let prefix = self.exec.table_prefix();
             let (mut exec, query) = self.into_parts();
             let sql = query
-                .build::<DialectOf<E>>()
+                .build::<DialectOf<E>>(prefix.clone())
                 .finish()
                 .map_err(<E::Driver as Driver>::error)?;
             exec.execute(&sql).await
@@ -410,10 +416,11 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            let prefix = self.exec.table_prefix();
             let mut exec = self.exec;
             let sql = self
                 .query
-                .build::<DialectOf<E>>()
+                .build::<DialectOf<E>>(prefix.clone())
                 .finish()
                 .map_err(<E::Driver as Driver>::error)?;
             let rows = exec.query(&sql).await?;

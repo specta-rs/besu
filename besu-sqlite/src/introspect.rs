@@ -1,10 +1,24 @@
 use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
-use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique};
+use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
 /// Read the database's schema from SQLite's own catalogue.
+///
+/// Objects the IR cannot express are skipped rather than reported as a lossy version of
+/// themselves, because `push` would then try to drop or replace them:
+///
+/// - partial indexes, whose `WHERE` clause has no representation here,
+/// - expression indexes, whose key parts are not columns,
+/// - `CHECK` constraints, which would have to be parsed out of the `CREATE TABLE` text,
+/// - triggers, which are not read at all.
+///
+/// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
+/// ignores that list, so they never appear as tables and `push` never touches them.
+///
+/// A consequence of skipping checks is that a table rebuild (an `AlterColumn`) recreates the
+/// table from the IR and therefore loses a hand-written check; see `docs/guide/migrations.md`.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let tables = db
         .execute(besu::sql!(
@@ -21,8 +35,30 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
             .tables
             .push(introspect_table(db, name, create_sql).await?);
     }
+    schema.views = introspect_views(db).await?;
     schema.sort();
     Ok(schema)
+}
+
+async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT name, sql FROM sqlite_master \
+             WHERE type = 'view' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_besu\\_%' ESCAPE '\\' \
+             ORDER BY name"
+        ))
+        .all::<(String, Option<String>)>()
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(name, definition)| {
+            Some(View {
+                name,
+                definition: definition?,
+            })
+        })
+        .collect())
 }
 
 async fn introspect_table(
@@ -62,6 +98,11 @@ async fn introspect_table(
         indexes: Vec::new(),
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
+        // SQLite's catalog has no view of a `CHECK` constraint: it exists only inside the
+        // `CREATE TABLE` text. Parsing that text back into an expression is not something
+        // the IR can promise to get right, so checks are left unmodelled here rather than
+        // reported as a guess. The cost is that a table rebuild loses one.
+        checks: Vec::new(),
         comment: None,
     };
 
@@ -81,12 +122,26 @@ async fn introspect_indexes(
         .all::<(i64, String, i64, String, i64)>()
         .await?;
 
-    for (_, name, unique, origin, _) in indexes {
+    for (_, name, unique, origin, partial) in indexes {
+        // SQLite knows partial indexes, but the IR has no predicate for one here, and a
+        // partial index reported as a plain index would make `push` drop it or believe it
+        // covers rows it does not.
+        if partial != 0 {
+            continue;
+        }
+
         let info = format!("PRAGMA index_info({})", quote_literal(&name));
         let columns = db
             .execute(besu::Fragment::new(info))
             .all::<(i64, i64, Option<String>)>()
             .await?;
+
+        // A `NULL` column name marks an expression key part (`lower(email)`), which the IR
+        // cannot express. Reporting the remaining columns would describe an index that does
+        // not exist, so the whole index is skipped.
+        if columns.iter().any(|(_, _, name)| name.is_none()) {
+            continue;
+        }
         let columns: Vec<String> = columns
             .into_iter()
             .filter_map(|(_, _, name)| name)
@@ -114,6 +169,7 @@ async fn introspect_indexes(
                 name,
                 columns,
                 unique: unique != 0,
+                predicate: None,
             }),
         }
     }

@@ -18,6 +18,26 @@ pub struct Schema {
     /// is `TypeDef::Custom`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enums: Vec<Enum>,
+    /// Views, kept for round-tripping only.
+    ///
+    /// A view is created by a migration, not by `#[derive(Table)]`, so the differ never
+    /// reports one: a view that exists in the database but not here is left exactly as it
+    /// is, and a view declared here is never created. Introspection fills this list so
+    /// `besu pull` produces a snapshot that names what is really there; `push` ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<View>,
+}
+
+/// A view, as reported by a database.
+///
+/// The definition is the dialect's own `SELECT`, verbatim. It is carried so a snapshot can
+/// show it and so a person can recreate the view by hand; nothing in Besu executes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct View {
+    /// The view's name, qualified by its schema the same way a [`Table`] is.
+    pub name: String,
+    /// The statement that defines the view.
+    pub definition: String,
 }
 
 /// A named enum type, as found in PostgreSQL.
@@ -38,6 +58,7 @@ impl Schema {
         Self {
             tables: Vec::new(),
             enums: Vec::new(),
+            views: Vec::new(),
         }
     }
 
@@ -118,11 +139,12 @@ impl Schema {
         self.enums.iter().find(|e| e.name == name)
     }
 
-    /// Sort tables by schema and name, and enums by name, so output is stable.
+    /// Sort tables by schema and name, enums by name, and views by name, so output is stable.
     pub fn sort(&mut self) {
         self.tables
             .sort_by(|a, b| a.schema.cmp(&b.schema).then_with(|| a.name.cmp(&b.name)));
         self.enums.sort_by(|a, b| a.name.cmp(&b.name));
+        self.views.sort_by(|a, b| a.name.cmp(&b.name));
         for table in &mut self.tables {
             table.normalise();
         }
@@ -192,6 +214,12 @@ pub struct Table {
     /// Foreign key constraints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_keys: Vec<ForeignKey>,
+    /// `CHECK` constraints, which the derive cannot declare and a snapshot can.
+    ///
+    /// A check is written inside `CREATE TABLE` and added or dropped with
+    /// `ALTER TABLE ... ADD/DROP CONSTRAINT` on the dialects that support it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
     /// Tables of named enums are rare; kept for fidelity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
@@ -211,6 +239,9 @@ impl Table {
                     name: idx.name.into(),
                     columns: idx.columns.iter().map(|c| (*c).into()).collect(),
                     unique: idx.unique,
+                    // A `TableDef` has no way to spell a predicate, so a declared index is
+                    // always a plain one.
+                    predicate: None,
                 })
                 .collect(),
             // The derive has no attribute for a composite `UNIQUE`; a hand-written
@@ -229,6 +260,9 @@ impl Table {
                     on_update: fk.on_update,
                 })
                 .collect(),
+            // The derive has no attribute for a `CHECK` constraint, so this is only ever
+            // populated by introspection or a hand-written snapshot.
+            checks: Vec::new(),
             comment: None,
         }
     }
@@ -268,6 +302,7 @@ impl Table {
         self.indexes.sort_by(|a, b| a.name.cmp(&b.name));
         self.uniques.sort_by(|a, b| a.name.cmp(&b.name));
         self.foreign_keys.sort_by(|a, b| a.name.cmp(&b.name));
+        self.checks.sort_by(|a, b| a.name.cmp(&b.name));
     }
 }
 
@@ -351,6 +386,26 @@ pub struct Index {
     /// Whether the index is unique.
     #[serde(default)]
     pub unique: bool,
+    /// The `WHERE` clause of a partial index, if it has one.
+    ///
+    /// Only PostgreSQL has this read back into the IR. SQLite supports partial indexes but
+    /// its introspection skips them rather than guess, and MySQL has none, so both leave
+    /// this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
+}
+
+/// A `CHECK` constraint.
+///
+/// The expression is a raw SQL boolean expression. It is compared after folding away the
+/// redundant parentheses PostgreSQL adds, so a check declared as `value > 0` converges
+/// against the `((value > 0))` the database reports back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    /// The constraint name.
+    pub name: String,
+    /// The boolean expression inside `CHECK (...)`.
+    pub expression: String,
 }
 
 /// A foreign key constraint.
@@ -391,6 +446,52 @@ pub fn normalise_default(value: Option<&str>) -> Option<String> {
         _ => return Some(lowered),
     };
     Some(lowered.into())
+}
+
+/// Fold equivalent spellings of a `CHECK` expression together.
+///
+/// PostgreSQL stores `CHECK (value > 0)` and reports it as `(value > 0)`, with one pair of
+/// parentheses for every level it was written at. Stripping pairs that wrap the whole
+/// expression leaves the spelling a person would write, so a check declared in a snapshot
+/// converges instead of being dropped and added on every push.
+///
+/// Only parentheses wrapping the *whole* expression are removed; `(a > 0) AND (b > 0)` keeps
+/// both of its pairs.
+pub fn normalise_expression(expression: &str) -> String {
+    let mut current = expression.trim();
+    while let Some(inner) = strip_outer_parens(current) {
+        current = inner.trim();
+    }
+    current.to_owned()
+}
+
+/// The inside of `sql` when one pair of parentheses wraps all of it.
+fn strip_outer_parens(sql: &str) -> Option<&str> {
+    let inner = sql.strip_prefix('(')?.strip_suffix(')')?;
+    let mut depth = 0usize;
+    let mut quote = 0u8;
+    for byte in inner.bytes() {
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = byte,
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                if depth == 0 {
+                    // The opening parenthesis closed before the end, so the outer pair does
+                    // not wrap the whole expression.
+                    return None;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    Some(inner)
 }
 
 #[cfg(feature = "fs")]

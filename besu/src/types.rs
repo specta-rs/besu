@@ -169,6 +169,12 @@ sql_types! {
     Json = TypeDef::Json => serde_json::Value,
     /// SQL `JSONB`.
     Jsonb = TypeDef::Jsonb => serde_json::Value,
+    /// SQL unsigned 128-bit integer. PostgreSQL uses `NUMERIC(39,0)`, MySQL
+    /// `DECIMAL(39,0)` and SQLite stores the decimal digits as `TEXT`.
+    U128 = TypeDef::UInt(128) => u128,
+    /// SQL signed 128-bit integer, modelled as an exact `DECIMAL(39,0)` because no
+    /// supported database has a native 128-bit integer.
+    I128 = TypeDef::Decimal(39, 0) => i128,
 }
 
 /// SQL unsigned 8-bit integer, widened into a 16-bit column.

@@ -81,12 +81,15 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedNull {
     }
 }
 
-/// A `u64` bound as `NUMERIC`, which is how PostgreSQL spells integers above `i64::MAX`.
+/// An integer bound as `NUMERIC`, which is how PostgreSQL spells integers above `i64::MAX`.
 ///
-/// sqlx ships no `u64` support for PostgreSQL because the type system has no unsigned
-/// integers. `BigDecimal` is the type sqlx does implement `NUMERIC` for, and it converts from
-/// `u64` without going through a string.
-fn numeric_u64(value: u64) -> sqlx::types::BigDecimal {
+/// sqlx ships no `u64`/`u128` support for PostgreSQL because the type system has no
+/// unsigned integers. `BigDecimal` is the type sqlx does implement `NUMERIC` for, and it
+/// converts from every 64- and 128-bit integer without going through a string.
+fn numeric<T>(value: T) -> sqlx::types::BigDecimal
+where
+    sqlx::types::BigDecimal: From<T>,
+{
     sqlx::types::BigDecimal::from(value)
 }
 
@@ -107,7 +110,9 @@ fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             // A `u64` column is `NUMERIC(20,0)`, so the parameter is always `NUMERIC`, even
             // when the value happens to fit in an `i64`. That keeps one SQL type for every
             // value the column can hold.
-            Value::UInt(v) => add(&mut arguments, numeric_u64(*v))?,
+            Value::UInt(v) => add(&mut arguments, numeric(*v))?,
+            Value::UInt128(v) => add(&mut arguments, numeric(*v))?,
+            Value::Int128(v) => add(&mut arguments, numeric(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -312,7 +317,13 @@ impl Decode<Sqlx> for u64 {
         if type_is(&value, NUMERIC_OID) {
             // `UInt(64)` is declared `NUMERIC(20,0)`. Read its wire format directly so the
             // decode path does not depend on a decimal type beyond what encoding needs.
-            return decode_numeric(value, index);
+            let value = decode_numeric_unsigned(value, index)?;
+            return u64::try_from(value).map_err(|_| {
+                <Sqlx as Driver>::error(Error::decode(
+                    index,
+                    "the NUMERIC value is too large for `u64`",
+                ))
+            });
         }
 
         // A `BIGINT` (or any narrower integer type) reads through `i64` and then range-checks.
@@ -326,8 +337,47 @@ impl Decode<Sqlx> for u64 {
     }
 }
 
-/// Decode a non-negative integral `NUMERIC` into a `u64`.
-fn decode_numeric(value: PgValueRef<'_>, index: usize) -> Result<u64, sqlx::Error> {
+impl Decode<Sqlx> for u128 {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+
+        let value = row.try_get_raw(index)?;
+        if type_is(&value, NUMERIC_OID) {
+            // `UInt(128)` is declared `NUMERIC(39,0)`, so the `NUMERIC` reader returns the
+            // full width without narrowing to `u64` first.
+            return decode_numeric_unsigned(value, index);
+        }
+
+        // An integer column cannot hold a value above `i64::MAX` on PostgreSQL, but reading
+        // one this way still lets a hand-written `SELECT 1::bigint` decode into a `u128`.
+        let value: i64 = row.try_get_unchecked(index)?;
+        u128::try_from(value).map_err(|_| {
+            <Sqlx as Driver>::error(Error::decode(
+                index,
+                "a negative PostgreSQL integer cannot be decoded as `u128`",
+            ))
+        })
+    }
+}
+
+impl Decode<Sqlx> for i128 {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+
+        let value = row.try_get_raw(index)?;
+        if type_is(&value, NUMERIC_OID) {
+            return decode_numeric_signed(value, index);
+        }
+
+        let value: i64 = row.try_get_unchecked(index)?;
+        Ok(i128::from(value))
+    }
+}
+
+/// Decode a non-negative integral `NUMERIC` into a `u128`.
+fn decode_numeric_unsigned(value: PgValueRef<'_>, index: usize) -> Result<u128, sqlx::Error> {
     let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
 
     match value.format() {
@@ -336,28 +386,71 @@ fn decode_numeric(value: PgValueRef<'_>, index: usize) -> Result<u64, sqlx::Erro
             .map_err(|err| malformed(&err.to_string()))?
             .trim()
             .parse()
-            .map_err(|_| malformed("the NUMERIC value is not an integer that fits in `u64`")),
+            .map_err(|_| malformed("the NUMERIC value is not an integer that fits in `u128`")),
         PgValueFormat::Binary => {
             let bytes = value
                 .as_bytes()
                 .map_err(|err| malformed(&err.to_string()))?;
-            decode_numeric_binary(bytes).map_err(malformed)
+            let (negative, magnitude) = decode_numeric_binary(bytes).map_err(malformed)?;
+            if negative {
+                Err(malformed(
+                    "a negative NUMERIC cannot be decoded as an unsigned integer",
+                ))
+            } else {
+                Ok(magnitude)
+            }
         }
     }
 }
 
-fn decode_numeric_binary(bytes: &[u8]) -> Result<u64, &'static str> {
+/// Decode an integral `NUMERIC` into an `i128`.
+fn decode_numeric_signed(value: PgValueRef<'_>, index: usize) -> Result<i128, sqlx::Error> {
+    let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+    match value.format() {
+        PgValueFormat::Text => value
+            .as_str()
+            .map_err(|err| malformed(&err.to_string()))?
+            .trim()
+            .parse()
+            .map_err(|_| malformed("the NUMERIC value is not an integer that fits in `i128`")),
+        PgValueFormat::Binary => {
+            let bytes = value
+                .as_bytes()
+                .map_err(|err| malformed(&err.to_string()))?;
+            let (negative, magnitude) = decode_numeric_binary(bytes).map_err(malformed)?;
+            if negative {
+                // `0 - magnitude` is representable even at `i128::MIN`.
+                0i128
+                    .checked_sub_unsigned(magnitude)
+                    .ok_or_else(|| malformed("the NUMERIC value is too small for `i128`"))
+            } else {
+                i128::try_from(magnitude)
+                    .map_err(|_| malformed("the NUMERIC value is too large for `i128`"))
+            }
+        }
+    }
+}
+
+/// Decode the binary wire format of an integral `NUMERIC` into its sign and magnitude.
+///
+/// The magnitude is a `u128`, which is wide enough for the whole `NUMERIC(39,0)` range. A
+/// caller that needs a narrower integer range-checks the result.
+fn decode_numeric_binary(bytes: &[u8]) -> Result<(bool, u128), &'static str> {
     let header = bytes.get(..8).ok_or("malformed NUMERIC value")?;
     let ndigits = u16::from_be_bytes([header[0], header[1]]);
     let weight = i16::from_be_bytes([header[2], header[3]]);
     let sign = u16::from_be_bytes([header[4], header[5]]);
     let scale = i16::from_be_bytes([header[6], header[7]]);
 
-    if sign != 0 {
-        return Err("a negative (or non-finite) NUMERIC cannot be decoded as `u64`");
-    }
+    // `0x4000` is negative; `0xC000` and `0xD000` are NaN and the infinities.
+    let negative = match sign {
+        0x0000 => false,
+        0x4000 => true,
+        _ => return Err("a non-finite NUMERIC cannot be decoded as an integer"),
+    };
     if scale != 0 {
-        return Err("a NUMERIC with a fractional part cannot be decoded as `u64`");
+        return Err("a NUMERIC with a fractional part cannot be decoded as an integer");
     }
     if usize::from(ndigits) != (bytes.len() - 8) / 2 {
         return Err("malformed NUMERIC value");
@@ -371,16 +464,16 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<u64, &'static str> {
         let exponent = u32::try_from(exponent).map_err(|_| "malformed NUMERIC value")?;
         let factor = 10_000_u128
             .checked_pow(exponent)
-            .ok_or("the NUMERIC value is too large for `u64`")?;
+            .ok_or("the NUMERIC value is too large for a 128-bit integer")?;
         let term = u128::from(digit)
             .checked_mul(factor)
-            .ok_or("the NUMERIC value is too large for `u64`")?;
+            .ok_or("the NUMERIC value is too large for a 128-bit integer")?;
         value = value
             .checked_add(term)
-            .ok_or("the NUMERIC value is too large for `u64`")?;
+            .ok_or("the NUMERIC value is too large for a 128-bit integer")?;
     }
 
-    u64::try_from(value).map_err(|_| "the NUMERIC value is too large for `u64`")
+    Ok((negative, value))
 }
 
 impl Decode<Sqlx> for f32 {

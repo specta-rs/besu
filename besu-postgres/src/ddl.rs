@@ -40,6 +40,9 @@ impl Ddl for PostgresDdl {
             // `u64` lives in `NUMERIC(20,0)`, which is indistinguishable from a
             // `Decimal(20, 0)`; folding both together lets either converge.
             TypeDef::UInt(64) => TypeDef::Decimal(20, 0),
+            // The same is true of `u128` in `NUMERIC(39,0)`. A signed `i128` is declared as
+            // `Decimal(39, 0)` already, so the two share a type and converge.
+            TypeDef::UInt(128) => TypeDef::Decimal(39, 0),
             other => other.clone(),
         }
     }

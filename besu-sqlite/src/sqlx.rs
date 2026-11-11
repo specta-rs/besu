@@ -97,6 +97,10 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             Value::Bool(v) => add(&mut arguments, *v)?,
             Value::Int(v) => add(&mut arguments, *v)?,
             Value::UInt(v) => add(&mut arguments, i64::try_from(*v).unwrap_or(i64::MAX))?,
+            // A 128-bit column is declared `TEXT`, so the exact decimal digits are bound as
+            // text rather than squeezed through SQLite's signed 64-bit integer.
+            Value::UInt128(v) => add(&mut arguments, v.to_string())?,
+            Value::Int128(v) => add(&mut arguments, v.to_string())?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
@@ -281,6 +285,47 @@ impl Decode<Sqlx> for u64 {
                 "a negative SQLite integer cannot be decoded as u64",
             ))
         })
+    }
+}
+
+/// Decode a 128-bit integer stored in a `TEXT` column as its decimal digits.
+///
+/// An integer value is accepted too, so a hand-written `SELECT` that happens to yield one
+/// still decodes.
+fn decode_128<T>(row: &SqliteRow, offset: &mut usize, what: &str) -> Result<T, sqlx::Error>
+where
+    T: TryFrom<i64> + core::str::FromStr,
+{
+    let index = *offset;
+
+    if let Ok(value) = row.try_get::<String, _>(index) {
+        *offset += 1;
+        return value.trim().parse().map_err(|_| {
+            <Sqlx as Driver>::error(Error::decode(
+                index,
+                format!("the value is not a valid {what}"),
+            ))
+        });
+    }
+
+    let value: i64 = decode_via_sqlx(row, offset)?;
+    T::try_from(value).map_err(|_| {
+        <Sqlx as Driver>::error(Error::decode(
+            index,
+            format!("a SQLite integer is out of range for {what}"),
+        ))
+    })
+}
+
+impl Decode<Sqlx> for u128 {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        decode_128(row, offset, "u128")
+    }
+}
+
+impl Decode<Sqlx> for i128 {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        decode_128(row, offset, "i128")
     }
 }
 

@@ -18,7 +18,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["sqlx", "runtime-tokio"]
-sqlx = ["dep:sqlx"]
+sqlx = ["dep:sqlx", "dep:num-traits"]
 runtime-tokio = ["sqlx/runtime-tokio"]
 
 [lints]
@@ -32,7 +32,8 @@ besu = { workspace = true, features = ["derive", "migrate"] }
 besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu = { workspace = true, features = ["derive", "migrate"] }
-sqlx = { workspace = true, optional = true, features = ["mysql", "chrono", "uuid", "json"] }
+sqlx = { workspace = true, optional = true, features = ["mysql", "chrono", "uuid", "json", "bigdecimal"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
+num-traits = { version = "0.2", optional = true }

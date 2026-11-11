@@ -1,8 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
-use besu_schema::{Column, Enum, ForeignKey, Index, Schema, Table, Unique};
+use besu_schema::{
+    Check, Column, Enum, ForeignKey, Index, Schema, Table, Unique, View, normalise_expression,
+};
 
 use crate::Sqlx;
 
@@ -12,6 +14,17 @@ use crate::Sqlx;
 /// connection's `current_schema()` is reported unqualified (`schema: None`); a table
 /// anywhere else carries its schema, because its identity is `(schema, name)`. Besu's own
 /// `_besu_migrations` bookkeeping table is skipped.
+///
+/// Objects Besu cannot model are skipped rather than reported as a lossy version of
+/// themselves, because a `push` that sees them would try to drop or recreate them:
+///
+/// - expression indexes, which have no column list to report,
+/// - indexes that back a constraint (exclusion constraints in particular), which the
+///   constraint owns and `DROP INDEX` cannot remove,
+/// - triggers, which are never read at all.
+///
+/// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
+/// ignores that list, so they never appear as tables and `push` never touches them.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let current = current_schema(db).await?;
 
@@ -41,6 +54,7 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
                 indexes: Vec::new(),
                 uniques: Vec::new(),
                 foreign_keys: Vec::new(),
+                checks: Vec::new(),
                 comment: None,
             };
             (key, table)
@@ -48,13 +62,15 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
         .collect();
 
     introspect_columns(db, &mut tables, current.as_deref()).await?;
-    let constraints = introspect_constraints(db, &mut tables, current.as_deref()).await?;
-    introspect_indexes(db, &mut tables, &constraints, current.as_deref()).await?;
+    introspect_constraints(db, &mut tables, current.as_deref()).await?;
+    introspect_checks(db, &mut tables, current.as_deref()).await?;
+    introspect_indexes(db, &mut tables, current.as_deref()).await?;
     introspect_foreign_keys(db, &mut tables, current.as_deref()).await?;
 
     let mut schema = Schema::new();
     schema.tables = tables.into_values().collect();
     schema.enums = introspect_enums(db, current.as_deref()).await?;
+    schema.views = introspect_views(db, current.as_deref()).await?;
     schema.sort();
     Ok(schema)
 }
@@ -118,6 +134,38 @@ async fn introspect_enums(
     }
 
     Ok(enums)
+}
+
+/// Read every view into [`Schema::views`].
+///
+/// A view is not a table and is never diffed, so this exists only so `besu pull` writes down
+/// what the database contains. A view whose definition cannot be read (the owner may have
+/// revoked it) is skipped rather than reported with an empty body.
+async fn introspect_views(
+    db: &besu::Database<Sqlx>,
+    current: Option<&str>,
+) -> Result<Vec<View>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT table_schema, table_name, view_definition \
+             FROM information_schema.views \
+             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+               AND table_schema NOT LIKE 'pg_toast%' \
+               AND table_schema NOT LIKE 'pg_temp%' \
+             ORDER BY table_schema, table_name"
+        ))
+        .all::<(String, String, Option<String>)>()
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(schema, name, definition)| {
+            Some(View {
+                name: qualified(&schema, &name, current),
+                definition: definition?,
+            })
+        })
+        .collect())
 }
 
 async fn introspect_columns(
@@ -216,17 +264,22 @@ async fn introspect_columns(
     Ok(())
 }
 
-/// Read primary keys and `UNIQUE` constraints, returning every constraint so their backing
-/// indexes can be skipped.
+/// Read primary keys and `UNIQUE` constraints, and record their backing indexes so those
+/// indexes are not reported as ordinary ones.
 ///
 /// A single-column `UNIQUE` is folded onto its column, which is how the derive declares it.
 /// A composite one becomes [`Table::uniques`], a constraint the database owns: reporting it
 /// as an index is what made `DROP INDEX` fail on it.
+///
+/// `constraint_type IN (...)` deliberately leaves out `EXCLUDE`: an exclusion constraint is
+/// not modelled at all, so it is skipped rather than folded into a `Unique` that is not
+/// there. PostgreSQL 17 also lists `NOT NULL` as a `CHECK` here, but without a
+/// `key_column_usage` row, which is why the inner join drops it.
 async fn introspect_constraints(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<BTreeSet<(String, String)>, sqlx::Error> {
+) -> Result<(), sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
             "SELECT tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type, \
@@ -269,14 +322,10 @@ async fn introspect_constraints(
         }
     }
 
-    let mut names = BTreeSet::new();
     for constraint in constraints {
-        names.insert((constraint.table.clone(), constraint.name.clone()));
-
         let Some(table) = tables.get_mut(&constraint.table) else {
             continue;
         };
-
         if constraint.kind == "PRIMARY KEY" {
             for name in &constraint.columns {
                 if let Some(column) = table.columns.iter_mut().find(|column| &column.name == name) {
@@ -304,18 +353,62 @@ async fn introspect_constraints(
         }
     }
 
-    Ok(names)
+    Ok(())
+}
+
+/// Read `CHECK` constraints from `pg_constraint`.
+///
+/// `contype = 'c'` is only a real `CHECK` a person wrote: `NOT NULL` has no row here, and a
+/// domain's constraint belongs to the type, not the table. PostgreSQL stores the expression
+/// with extra parentheses (`CHECK (value > 0)` comes back as `(value > 0)`), which
+/// [`normalise_expression`] folds away so the declared spelling converges.
+async fn introspect_checks(
+    db: &besu::Database<Sqlx>,
+    tables: &mut BTreeMap<String, Table>,
+    current: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT n.nspname, t.relname, con.conname, pg_get_expr(con.conbin, con.conrelid) \
+             FROM pg_constraint con \
+             JOIN pg_class t ON t.oid = con.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE con.contype = 'c' \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+               AND n.nspname NOT LIKE 'pg_temp%' \
+             ORDER BY n.nspname, t.relname, con.conname"
+        ))
+        .all::<(String, String, String, Option<String>)>()
+        .await?;
+
+    for (schema, name, constraint, expression) in rows {
+        // A check with no readable expression cannot be compared to anything, so reporting
+        // it would make every push drop and re-add it.
+        let Some(expression) = expression else {
+            continue;
+        };
+        let Some(table) = tables.get_mut(&qualified(&schema, &name, current)) else {
+            continue;
+        };
+        table.checks.push(Check {
+            name: constraint,
+            expression: normalise_expression(&expression),
+        });
+    }
+
+    Ok(())
 }
 
 async fn introspect_indexes(
     db: &besu::Database<Sqlx>,
     tables: &mut BTreeMap<String, Table>,
-    constraints: &BTreeSet<(String, String)>,
     current: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
-            "SELECT n.nspname, t.relname, i.relname, ix.indisunique, ix.indnkeyatts, a.attname \
+            "SELECT n.nspname, t.relname, i.relname, ix.indisunique, ix.indnkeyatts, \
+                    a.attname, pg_get_expr(ix.indpred, ix.indrelid) \
              FROM pg_index ix \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_class t ON t.oid = ix.indrelid \
@@ -325,10 +418,13 @@ async fn introspect_indexes(
                AND n.nspname NOT LIKE 'pg_toast%' \
                AND NOT ix.indisprimary \
                AND array_position(ix.indkey, a.attnum) <= ix.indnkeyatts \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid \
+               ) \
              ORDER BY n.nspname, t.relname, i.relname, \
                       array_position(ix.indkey, a.attnum)"
         ))
-        .all::<(String, String, String, bool, i16, String)>()
+        .all::<(String, String, String, bool, i16, String, Option<String>)>()
         .await?;
 
     struct PgIndex {
@@ -337,10 +433,11 @@ async fn introspect_indexes(
         unique: bool,
         keys: usize,
         columns: Vec<String>,
+        predicate: Option<String>,
     }
 
     let mut indexes: Vec<PgIndex> = Vec::new();
-    for (schema, table, name, unique, keys, column) in rows {
+    for (schema, table, name, unique, keys, column, predicate) in rows {
         let table = qualified(&schema, &table, current);
         match indexes
             .iter_mut()
@@ -353,16 +450,19 @@ async fn introspect_indexes(
                 unique,
                 keys: usize::try_from(keys).unwrap_or(0),
                 columns: vec![column],
+                predicate: predicate.map(|predicate| normalise_expression(&predicate)),
             }),
         }
     }
 
     for index in indexes {
-        // Indexes backing a primary key or unique constraint are already represented, and an
-        // index on an expression has fewer columns than key attributes: skip both.
-        if constraints.contains(&(index.table.clone(), index.name.clone()))
-            || index.columns.len() != index.keys
-        {
+        // An index on an expression has fewer joined columns than it has key attributes,
+        // because the expression is not an attribute of the table. The IR has no way to
+        // express one, so it is skipped rather than reported as a plain index that `push`
+        // would then try to replace. Indexes that back a constraint — a primary key, a
+        // `UNIQUE`, or an exclusion constraint, which has no representation at all — are
+        // excluded by the query, because `DROP INDEX` cannot remove them.
+        if index.columns.len() != index.keys {
             continue;
         }
 
@@ -373,6 +473,7 @@ async fn introspect_indexes(
             name: index.name,
             columns: index.columns,
             unique: index.unique,
+            predicate: index.predicate,
         });
     }
 
@@ -499,6 +600,8 @@ fn parse_type(
         "numeric" | "decimal" => match (numeric_precision, numeric_scale) {
             // This is how `u64` is spelled, and there is no way to tell the two apart.
             (Some(20), Some(0)) => TypeDef::UInt(64),
+            // The same for `u128`, and for an `i128` declared as `Decimal(39, 0)`.
+            (Some(39), Some(0)) => TypeDef::UInt(128),
             (Some(precision), Some(scale)) => TypeDef::Decimal(narrow(precision), narrow(scale)),
             (Some(precision), None) => TypeDef::Decimal(narrow(precision), 0),
             _ => TypeDef::Custom("numeric".into()),
