@@ -477,3 +477,42 @@ async fn upsert_roundtrip_and_conflict_target_tuple() {
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].age, 31);
 }
+
+#[tokio::test]
+async fn left_join_projection_widens_to_option() {
+    let db = setup().await;
+    // A user with no posts, to make the outer side actually be absent.
+    db.insert(users)
+        .value(users.insert("lonely@example.com", "Lonely", 30))
+        .await
+        .unwrap();
+    let alice = db
+        .insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    db.insert(posts)
+        .value(posts.insert("Hello", alice.id))
+        .await
+        .unwrap();
+
+    // `posts.title` is `NOT NULL`, but on the outer side of a left join it can be absent, so
+    // the projection widens to `Option<String>` without being asked.
+    let rows: Vec<(String, Option<String>)> = db
+        .select(users)
+        .left_join(posts, eq(users.id, posts.author_id))
+        .pick((users.name, posts.title))
+        .order_by(users.name.asc())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows,
+        [
+            ("Alice".to_string(), Some("Hello".to_string())),
+            ("Lonely".to_string(), None),
+        ]
+    );
+}

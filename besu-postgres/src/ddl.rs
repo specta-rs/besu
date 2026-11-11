@@ -1,5 +1,5 @@
 use besu_core::{Dialect, TypeDef};
-use besu_schema::{Column, Ddl, ForeignKey, Index, Table};
+use besu_schema::{Column, Ddl, ForeignKey, Index};
 
 use crate::Postgres;
 

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use crate::types::{Column, Nullability, SqlType};
 
-use crate::condition::{Contains, LiteralPath};
+use crate::condition::{Combine, Contains, LiteralPath, PathNullability};
 use crate::expr::{Expr, ExprKind};
 use crate::table::Table;
 
@@ -39,8 +39,13 @@ where
     T: Table,
     S: SqlType,
     N: Nullability,
+    P: PathNullability,
+    N: Combine<<P as PathNullability>::Nullability>,
 {
-    type Out = N::Wrap<S::Rust>;
+    // A column from the outer side of a `LEFT JOIN` may be `NULL` even when the column is
+    // `NOT NULL`, so the projection widens to `Option<_>` on its own.
+    type Out =
+        <<N as Combine<<P as PathNullability>::Nullability>>::Out as Nullability>::Wrap<S::Rust>;
 
     fn into_projection(self) -> (Vec<ExprKind>, usize) {
         (

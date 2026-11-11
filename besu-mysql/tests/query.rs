@@ -64,7 +64,7 @@ async fn insert_and_select() {
 
     // MySQL has no `RETURNING`, so the row is selected back afterwards.
     db.insert(users)
-        .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+        .value(users.insert("oscar@example.com", "Oscar", 21))
         .await
         .unwrap();
 
@@ -76,7 +76,7 @@ async fn insert_and_select() {
 
     // A `NULL` and a value both round-trip through the nullable column.
     db.insert(users)
-        .value(users.insert("bio@example.com".into(), "Bio".into(), 30).bio("hello"))
+        .value(users.insert("bio@example.com", "Bio", 30).bio("hello".to_string()))
         .await
         .unwrap();
     let filled: Vec<User> = db
@@ -121,7 +121,7 @@ async fn generated_sql() {
     // `NULLS LAST` is emulated rather than written, because MySQL has no such clause.
     let sql = db
         .select(users)
-        .order_by(users.bio.asc().nulls_last())
+        .order_by(users.bio.as_expr::<()>().nulls_last())
         .to_sql()
         .unwrap();
     assert!(
@@ -291,7 +291,7 @@ async fn projection_and_aggregates() {
 async fn update_and_delete() {
     let db = setup("besu_test_update_and_delete").await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
@@ -322,12 +322,12 @@ async fn update_and_delete() {
 async fn joins() {
     let db = setup("besu_test_joins").await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
     let author: User = db.select(users).await.unwrap().remove(0);
     db.insert(posts)
-        .value(posts.insert("Hello".into(), author.id))
+        .value(posts.insert("Hello", author.id))
         .await
         .unwrap();
 
@@ -350,7 +350,7 @@ async fn joins() {
 
     // A user with no post produces one row of `NULL`s on the right of a left join.
     db.insert(users)
-        .value(users.insert("b@example.com".into(), "Bob".into(), 40))
+        .value(users.insert("b@example.com", "Bob", 40))
         .await
         .unwrap();
     let rows: Vec<(User, Option<Post>)> = db
@@ -370,14 +370,14 @@ async fn joins() {
 async fn upsert() {
     let db = setup("besu_test_upsert").await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
     // MySQL has no `ON CONFLICT (...) DO UPDATE`; `ON DUPLICATE KEY UPDATE` fires on any
     // unique key, so the target is ignored.
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 31))
+        .value(users.insert("a@example.com", "Alice", 31))
         .on_conflict(users.email)
         .do_update(users.age, 31)
         .await
@@ -394,7 +394,7 @@ async fn transactions() {
 
     db.transaction(async |tx| {
         tx.insert(users)
-            .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+            .value(users.insert("a@example.com", "Alice", 30))
             .await?;
         Ok(())
     })
@@ -414,7 +414,7 @@ async fn transactions() {
 async fn raw_sql() {
     let db = setup("besu_test_raw_sql").await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
@@ -456,7 +456,7 @@ async fn returning_is_rejected() {
     // time.
     let err = db
         .insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .returning(users)
         .await
         .unwrap_err();

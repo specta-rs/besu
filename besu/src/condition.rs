@@ -19,6 +19,8 @@
 
 use core::marker::PhantomData;
 
+use crate::types::{NonNull, Nullable};
+
 /// The first element of a tuple.
 pub enum Zero {}
 
@@ -55,6 +57,63 @@ impl<A> Contains<(), A> for Option<A> {}
 // `First<_>` and `Second<_>` so this never overlaps with the structural implementations
 // above.
 impl<M> Contains<LiteralPath, Literal> for M {}
+
+/// Whether a table found at a given path can be absent.
+///
+/// A `LEFT JOIN` puts the joined table behind an `Option`, so every column of that table may
+/// decode to `NULL` even if the column itself is `NOT NULL`. The search path records exactly
+/// where the `Option` was, which is what lets a projection widen its output type
+/// automatically.
+pub trait PathNullability {
+    /// The nullability contributed by the path.
+    type Nullability: crate::types::Nullability;
+}
+
+impl PathNullability for Zero {
+    type Nullability = crate::types::NonNull;
+}
+
+impl PathNullability for One {
+    type Nullability = crate::types::NonNull;
+}
+
+impl PathNullability for LiteralPath {
+    type Nullability = crate::types::NonNull;
+}
+
+impl<P: PathNullability> PathNullability for First<P> {
+    type Nullability = P::Nullability;
+}
+
+impl<P> PathNullability for Second<P> {
+    type Nullability = crate::types::Nullable;
+}
+
+impl PathNullability for () {
+    type Nullability = crate::types::Nullable;
+}
+
+/// Combine two nullability markers, where either being nullable wins.
+pub trait Combine<Rhs> {
+    /// The resulting nullability.
+    type Out: crate::types::Nullability;
+}
+
+impl Combine<NonNull> for NonNull {
+    type Out = NonNull;
+}
+
+impl Combine<Nullable> for NonNull {
+    type Out = Nullable;
+}
+
+impl Combine<NonNull> for Nullable {
+    type Out = Nullable;
+}
+
+impl Combine<Nullable> for Nullable {
+    type Out = Nullable;
+}
 
 /// Two column types must line up for a comparison.
 ///

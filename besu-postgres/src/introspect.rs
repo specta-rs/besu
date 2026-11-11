@@ -346,11 +346,11 @@ fn parse_type(
         "double precision" => TypeDef::Float8,
         "text" => TypeDef::Text,
         "character varying" => match character_length {
-            Some(length) => TypeDef::VarChar(narrow(length)),
+            Some(length) => TypeDef::VarChar(length_of(length)),
             // `VARCHAR` with no limit is `TEXT` with a different name.
             None => TypeDef::Text,
         },
-        "character" => TypeDef::Char(narrow(character_length.unwrap_or(1))),
+        "character" => TypeDef::Char(length_of(character_length.unwrap_or(1))),
         "bytea" => TypeDef::Bytes,
         "uuid" => TypeDef::Uuid,
         "json" => TypeDef::Json,
@@ -375,6 +375,10 @@ fn parse_type(
 
 fn narrow(value: i32) -> u8 {
     u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+fn length_of(value: i32) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Map PostgreSQL's `confdeltype` / `confupdtype` codes onto an action.

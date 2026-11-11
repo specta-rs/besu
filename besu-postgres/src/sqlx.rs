@@ -68,7 +68,7 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedNull {
 
 fn add<'q, T>(arguments: &mut PgArguments, value: T) -> Result<(), sqlx::Error>
 where
-    T: sqlx::Encode<'q, SqlxPostgres> + sqlx::Type<SqlxPostgres>,
+    T: sqlx::Encode<'q, SqlxPostgres> + sqlx::Type<SqlxPostgres> + 'q,
 {
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
@@ -105,6 +105,14 @@ fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
                     <Sqlx as Driver>::error(Error::encode("json", err.to_string()))
                 })?;
                 add(&mut arguments, sqlx::types::Json(json))?;
+            }
+            // `Value` is `#[non_exhaustive]`: a future variant must fail loudly rather than
+            // silently bind `NULL`.
+            other => {
+                return Err(<Sqlx as Driver>::error(Error::encode(
+                    other.display(),
+                    "this driver does not know how to bind this value",
+                )));
             }
         }
     }
