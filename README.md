@@ -105,7 +105,9 @@ carries the column's name, type and nullability in the type system.
 | [`besu-schema`](besu-schema) | One serialisable schema IR shared by migrations, introspection and DDL generation. |
 | [`besu-macros`](besu-macros) | `#[derive(Table)]`. |
 | [`besu-sqlite`](besu-sqlite) · [`besu-postgres`](besu-postgres) · [`besu-mysql`](besu-mysql) | Dialects, drivers, DDL and introspection for each database. |
+| [`besu-any`](besu-any) | `AnyDatabase`: one type over all three backends, chosen from a connection string. |
 | [`besu-cli`](cli) | `besu push`, `besu pull`, `besu generate` and `besu migrate`. |
+| [`besu-studio`](besu-studio) | A development-only schema and data browser. |
 
 The layers are deliberately independent. `besu-core` knows nothing about the query API, `besu`
 knows nothing about sqlx, and each driver knows nothing about the others. Use the whole stack, or
@@ -124,6 +126,20 @@ assert!(sql.sql().ends_with(r#"WHERE ("users"."age" > $1)"#));
 
 Awaiting a query built this way returns an error rather than panicking, so a driverless build can
 still be exercised end to end.
+
+## Beyond the basics
+
+- **Streaming.** `db.stream::<User>(&sql)` decodes row by row, so a million-row scan is a
+  million rows of work rather than a million rows of memory.
+- **Relations.** `select(users).with(has_many(users.id, posts.author_id))` loads the children
+  in one extra, visible statement rather than an invisible join or an N+1.
+- **Transactions and savepoints.** `db.transaction(..)` and `tx.transaction(..)`, which every
+  database spells as a savepoint.
+- **Full-text search and JSON.** `posts.title.matches("rust")` and
+  `json_text(documents.body, "user.name")`, each rendered natively per dialect.
+- **Observability.** `besu::logged(driver)` adds tracing, timing and a slow-query warning.
+- **Table prefixes.** `Database::prefixed(driver, "tenant_42_")` for tenants sharing one
+  physical database.
 
 ## Migrations
 
