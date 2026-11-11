@@ -199,7 +199,22 @@ impl Ddl for MySqlDdl {
                 }
                 statements
             }
-            other => Ddl::change(self, other),
+            // The default `Ddl::change` cannot be reached from here — the blanket call
+            // would resolve back to this implementation and recurse — so the remaining
+            // variants are dispatched by hand.
+            Change::CreateTable(table) => vec![self.create_table(table)],
+            Change::DropTable { name } => vec![self.drop_table(name)],
+            Change::DropColumn { table, column } => vec![self.drop_column(table, column)],
+            Change::AlterColumn { table, from, to } => self.alter_column(table, from, to),
+            Change::AddIndex { table, index } => vec![self.create_index(table, index)],
+            Change::DropIndex { table, index } => vec![self.drop_index(table, index)],
+            Change::AddForeignKey { table, foreign_key } => {
+                vec![self.add_foreign_key(table, foreign_key)]
+            }
+            Change::DropForeignKey { table, foreign_key } => {
+                vec![self.drop_foreign_key(table, foreign_key)]
+            }
+            _ => Vec::new(),
         }
     }
 }

@@ -84,6 +84,12 @@ pub trait Dialect: 'static + Sized {
     /// Whether `DELETE ... LIMIT n` is available. PostgreSQL has no such statement.
     const SUPPORTS_DELETE_LIMIT: bool = true;
 
+    /// The largest number of bound parameters a single statement may carry.
+    ///
+    /// Every one of these databases has a limit, and hitting it produces a confusing driver
+    /// error, so Besu checks before sending the statement.
+    const MAX_PARAMS: usize = 65_535;
+
     /// Whether `RIGHT JOIN` is available. SQLite only gained it in 3.39.
     const SUPPORTS_RIGHT_JOIN: bool = true;
 

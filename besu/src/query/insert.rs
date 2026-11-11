@@ -103,6 +103,18 @@ impl InsertQuery {
         }
         out.push_raw(") VALUES ");
 
+        if kept.len().saturating_mul(self.rows.len()) > D::MAX_PARAMS {
+            out.set_error(Error::invalid_query(alloc::format!(
+                "this insert binds {} parameters but `{}` accepts at most {}; split it into \
+                 batches of {} row(s) or fewer",
+                kept.len() * self.rows.len(),
+                D::NAME,
+                D::MAX_PARAMS,
+                D::MAX_PARAMS / kept.len().max(1)
+            )));
+            return out;
+        }
+
         for (row_index, row) in self.rows.iter().enumerate() {
             if row_index != 0 {
                 out.push_raw(", ");
