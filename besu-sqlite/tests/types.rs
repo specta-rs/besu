@@ -145,6 +145,51 @@ pub struct Price {
 }
 
 #[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "moments")]
+pub struct Moment {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub day: chrono::NaiveDate,
+    pub clock: chrono::NaiveTime,
+    pub stamp: chrono::NaiveDateTime,
+}
+
+#[tokio::test]
+async fn temporal_values_are_stored_as_sqlx_text() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.push([moments.def()]).await.unwrap();
+
+    db.insert(moments)
+        .value(moments.insert(
+            1,
+            chrono::NaiveDate::from_ymd_opt(2024, 5, 17).unwrap(),
+            chrono::NaiveTime::from_hms_opt(13, 45, 6).unwrap(),
+            chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2024, 5, 17).unwrap(),
+                chrono::NaiveTime::from_hms_nano_opt(13, 45, 6, 123_456_789).unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    // The driver formats these itself instead of handing them to sqlx's encoder, so the text
+    // it writes has to be exactly what sqlx decodes: `%F`, `%T%.f` and `%F %T%.f`.
+    let stored: Vec<(String, String, String)> = db
+        .execute(sql!(
+            "SELECT \"day\", \"clock\", \"stamp\" FROM \"moments\""
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(stored[0].0, "2024-05-17");
+    assert_eq!(stored[0].1, "13:45:06");
+    assert_eq!(stored[0].2, "2024-05-17 13:45:06.123456789");
+
+    let round_tripped: Vec<Moment> = db.select(moments).await.unwrap();
+    assert_eq!(round_tripped.len(), 1);
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "events")]
 pub struct Event {
     #[besu(primary_key, auto_increment)]
