@@ -616,10 +616,12 @@ impl Codegen {
             .filter(|column| !column.nullable && !column.auto_increment && column.default.is_none())
             .collect();
 
+        // Required arguments accept anything convertible into the column's type, so
+        // `users.insert("a@example.com", "Oscar", 21)` works without `.into()` noise.
         let required_args = required.iter().map(|column| {
             let ident = &column.ident;
             let ty = &column.ty;
-            quote!(#ident: #ty)
+            quote!(#ident: impl ::core::convert::Into<#ty>)
         });
 
         let insert_initialisers = columns.iter().map(|column| {
@@ -628,7 +630,7 @@ impl Codegen {
                 .iter()
                 .any(|required| required.ident == column.ident)
             {
-                quote!(#ident: #besu::Set::Value(#ident))
+                quote!(#ident: #besu::Set::Value(#ident.into()))
             } else {
                 quote!(#ident: #besu::Set::Unset)
             }

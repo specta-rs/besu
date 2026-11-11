@@ -76,7 +76,7 @@ let adults: Vec<User> = db
 // INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) RETURNING *
 let created: User = db
     .insert(users)
-    .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+    .value(users.insert("oscar@example.com", "Oscar", 21))
     .returning(users)
     .await?
     .into_iter()
