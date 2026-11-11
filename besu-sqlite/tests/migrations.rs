@@ -23,7 +23,10 @@ async fn applies_each_migration_once() {
     let migrator = Migrator::from_dir(dir.path()).unwrap();
     assert_eq!(migrator.len(), 2);
 
-    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    // A file database pools several connections, which is what exposed the bug where two
+    // statements of one schema change ran on different connections.
+    let path = dir.path().join("app.db");
+    let db = besu::Database::new(Sqlx::new(&path).await.unwrap());
 
     let applied = db.migrate(&migrator).await.unwrap();
     assert_eq!(

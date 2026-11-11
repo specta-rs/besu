@@ -203,10 +203,32 @@ supported.
 | `count_all()` | `i64` |
 | `(users.id, users.name)` | `(i64, String)` |
 | `(users.name, count(posts.id))` | `(String, i64)` |
-| `users` (the handle) | `User` |
+| `users` (the base table handle) | `User` |
 
 A nullable column selected on its own becomes `Option<T>`, because the decoded value may be
 `NULL`. That is why `Vec<Option<String>>` is the right annotation for `pick(users.bio)`.
+
+Nullability also follows the join path. A column from the outer side of a `LEFT JOIN` or
+`FULL JOIN` becomes `Option<T>` even when the column is declared `NOT NULL`, and a table
+handle picked from that side becomes `Option<Model>`:
+
+```rust
+let rows: Vec<(User, Option<String>)> = db
+    .select(users)
+    .left_join(posts, eq(users.id, posts.author_id))
+    .pick((users, posts.title))
+    .await?;
+
+let rows: Vec<(User, Option<Post>)> = db
+    .select(users)
+    .left_join(posts, eq(users.id, posts.author_id))
+    .pick((users, posts))
+    .await?;
+```
+
+The second annotation is not a special case in `pick`: the path through `Option<Post>` is what
+makes the type widen. An `INNER JOIN` does not put the joined table behind an `Option`, so
+`pick((users, posts))` there is `(User, Post)`.
 
 If you want a computed column, pick the expression:
 
@@ -399,12 +421,14 @@ for humans, never for execution.
   checked against the row set; `eq(posts.title, "x")` is not, because the free function has no
   `Contains` bound. Both emit the same SQL. Prefer the method form when you want the
   compile-time guarantee.
-- **`pick` on a table handle does not become `Option` for an outer join.** The default
-  projection after `left_join` decodes to `(User, Option<Post>)`, but `pick((users, posts))`
-  is typed `(User, Post)`. If the join misses, that projection tries to decode `NULL` into a
-  non-nullable field and fails. Use the default projection, or pick columns and annotate the
-  nullable ones yourself.
+- **`pick` on a table handle widens with the join.** After an outer join, `pick((users,
+  posts))` is `(User, Option<Post>)`, not `(User, Post)`; the path through `Option` supplies
+  the nullability. That is the opposite of what a hand-written `Decode` would do, so let the
+  annotation follow the compiler.
 - **`pick` replaces the projection.** It does not add to the default column list.
+- **A table handle does not use the model's `Decode`.** `pick(users)` is a list of columns, so
+  a field marked `#[besu(skip)]` is filled with `Default::default()` exactly as it is in the
+  default projection.
 - **`first()` overrides a previous `limit`.** It sets the limit to 1 unconditionally.
 - **Grouping is not checked.** SQL requires every non-aggregated projection column to be
   grouped; Besu does not. The database will reject the query, not the compiler.
@@ -413,9 +437,9 @@ for humans, never for execution.
   `CAST(x AS TEXT)`, which MySQL rejects; MySQL only accepts targets such as `CHAR`,
   `SIGNED`, `DECIMAL` and `DATETIME`. The cast is fine on SQLite and PostgreSQL, or write the
   cast as raw SQL.
-- **`to_sql()` rarely returns `Err`.** The builder stores the first problem inside the `Sql`
-  and still returns it; execution calls `finish()` and surfaces the error. Check
-  `sql.error()` if you are generating SQL for inspection.
+- **`to_sql()` does not fail for a capability problem.** The builders return `Ok(Sql)` with
+  `.error()` set; execution calls `finish()` and surfaces it. Check `sql.error()` if you are
+  generating SQL for inspection.
 - **An outer row that is all-`NULL` decodes as `None`.** `Option<T>` is `None` when every
   column `T` consumes is `NULL`, so a real joined row whose columns happen to all be nullable
   and all `NULL` is indistinguishable from a missing one. Include a non-null key column in

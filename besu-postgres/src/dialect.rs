@@ -43,7 +43,7 @@ impl Dialect for Postgres {
             TypeDef::UInt(8) => Cow::Borrowed("SMALLINT"),
             TypeDef::UInt(16) => Cow::Borrowed("INTEGER"),
             TypeDef::UInt(32) => Cow::Borrowed("BIGINT"),
-            // `NUMERIC(20, 0)` is the smallest native type that holds every `u64`.
+            // `NUMERIC(20,0)` is the smallest native type that holds every `u64`.
             TypeDef::UInt(_) => Cow::Borrowed("NUMERIC(20,0)"),
             TypeDef::Float4 => Cow::Borrowed("REAL"),
             TypeDef::Float8 => Cow::Borrowed("DOUBLE PRECISION"),

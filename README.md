@@ -73,7 +73,8 @@ let adults: Vec<User> = db
     .limit(50)
     .await?;
 
-// INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3) RETURNING *
+// INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3)
+// RETURNING "users"."id", "users"."email", ...
 let created: User = db
     .insert(users)
     .value(users.insert("oscar@example.com", "Oscar", 21))
@@ -118,7 +119,7 @@ Because a dialect can render a query with no connection, you can hand-check the 
 let db = besu::dry::<besu_postgres::Postgres>();
 
 let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
-assert_eq!(sql.sql(), r#"SELECT ... WHERE ("users"."age" > $1)"#);
+assert!(sql.sql().ends_with(r#"WHERE ("users"."age" > $1)"#));
 ```
 
 Awaiting a query built this way returns an error rather than panicking, so a driverless build can

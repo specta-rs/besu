@@ -125,6 +125,13 @@ impl sqlx::Encode<'_, SqlxPostgres> for NumericU64 {
         for digit in digits[..count].iter().rev() {
             buffer.extend(&digit.to_be_bytes());
         }
+        eprintln!(
+            "numeric encode: value={} ndigits={} weight={} bytes={:02x?}",
+            self.0,
+            ndigits,
+            weight,
+            &buffer[..]
+        );
 
         Ok(sqlx::encode::IsNull::No)
     }

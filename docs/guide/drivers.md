@@ -371,8 +371,9 @@ Three defaults matter in practice:
   inline, MySQL uses `AUTO_INCREMENT`.
 - `INLINE_INDEXES` tells `create_schema` whether `create_table` already wrote the secondary
   indexes. MySQL sets it because a `TEXT`/`BLOB` index needs a prefix length, which only the
-  column types can supply. `CREATE_INDEX_NEEDS_TYPES` is the companion flag for dialects that
-  need those types while rendering a single `CREATE INDEX`.
+  column types can supply. `CREATE_INDEX_NEEDS_TYPES` is declared for the same reason but is
+  not yet read anywhere: `create_index` receives only the table name and the index, so a
+  dialect that needs the column types has no hook for them yet.
 - `change` delegates to `default_change`. Override `change` only for a dialect that handles a
   subset of changes differently; calling `self.change(..)` from inside it recurses forever.
 
