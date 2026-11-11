@@ -278,7 +278,7 @@ fn render_child<D: Dialect, K: Into<Value>>(
     query.projection = Some(projection);
 
     query.filter.push(ExprKind::InList {
-        expr: Box::new(child_key.clone()),
+        expr: crate::expr::Operand::new(child_key.clone()),
         list: keys
             .into_iter()
             .map(|key| ExprKind::Value(key.into()))
