@@ -33,6 +33,16 @@ pub struct Post {
     pub author_id: i64,
 }
 
+/// A table with a declared secondary index, used to check index introspection.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "tags")]
+pub struct Tag {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(index)]
+    pub name: String,
+}
+
 /// Create an empty database named `name`, replacing any database left over from a previous
 /// run.
 async fn fresh(name: &str) -> besu::Database<Sqlx> {
@@ -49,6 +59,14 @@ async fn fresh(name: &str) -> besu::Database<Sqlx> {
 
     let url = format!("{SERVER}/{name}");
     besu::Database::new(Sqlx::new(&url).await.unwrap())
+}
+
+/// One statement with one parameter.
+///
+/// `sql!` asserts its placeholder count in a `const` block, which means it only accepts
+/// compile-time values, so a runtime parameter goes through `Fragment` instead.
+fn one(sql: &'static str, value: impl Into<Value>) -> Fragment {
+    Fragment::with_args(sql, vec![value.into()])
 }
 
 /// An empty database with the reference schema already pushed.
@@ -76,14 +94,14 @@ async fn insert_and_select() {
 
     // A `NULL` and a value both round-trip through the nullable column.
     db.insert(users)
-        .value(users.insert("bio@example.com", "Bio", 30).bio("hello".to_string()))
+        .value(
+            users
+                .insert("bio@example.com", "Bio", 30)
+                .bio("hello".to_string()),
+        )
         .await
         .unwrap();
-    let filled: Vec<User> = db
-        .select(users)
-        .filter(users.name.eq("Bio"))
-        .await
-        .unwrap();
+    let filled: Vec<User> = db.select(users).filter(users.name.eq("Bio")).await.unwrap();
     assert_eq!(filled[0].bio.as_deref(), Some("hello"));
 }
 
@@ -125,7 +143,8 @@ async fn generated_sql() {
         .to_sql()
         .unwrap();
     assert!(
-        sql.sql().ends_with("ORDER BY (`users`.`bio` IS NULL) ASC, `users`.`bio` ASC"),
+        sql.sql()
+            .ends_with("ORDER BY (`users`.`bio` IS NULL) ASC, `users`.`bio` ASC"),
         "{}",
         sql.sql()
     );
@@ -209,11 +228,7 @@ async fn filters_and_ordering() {
     let db = setup("besu_test_filters_and_ordering").await;
     for (name, age) in [("Alice", 30), ("Bob", 17), ("Carol", 25)] {
         db.insert(users)
-            .value(users.insert(
-                format!("{name}@example.com"),
-                name.to_string(),
-                age,
-            ))
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
             .await
             .unwrap();
     }
@@ -262,11 +277,7 @@ async fn projection_and_aggregates() {
     let db = setup("besu_test_projection_and_aggregates").await;
     for (name, age) in [("Alice", 30), ("Bob", 20)] {
         db.insert(users)
-            .value(users.insert(
-                format!("{name}@example.com"),
-                name.to_string(),
-                age,
-            ))
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
             .await
             .unwrap();
     }
@@ -401,12 +412,7 @@ async fn transactions() {
     .await
     .unwrap();
 
-    let count: i64 = db
-        .select(users)
-        .pick(count_all())
-        .await
-        .unwrap()
-        .remove(0);
+    let count: i64 = db.select(users).pick(count_all()).await.unwrap().remove(0);
     assert_eq!(count, 1);
 }
 
@@ -482,6 +488,46 @@ async fn returning_is_rejected() {
 }
 
 #[tokio::test]
+async fn binds_and_decodes_values() {
+    let db = fresh("besu_test_binds_and_decodes_values").await;
+
+    // A `SELECT` of a parameter round-trips through MySQL's own type inference, so this
+    // checks encoding and decoding rather than table storage.
+    let rows: Vec<(bool,)> = db.execute(one("SELECT ?", true)).all().await.unwrap();
+    assert!(rows[0].0);
+
+    let id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let rows: Vec<(uuid::Uuid,)> = db.execute(one("SELECT ?", id)).all().await.unwrap();
+    assert_eq!(rows[0].0, id);
+
+    let json = serde_json::json!({"name": "Oscar", "age": 21});
+    let rows: Vec<(serde_json::Value,)> = db
+        .execute(one("SELECT CAST(? AS JSON)", json.clone()))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, json);
+
+    let timestamp = chrono::NaiveDate::from_ymd_opt(2026, 11, 12)
+        .and_then(|date| date.and_hms_opt(9, 30, 0))
+        .unwrap();
+    let rows: Vec<(chrono::NaiveDateTime,)> = db
+        .execute(one("SELECT CAST(? AS DATETIME(6))", timestamp))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, timestamp);
+
+    // MySQL has real unsigned integers, so the top of the `u64` range survives.
+    let rows: Vec<(u64,)> = db
+        .execute(one("SELECT CAST(? AS UNSIGNED)", u64::MAX))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, u64::MAX);
+}
+
+#[tokio::test]
 async fn schema_push_converges() {
     let db = fresh("besu_test_schema_push_converges").await;
 
@@ -489,15 +535,17 @@ async fn schema_push_converges() {
     assert_eq!(first.changes.len(), 2);
     assert!(first.statements[0].contains("CREATE TABLE `users`"));
     assert!(
-        first.statements.iter().any(|s| s.contains("AUTO_INCREMENT")),
+        first
+            .statements
+            .iter()
+            .any(|s| s.contains("AUTO_INCREMENT")),
         "auto-incrementing primary keys must be inline in MySQL: {:?}",
         first.statements
     );
     assert!(
-        first
-            .statements
-            .iter()
-            .all(|s| s.ends_with("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")),
+        first.statements.iter().all(
+            |s| s.ends_with("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")
+        ),
         "every table should be created as utf8mb4 InnoDB: {:?}",
         first.statements
     );
@@ -530,7 +578,12 @@ async fn schema_push_converges() {
             .iter()
             .any(|c| c.name == "email" && c.unique && !c.nullable)
     );
-    assert!(users_table.columns.iter().any(|c| c.name == "bio" && c.nullable));
+    assert!(
+        users_table
+            .columns
+            .iter()
+            .any(|c| c.name == "bio" && c.nullable)
+    );
     assert!(users_table.indexes.is_empty(), "{:?}", users_table.indexes);
 
     let posts_table = introspected.table("posts").unwrap();
@@ -543,4 +596,30 @@ async fn schema_push_converges() {
     );
     // The index InnoDB created for the foreign key must not leak into the schema.
     assert!(posts_table.indexes.is_empty(), "{:?}", posts_table.indexes);
+}
+
+#[tokio::test]
+async fn secondary_indexes_round_trip() {
+    let db = fresh("besu_test_secondary_indexes").await;
+
+    let first = db.push([tags.def()]).await.unwrap();
+    assert_eq!(first.changes.len(), 1);
+    assert!(
+        first.statements[0].contains("KEY `tags_name_idx` (`name`(255))"),
+        "a `TEXT` index needs a prefix length: {:?}",
+        first.statements
+    );
+
+    // The index must not look like drift on the next push.
+    let second = db.push([tags.def()]).await.unwrap();
+    assert!(second.is_empty(), "{:?}", second.changes);
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(introspected, besu::Database::<Sqlx>::schema([tags.def()]));
+
+    let table = introspected.table("tags").unwrap();
+    assert_eq!(table.indexes.len(), 1);
+    assert_eq!(table.indexes[0].name, "tags_name_idx");
+    assert_eq!(table.indexes[0].columns, ["name"]);
+    assert!(!table.indexes[0].unique);
 }

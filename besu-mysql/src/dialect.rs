@@ -106,3 +106,25 @@ impl Dialect for MySql {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifiers_are_quoted_with_backticks() {
+        assert_eq!(MySql::quote("users"), "`users`");
+        // A backtick inside the name is escaped by doubling it.
+        assert_eq!(MySql::quote("odd`name"), "`odd``name`");
+    }
+
+    #[test]
+    fn types_are_spelled_the_mysql_way() {
+        assert_eq!(MySql::type_name(TypeDef::Int8), "BIGINT");
+        assert_eq!(MySql::type_name(TypeDef::UInt(8)), "TINYINT UNSIGNED");
+        assert_eq!(MySql::type_name(TypeDef::VarChar(255)), "VARCHAR(255)");
+        assert_eq!(MySql::type_name(TypeDef::Decimal(10, 2)), "DECIMAL(10,2)");
+        assert_eq!(MySql::type_name(TypeDef::Uuid), "BINARY(16)");
+        assert_eq!(MySql::type_name(TypeDef::TimestampTz), "DATETIME(6)");
+    }
+}

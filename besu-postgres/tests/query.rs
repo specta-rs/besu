@@ -1,11 +1,16 @@
+#![allow(
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_arguments
+)]
+
+//! Exercise the query layer end to end against a real PostgreSQL server.
+
+mod common;
+
 use besu::prelude::*;
 use besu_postgres::Sqlx;
-
-/// The server the test suite runs against. It is a real PostgreSQL instance, so the whole
-/// suite takes a lock and resets the tables around each test.
-const URL: &str = "postgres://besu:besu@localhost:55432/besu";
-
-static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "users")]
@@ -29,37 +34,41 @@ pub struct Post {
     pub author_id: i64,
 }
 
-fn lock() -> std::sync::MutexGuard<'static, ()> {
-    DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// A different shape for the same table, used to exercise `ALTER COLUMN`.
+///
+/// It lives in its own module because the derive names its table handle after the SQL table,
+/// which would otherwise collide with [`users`].
+#[allow(unused_imports)]
+mod wide {
+    use besu::prelude::*;
+
+    #[derive(Table, Debug, Clone, PartialEq)]
+    #[besu(table = "users")]
+    pub struct WideUser {
+        #[besu(primary_key, auto_increment)]
+        pub id: i64,
+        #[besu(unique)]
+        pub email: String,
+        pub name: String,
+        pub age: i64,
+        pub bio: Option<String>,
+    }
 }
 
-async fn database() -> besu::Database<Sqlx> {
-    besu::Database::new(Sqlx::new(URL).await.unwrap())
-}
-
-async fn drop_tables(db: &besu::Database<Sqlx>) {
-    db.execute(sql!(
-        "DROP TABLE IF EXISTS posts, users, null_probe CASCADE"
-    ))
-    .await
-    .unwrap();
-}
-
-async fn setup() -> (std::sync::MutexGuard<'static, ()>, besu::Database<Sqlx>) {
-    let guard = lock();
-    let db = database().await;
-    drop_tables(&db).await;
+async fn setup() -> besu::Database<Sqlx> {
+    let db = common::database().await;
+    common::reset(&db).await;
     db.push([users.def(), posts.def()]).await.unwrap();
-    (guard, db)
+    db
 }
 
 #[tokio::test]
 async fn insert_and_select() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
 
     let created = db
         .insert(users)
-        .value(users.insert("oscar@example.com".into(), "Oscar".into(), 21))
+        .value(users.insert("oscar@example.com", "Oscar", 21))
         .returning(users)
         .await
         .unwrap();
@@ -94,14 +103,10 @@ async fn generated_sql() {
 
 #[tokio::test]
 async fn filters_and_ordering() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     for (name, age) in [("Alice", 30), ("Bob", 17), ("Carol", 25)] {
         db.insert(users)
-            .value(users.insert(
-                format!("{name}@example.com"),
-                name.to_string(),
-                age,
-            ))
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
             .await
             .unwrap();
     }
@@ -135,14 +140,10 @@ async fn filters_and_ordering() {
 
 #[tokio::test]
 async fn projection_and_aggregates() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     for (name, age) in [("Alice", 30), ("Bob", 20)] {
         db.insert(users)
-            .value(users.insert(
-                format!("{name}@example.com"),
-                name.to_string(),
-                age,
-            ))
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
             .await
             .unwrap();
     }
@@ -163,9 +164,9 @@ async fn projection_and_aggregates() {
 
 #[tokio::test]
 async fn update_and_delete() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
@@ -193,16 +194,16 @@ async fn update_and_delete() {
 
 #[tokio::test]
 async fn joins() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     let author = db
         .insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .returning(users)
         .await
         .unwrap()
         .remove(0);
     db.insert(posts)
-        .value(posts.insert("Hello".into(), author.id))
+        .value(posts.insert("Hello", author.id))
         .await
         .unwrap();
 
@@ -226,15 +227,15 @@ async fn joins() {
 
 #[tokio::test]
 async fn upsert() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
     let rows = db
         .insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 31))
+        .value(users.insert("a@example.com", "Alice", 31))
         .on_conflict(users.email)
         .do_update(users.age, 31)
         .returning(users)
@@ -245,11 +246,11 @@ async fn upsert() {
 
 #[tokio::test]
 async fn transactions() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
 
     db.transaction(async |tx| {
         tx.insert(users)
-            .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+            .value(users.insert("a@example.com", "Alice", 30))
             .await?;
         Ok(())
     })
@@ -269,9 +270,9 @@ async fn transactions() {
 
 #[tokio::test]
 async fn raw_sql() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     db.insert(users)
-        .value(users.insert("a@example.com".into(), "Alice".into(), 30))
+        .value(users.insert("a@example.com", "Alice", 30))
         .await
         .unwrap();
 
@@ -300,11 +301,52 @@ async fn raw_sql() {
 }
 
 #[tokio::test]
-async fn null_binds_to_any_type() {
-    let (_guard, db) = setup().await;
+async fn null_handling() {
+    let db = setup().await;
 
-    // `Value::Null` carries no type, so the driver sends it untyped and PostgreSQL accepts it
-    // for a `uuid` column even though no `uuid` value was ever bound.
+    // Not providing a nullable column lets the database default apply, which is `NULL`.
+    let unset = db
+        .insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(unset.bio, None);
+
+    // Providing `None` explicitly writes `NULL` instead of omitting the column.
+    let explicit = db
+        .insert(users)
+        .value(users.insert("b@example.com", "Bob", 25).bio(None::<String>))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(explicit.bio, None);
+
+    let with_bio = db
+        .insert(users)
+        .value(users.insert("c@example.com", "Carol", 40).bio("Rust"))
+        .returning(users)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(with_bio.bio.as_deref(), Some("Rust"));
+
+    let present: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_not_null())
+        .await
+        .unwrap();
+    assert_eq!(present.len(), 1);
+}
+
+/// A `NULL` parameter carries no type, so the driver sends it untyped and PostgreSQL accepts
+/// it for a column of any type.
+#[tokio::test]
+async fn null_binds_to_any_type() {
+    let db = setup().await;
+
     db.execute(sql!("CREATE TABLE null_probe (id uuid)"))
         .await
         .unwrap();
@@ -325,7 +367,7 @@ async fn null_binds_to_any_type() {
 
 #[tokio::test]
 async fn bulk_update_requires_intent() {
-    let (_guard, db) = setup().await;
+    let db = setup().await;
     // `.all_rows()` is the only way to run an update with no `WHERE`; without it this
     // would not compile.
     db.update(users)
@@ -337,9 +379,8 @@ async fn bulk_update_requires_intent() {
 
 #[tokio::test]
 async fn schema_push_converges() {
-    let _guard = lock();
-    let db = database().await;
-    drop_tables(&db).await;
+    let db = common::database().await;
+    common::reset(&db).await;
 
     let first = db.push([users.def(), posts.def()]).await.unwrap();
     assert_eq!(first.changes.len(), 2);
@@ -397,4 +438,34 @@ async fn schema_push_converges() {
         posts_table.foreign_keys[0].on_delete,
         besu::ReferenceAction::Cascade
     );
+}
+
+#[tokio::test]
+async fn alter_column_changes_the_type_in_place() {
+    let db = setup().await;
+
+    let result = db.push([wide::users.def(), posts.def()]).await.unwrap();
+    assert_eq!(result.changes.len(), 1);
+    assert_eq!(
+        result.statements,
+        [r#"ALTER TABLE "users" ALTER COLUMN "age" TYPE BIGINT"#]
+    );
+
+    // The altered schema now matches, so another push is a no-op.
+    let again = db.push([wide::users.def(), posts.def()]).await.unwrap();
+    assert!(again.is_empty(), "got {:?}", again.changes);
+}
+
+#[tokio::test]
+async fn introspection_skips_besu_migrations() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(sql!(
+        "CREATE TABLE \"_besu_migrations\" (version BIGINT PRIMARY KEY)"
+    ))
+    .await
+    .unwrap();
+
+    let schema = db.introspect().await.unwrap();
+    assert!(schema.table("_besu_migrations").is_none());
 }

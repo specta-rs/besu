@@ -29,15 +29,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let statements = match &db {
-        super::database::AnyDatabase::Sqlite(db) => {
+        super::database::AnyDatabase::Sqlite(_) => {
             besu::schema::ddl::Ddl::apply(&besu_sqlite::SQLiteDdl, &changes)
         }
-        super::database::AnyDatabase::Postgres(db) => {
-            let _ = db;
+        super::database::AnyDatabase::Postgres(_) => {
             besu::schema::ddl::Ddl::apply(&besu_postgres::PostgresDdl, &changes)
         }
-        super::database::AnyDatabase::MySql(db) => {
-            let _ = db;
+        super::database::AnyDatabase::MySql(_) => {
             besu::schema::ddl::Ddl::apply(&besu_mysql::MySqlDdl, &changes)
         }
     };

@@ -62,13 +62,13 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
 
     let statistics = db
         .execute(table_query(
-            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART \
+            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
              FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY' \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             &name,
         ))
-        .all::<(String, Option<String>, u64, Option<u64>)>()
+        .all::<(String, Option<String>, u64)>()
         .await?;
 
     let foreign_keys = db
@@ -116,7 +116,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     table.foreign_keys = group_foreign_keys(foreign_keys);
 
     let mut indexes: Vec<RawIndex> = Vec::new();
-    for (index_name, column_name, non_unique, _sub_part) in statistics {
+    for (index_name, column_name, non_unique) in statistics {
         let Some(column_name) = column_name else {
             // A functional index has an expression instead of a column, which Besu cannot
             // model, so it is skipped rather than reported as a change every push.
@@ -134,9 +134,11 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     }
 
     // A single-column unique index is how MySQL stores a column's `UNIQUE` constraint, so
-    // it becomes part of the column rather than a separate index.
+    // it becomes part of the column rather than a separate index. MySQL names that index
+    // after the column, which is what distinguishes it from a unique index the user
+    // declared themselves.
     for index in &indexes {
-        if index.unique && index.columns.len() == 1 {
+        if index.unique && index.columns.len() == 1 && index.name == index.columns[0] {
             if let Some(column) = table
                 .columns
                 .iter_mut()
@@ -148,7 +150,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     }
 
     for index in indexes {
-        if index.unique && index.columns.len() == 1 {
+        if index.unique && index.columns.len() == 1 && index.name == index.columns[0] {
             continue;
         }
 

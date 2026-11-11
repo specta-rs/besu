@@ -131,3 +131,51 @@ async fn declared_types_are_reflected_in_the_schema() {
     assert!(table.column("maybe").unwrap().nullable);
     assert!(!table.column("text").unwrap().nullable);
 }
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "events")]
+pub struct Event {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(index)]
+    pub kind: String,
+    #[besu(unique)]
+    pub slug: String,
+    pub payload: serde_json::Value,
+}
+
+#[tokio::test]
+async fn declared_indexes_are_created_and_converge() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+
+    let first = db.push([events.def()]).await.unwrap();
+    assert!(
+        first
+            .statements
+            .iter()
+            .any(|s| s.contains("CREATE INDEX \"events_kind_idx\"")),
+        "a declared index must be created: {:?}",
+        first.statements
+    );
+
+    // If indexes were not created with the table, the second push would report AddIndex and
+    // `push` would never converge.
+    let second = db.push([events.def()]).await.unwrap();
+    assert!(
+        second.is_empty(),
+        "second push should be a no-op, got {:?}",
+        second.changes
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let table = introspected.table("events").unwrap();
+    assert!(
+        table.indexes.iter().any(|i| i.name == "events_kind_idx"),
+        "the index must be visible to introspection: {:?}",
+        table.indexes
+    );
+    assert!(
+        table.column("slug").unwrap().unique,
+        "a unique column must round-trip as unique"
+    );
+}

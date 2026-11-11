@@ -38,7 +38,7 @@ Given a struct called `User`, the macro emits:
 | `UserTable` | The table handle's type, and the type-level identity used by `Column` |
 | `users` | A `const` handle; one field per column, each a `Column<UserTable, S, N>` |
 | `UserInsert` | The insert struct returned by `users.insert(..)`, implementing `Insertable` |
-| `User::DEF` | A `&'static TableDef` with names, types, indexes and foreign keys |
+| `UserTable::DEF` | A `&'static TableDef` with names, types, indexes and foreign keys; also `users.def()` |
 
 The handle is what makes the query API read like SQL. `users.age` is a copyable value carrying
 three things: the SQL name `"age"`, the SQL type `Int4`, and nullability. Copying it does not
@@ -173,39 +173,41 @@ This is the place for derived or in-memory state that has no column.
 
 ## Type mapping
 
-The derive maps Rust field types by their **last path segment**. `String` and `str` become
-text; `Uuid` becomes a UUID; `Value` (as in `serde_json::Value`) becomes JSON. Wrapping a type
-in `Option` makes the column nullable and the Rust field type `Option<T>`.
+The derive maps Rust field types by their **last path segment**. `String` becomes text;
+`Uuid` becomes a UUID; `Value` (as in `serde_json::Value`) becomes JSON. Wrapping a type in
+`Option` makes the column nullable and the Rust field type `Option<T>`. A `&str` field is a
+reference type, not a path, and is rejected; use `String`.
 
-| Rust field | `SqlType` | `TypeDef` | SQLite DDL | MySQL DDL |
-| --- | --- | --- | --- | --- |
-| `bool` | `Bool` | `Bool` | `BOOLEAN` | `BOOLEAN` |
-| `i8` | `Int1` | `Int2` | `INTEGER` | `SMALLINT` |
-| `i16` | `Int2` | `Int2` | `INTEGER` | `SMALLINT` |
-| `i32` | `Int4` | `Int4` | `INTEGER` | `INT` |
-| `i64` | `Int8` | `Int8` | `INTEGER` | `BIGINT` |
-| `u8` | `UInt1` | `UInt(8)` | `INTEGER` | `TINYINT UNSIGNED` |
-| `u16` | `UInt2` | `UInt(16)` | `INTEGER` | `SMALLINT UNSIGNED` |
-| `u32` | `UInt4` | `UInt(32)` | `INTEGER` | `INT UNSIGNED` |
-| `u64` | `UInt8` | `UInt(64)` | `INTEGER` | `BIGINT UNSIGNED` |
-| `f32` | `Float4` | `Float4` | `REAL` | `FLOAT` |
-| `f64` | `Float8` | `Float8` | `REAL` | `DOUBLE` |
-| `String`, `str` | `Text` | `Text` | `TEXT` | `TEXT` |
-| `Vec<u8>` | `Bytes` | `Bytes` | `BLOB` | `BLOB` |
-| `uuid::Uuid` | `Uuid` | `Uuid` | `BLOB` | `BINARY(16)` |
-| `chrono::NaiveDate` | `Date` | `Date` | `TEXT` | `DATE` |
-| `chrono::NaiveTime` | `Time` | `Time` | `TEXT` | `TIME` |
-| `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `TEXT` | `DATETIME(6)` |
-| `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TEXT` | `DATETIME(6)` |
-| `serde_json::Value` | `Json` | `Json` | `TEXT` | `JSON` |
+| Rust field | `SqlType` | `TypeDef` | SQLite DDL | PostgreSQL DDL | MySQL DDL |
+| --- | --- | --- | --- | --- | --- |
+| `bool` | `Bool` | `Bool` | `BOOLEAN` | `BOOLEAN` | `BOOLEAN` |
+| `i8` | `Int1` | `Int2` | `INTEGER` | `SMALLINT` | `SMALLINT` |
+| `i16` | `Int2` | `Int2` | `INTEGER` | `SMALLINT` | `SMALLINT` |
+| `i32` | `Int4` | `Int4` | `INTEGER` | `INTEGER` | `INT` |
+| `i64` | `Int8` | `Int8` | `INTEGER` | `BIGINT` | `BIGINT` |
+| `u8` | `UInt1` | `UInt(8)` | `INTEGER` | `SMALLINT` | `TINYINT UNSIGNED` |
+| `u16` | `UInt2` | `UInt(16)` | `INTEGER` | `INTEGER` | `SMALLINT UNSIGNED` |
+| `u32` | `UInt4` | `UInt(32)` | `INTEGER` | `BIGINT` | `INT UNSIGNED` |
+| `u64` | `UInt8` | `UInt(64)` | `INTEGER` | `NUMERIC(20,0)` | `BIGINT UNSIGNED` |
+| `f32` | `Float4` | `Float4` | `REAL` | `REAL` | `FLOAT` |
+| `f64` | `Float8` | `Float8` | `REAL` | `DOUBLE PRECISION` | `DOUBLE` |
+| `String` | `Text` | `Text` | `TEXT` | `TEXT` | `TEXT` |
+| `Vec<u8>` | `Bytes` | `Bytes` | `BLOB` | `BYTEA` | `BLOB` |
+| `uuid::Uuid` | `Uuid` | `Uuid` | `BLOB` | `UUID` | `BINARY(16)` |
+| `chrono::NaiveDate` | `Date` | `Date` | `TEXT` | `DATE` | `DATE` |
+| `chrono::NaiveTime` | `Time` | `Time` | `TEXT` | `TIME` | `TIME` |
+| `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `TEXT` | `TIMESTAMP` | `DATETIME(6)` |
+| `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TEXT` | `TIMESTAMPTZ` | `DATETIME(6)` |
+| `serde_json::Value` | `Json` | `Json` | `TEXT` | `JSON` | `JSON` |
 
 Three details are easy to get wrong:
 
 - `i8` is widened to `Int2`, because no supported database has an 8-bit signed integer. The
   Rust value is still `i8`.
-- `u64` becomes `NUMERIC(20,0)`-shaped on databases without unsigned integers. SQLite has only
-  signed 64-bit integers, so binding a `u64` above `i64::MAX` is an encode error at runtime.
-  MySQL has real unsigned integers and round-trips the whole range.
+- `u64` needs a type wider than a signed 64-bit integer. PostgreSQL uses `NUMERIC(20,0)` and
+  the driver encodes the whole `u64` range into it; MySQL uses `BIGINT UNSIGNED`; SQLite has
+  only signed 64-bit integers, so binding a `u64` above `i64::MAX` is an encode error at
+  runtime rather than a wrapped value.
 - `DateTime` is matched by name, not by its full type. `chrono::DateTime<Local>` compiles and
   is declared as `TimestampTz`, then fails to decode at runtime. Use `DateTime<Utc>`.
 

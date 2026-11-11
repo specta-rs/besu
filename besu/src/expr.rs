@@ -906,10 +906,6 @@ macro_rules! unary_same {
 unary_to! {
     /// `COUNT(expr)`.
     count -> Int8 = "COUNT",
-    /// `SUM(expr)`, widened to a float because integer sums overflow.
-    sum -> Float8 = "SUM",
-    /// `AVG(expr)`.
-    avg -> Float8 = "AVG",
     /// `LOWER(expr)`.
     lower -> Text = "LOWER",
     /// `UPPER(expr)`.
@@ -918,6 +914,39 @@ unary_to! {
     length -> Int8 = "LENGTH",
     /// `TRIM(expr)`.
     trim -> Text = "TRIM",
+}
+
+/// `SUM(expr)`, widened to a float because integer sums overflow.
+///
+/// The sum is cast to a double in the database rather than left as whatever the database
+/// decides: PostgreSQL and MySQL return `NUMERIC` for a sum of integers, which no driver can
+/// decode as `f64` without another dependency. Casting keeps the result type honest.
+pub fn sum<RowSet, A>(value: A) -> Expr<RowSet, Float8>
+where
+    A: TypedExpr<RowSet>,
+{
+    cast_to_float(call::<_, Float8>(
+        "SUM",
+        alloc::vec![value.into_typed().into_kind()],
+    ))
+}
+
+/// `AVG(expr)`, cast to a double for the same reason as [`sum`].
+pub fn avg<RowSet, A>(value: A) -> Expr<RowSet, Float8>
+where
+    A: TypedExpr<RowSet>,
+{
+    cast_to_float(call::<_, Float8>(
+        "AVG",
+        alloc::vec![value.into_typed().into_kind()],
+    ))
+}
+
+fn cast_to_float<T, S: SqlType>(expr: Expr<T, S>) -> Expr<T, Float8> {
+    Expr::from_kind(ExprKind::Cast {
+        expr: Box::new(expr.into_kind()),
+        ty: Float8::DEF,
+    })
 }
 
 unary_same! {
@@ -1018,6 +1047,18 @@ pub struct OrderClause {
 }
 
 impl OrderClause {
+    /// Place `NULL`s first.
+    pub fn nulls_first(mut self) -> Self {
+        self.nulls = Some(NullsOrder::First);
+        self
+    }
+
+    /// Place `NULL`s last.
+    pub fn nulls_last(mut self) -> Self {
+        self.nulls = Some(NullsOrder::Last);
+        self
+    }
+
     /// Reverse the direction, keeping any `NULLS` placement.
     pub fn reverse(self) -> Self {
         Self {
@@ -1266,6 +1307,16 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
             direction: Order::Desc,
             nulls: None,
         }
+    }
+
+    /// Sort ascending, with `NULL`s first.
+    pub fn asc_nulls_first(self) -> OrderClause {
+        self.asc().nulls_first()
+    }
+
+    /// Sort descending, with `NULL`s last.
+    pub fn desc_nulls_last(self) -> OrderClause {
+        self.desc().nulls_last()
     }
 
     /// Use this column as an expression.

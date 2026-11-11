@@ -91,9 +91,9 @@ let feed: Vec<(User, Option<Post>)> = db
     .await?;
 ```
 
-The table handle is generated from the struct: `users` is a zero-sized value whose fields are typed
-column references. `users.id` costs nothing to copy, reads like the SQL it produces, and carries the
-column's name, type and nullability in the type system.
+The table handle is generated from the struct: `users` is a `const` value whose fields are
+typed column references. `users.id` costs nothing to copy, reads like the SQL it produces, and
+carries the column's name, type and nullability in the type system.
 
 ## What's inside
 
@@ -148,9 +148,10 @@ The README is an overview. The full documentation lives in [`docs/`](docs/README
 - [Getting started](docs/guide/getting-started.md)
 - [Defining a schema](docs/guide/schema.md)
 - [Selecting data](docs/guide/select.md), [inserting](docs/guide/insert.md), [updating and deleting](docs/guide/update-delete.md)
+- [Raw SQL](docs/guide/raw-sql.md) and [transactions](docs/guide/transactions.md)
 - [Migrations](docs/guide/migrations.md)
 - [Writing a driver](docs/guide/drivers.md)
-- [Architecture](docs/architecture.md)
+- [Architecture](docs/architecture.md), [comparison](docs/comparison.md) and [roadmap](docs/roadmap.md)
 
 API reference is on [docs.rs](https://docs.rs/besu).
 

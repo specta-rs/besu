@@ -52,14 +52,14 @@ impl Sqlx {
     }
 }
 
-fn add<'q, T: 'q>(arguments: &mut MySqlArguments, value: T) -> Result<(), sqlx::Error>
+fn add<'q, T>(arguments: &mut MySqlArguments, value: T) -> Result<(), sqlx::Error>
 where
-    T: sqlx::Encode<'q, MySql> + sqlx::Type<MySql>,
+    T: 'q + sqlx::Encode<'q, MySql> + sqlx::Type<MySql>,
 {
     arguments.add(value).map_err(sqlx::Error::Encode)
 }
 
-fn arguments<'q>(sql: &'q Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
+fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
     let mut arguments = MySqlArguments::default();
     for value in sql.args() {
         match value {
@@ -194,7 +194,6 @@ macro_rules! impl_decode {
 impl_decode!(
     bool,
     f64,
-    String,
     Vec<u8>,
     uuid::Uuid,
     chrono::NaiveDate,
@@ -202,6 +201,25 @@ impl_decode!(
     chrono::NaiveDateTime,
     chrono::DateTime<chrono::Utc>,
 );
+
+impl Decode<Sqlx> for String {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+
+        // Most text columns decode directly, but MySQL flags the `information_schema`
+        // text columns as binary. Those still hold UTF-8, so fall back to reading the
+        // bytes and validating them rather than rejecting a perfectly good string.
+        if let Ok(value) = row.try_get::<String, _>(index) {
+            *offset += 1;
+            return Ok(value);
+        }
+
+        let bytes = decode_via_sqlx::<Vec<u8>>(row, offset)?;
+        String::from_utf8(bytes).map_err(|_| {
+            <Sqlx as Driver>::error(Error::decode(index, "the value is not valid UTF-8"))
+        })
+    }
+}
 
 /// Decode an integer column as `i64`, whichever signedness MySQL reports for it.
 ///
