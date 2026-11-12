@@ -41,7 +41,7 @@ not implemented. **N/A** — no meaning in a Rust library.
 | Update / delete | **Yes** | Type-state guard against a `WHERE`-less write |
 | Operators | **Yes** | Comparison, `LIKE`/`ILIKE`, `BETWEEN`, `IN`, null-safe `IS DISTINCT FROM`, regex, arithmetic, `COALESCE`/`NULLIF`/`GREATEST`/`LEAST`, `CASE`, `CAST`, JSON paths and operators, full text, and PostgreSQL array operators including `= ANY` |
 | Joins | **Yes** | Inner, left, right, full, cross; outer joins widen the projection to `Option` |
-| Aliases | **No** | A self-join needs one, and is the clearest gap against Drizzle. Use `sql!` for now — [#77](https://github.com/specta-rs/besu/issues/77) |
+| Aliases | **Partial** | `alias(employees, "manager")` gives a typed self-join. Two aliases of *one* table need the tagged `alias_as` form, which is documented but not shipped |
 | `sql` operator | **Yes** | `sql!`, with compile-time arity checking |
 | SQL comments | **Yes** | `.comment("..")` on every builder, visible in `to_sql`, `inspect` and the query log |
 | Query utils | **Partial** | `to_sql`, `inspect`, `stream`. No `$dynamic` or `$count` |
@@ -70,7 +70,7 @@ not implemented. **N/A** — no meaning in a Rust library.
 | `check` | **No** | The differ and the journal verify checksums at run time instead |
 | `up` | **No** | The journal upgrades itself when the runner opens it |
 | `studio` | **Yes** | `besu-studio`, development only |
-| Seeding | **No** | Write a `main` that inserts, or a migration — [#85](https://github.com/specta-rs/besu/issues/85) |
+| Seeding | **Yes** | `seed(&db).table(users, 1_000)` — deterministic per type, unique where the schema says unique, foreign keys resolved parent-first |
 | Config file | **Partial** | Flags and environment variables; no project file |
 
 ## Not applicable

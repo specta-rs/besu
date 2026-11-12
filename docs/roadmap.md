@@ -5,12 +5,9 @@ would actually require. The order is a judgement about impact versus cost, not a
 
 | # | Item | Why it matters | Rough size |
 | --- | --- | --- | --- |
-| 1 | A native database backend | sqlx is three dependencies deep in the driver crates | Large |
-| 2 | [Table aliases and self-joins](https://github.com/specta-rs/besu/issues/77) | A self-join is impossible today | Medium |
-| 3 | [Seeding](https://github.com/specta-rs/besu/issues/85) | No deterministic data generator | Large |
-| 4 | [Decode without materialising](https://github.com/specta-rs/besu/issues/96) | A select allocates a copy of every column | Large |
-| 5 | [Custom column types](#custom-column-types) | `INTERVAL`, `INET` and the rest are DDL-only | Medium |
-| 6 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 1 | A native database backend | sqlx is three dependencies deep in the driver crates, and its row type is what makes a select allocate a copy of every column | Large |
+| 2 | [Custom column types](#custom-column-types) | `INTERVAL`, `INET`, ranges and the rest are DDL-only | Medium |
+| 3 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
 
 The complete picture, including what is deliberately not planned, is on the
 [Drizzle parity](parity.md) page.
