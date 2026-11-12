@@ -1,21 +1,73 @@
 # Seeding
 
-> **Not supported yet.** There is no `besu seed`, no seed file format, no factories and no
-> deterministic random data. Seed rows are ordinary inserts, written by you.
-
-Drizzle Seed generates rows from a schema and a set of factories. Besu has no equivalent
-because there is nothing in the query layer to hang it on: a seed is a program that inserts
-rows, and you already have the insert API. The two honest options are a small binary and a
-migration.
-
-## A seeding binary
-
-A separate `main` is the flexible option: it can read fixtures, take a flag, run against any
-environment and be thrown away afterwards.
+`besu::seed` generates rows from a table's declaration. It is for the data a test needs but
+does not care about: names, emails, timestamps and foreign keys that only have to exist and
+be consistent. The rows go through the ordinary typed insert builder, in batches, inside one
+transaction, so a seed is checked by the same compiler and rendered by the same statement
+builder as a hand-written insert.
 
 ```rust
 use besu::prelude::*;
 
+let report = seed(&db)
+    .seed(42)
+    .table(users, 1_000)
+    .table(posts, 5_000)
+    .await?;
+
+assert_eq!(report.rows("users"), 1_000);
+assert_eq!(report.total(), 6_000);
+```
+
+`seed` borrows the database and returns a builder. Each `table` names a table and a row count,
+and awaiting the builder runs the whole plan in one transaction: either every table is
+seeded, or none is. `SeedReport` records how many rows went where.
+
+## Determinism
+
+Every value is generated from SplitMix64, seeded by the master seed, the table's name and the
+row's index. The same seed and the schema produce the same rows on every run:
+
+```rust
+seed(&db).seed(7).table(users, 50).await?;
+```
+
+`seed(0)` is the default. The number is part of the data, so changing it changes every row;
+keeping it fixed is what lets a failing test be replayed by number instead of by fixture.
+
+## What each column gets
+
+The derive implements `Seedable` and fills each column from its `SqlType`:
+
+| Column type | Generated value |
+| --- | --- |
+| signed and unsigned integers | a small positive number in a type-sized range |
+| `auto_increment` / integer primary key | the row number, starting at 1 |
+| `f32`, `f64` | a value between 0 and 10,000 with two decimals |
+| `TEXT` | a name, an email address, or a short sentence, chosen from the column's name |
+| `CHAR(n)`, `VARCHAR(n)` | the same, fitted to the length |
+| `DECIMAL(p, s)` | an exact decimal with exactly `s` digits after the point |
+| `BYTEA` / `BLOB` | eight random bytes |
+| `DATE`, `TIME` | a date in a fixed ten-year window, a time within the day |
+| `TIMESTAMP`, `TIMESTAMPTZ` | a timestamp in a fixed ten-year window |
+| `UUID` | a version-4-shaped UUID |
+| `JSON`, `JSONB` | a small object with an id, a flag and a label |
+| `BOOLEAN` | `true` or `false` |
+| arrays | an empty array |
+| `Option<T>` | `NULL` roughly a quarter of the time; a `NOT NULL` column never is |
+
+The window is fixed rather than relative to the clock, so a seeded timestamp does not change
+between runs. A `#[besu(generated = "..")]` column is never written; the database computes it
+from the columns the seed does fill.
+
+## Unique columns
+
+A column marked `#[besu(unique)]`, and any primary key that is not auto-incrementing, is
+generated uniquely. Text gets a row counter appended (an email keeps its shape:
+`ada.lovelace17@example.com`), integers and decimals include the row number, dates and
+timestamps step through their window by row, and a UUID is unique by construction.
+
+```rust
 #[derive(Table)]
 #[besu(table = "users")]
 pub struct User {
@@ -24,36 +76,106 @@ pub struct User {
     #[besu(unique)]
     pub email: String,
     pub name: String,
-    pub age: i32,
-    pub bio: Option<String>,
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = besu::Database::new(besu_sqlite::Sqlx::connect("sqlite://dev.db").await?);
-
-    db.insert(users)
-        .values([
-            users.insert("oscar@example.com", "Oscar", 21),
-            users.insert("alice@example.com", "Alice", 30),
-        ])
-        .on_conflict(users.email)
-        .await?;
-
-    Ok(())
 }
 ```
 
-`on_conflict(users.email)` renders `ON CONFLICT ("email") DO NOTHING`, so running the program
-twice does not duplicate the rows. Drop it if you want the second run to fail on the unique
-constraint instead. MySQL has no `ON CONFLICT DO NOTHING`; there, upsert with `do_update(..)`
-or check for the row first.
+A unique `BOOLEAN`, or a unique integer narrow enough that the row count does not fit, cannot
+be made unique by any generator; the insert reports the constraint violation.
 
-## A seed migration
+## Foreign keys
 
-When the rows are part of the deployed state — a lookup table, a default role — a migration
-file is better: it runs once, in order, inside the migration runner's transaction, and the
-journal records that it happened.
+Tables are seeded in the order they appear in the chain. A table records the values it wrote
+for its primary-key and unique columns, and a `references` column picks from the parent's
+pool:
+
+```rust
+#[derive(Table)]
+#[besu(table = "posts")]
+pub struct Post {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(references = "users.id", on_delete = "cascade")]
+    pub author_id: i64,
+    pub title: String,
+}
+
+seed(&db).table(users, 1_000).table(posts, 5_000).await?;
+```
+
+Listing the child first is an error, not a dangling key:
+
+```text
+invalid query: cannot seed a foreign key referencing `users.id`: seed `users` first
+```
+
+The same applies to a parent seeded with zero rows. A self-referencing table can point at an
+earlier row of itself, but its first row has no parent; seed a root row with `set`, or leave
+the column nullable and override it.
+
+The referenced column must be a primary key or a unique column, because that is what SQL
+requires of a foreign key. A reference written with a schema prefix
+(`references = "audit.users.id"`) is looked up by its last table segment.
+
+## Overrides
+
+`set` pins a column to a value for every row of the table:
+
+```rust
+seed(&db)
+    .table(users, 1)
+    .set(users.email, "fixed@example.com")
+    .set(users.name, "Oscar")
+    .set(users.bio, None::<String>)
+    .await?;
+```
+
+The value is checked against the column's SQL type at compile time. `None::<String>` writes an
+explicit `NULL`, while a value replaces the generated one rather than being appended to it.
+Overriding a unique column to one value only makes sense when the table has one row.
+
+## Custom column types
+
+A custom `sql_type` has no honest default, so the derive leaves that column unset and lists it
+as required when SQL would also refuse a missing value. The seed fails before inserting
+anything, naming the column:
+
+```text
+invalid query: `events.payload` has no generator; give it a value with `.set(..)`
+```
+
+A nullable custom column, or one with a database default, is simply omitted and the database
+fills it in.
+
+## Batching
+
+`values_chunked` writes several rows per statement. The default is 500 rows per statement,
+which keeps a wide table under every supported database's parameter limit:
+
+```rust
+seed(&db).batch_size(1_000).table(users, 10_000).await?;
+```
+
+The whole seed is one transaction regardless of the batch size. That is deliberate: a
+partially seeded parent table is worse than an empty one.
+
+## What it does not do
+
+- **No fixtures by example.** There is no `factory` file, no named dataset and no way to say
+  "one admin and three editors". Those rows matter, so write them with the insert builder.
+- **No inference from a live database.** A table's columns come from `#[derive(Table)]`, not
+  from introspection. `migrate` can compare the two, but seeding does not.
+- **No cycle resolution.** Parent-first ordering is the caller's job. A schema with a cycle
+  needs an override at the point where it closes.
+- **No parallel generation.** The rows are generated and inserted table by table.
+- **No `RETURNING` round trip.** Auto-incrementing keys are written explicitly so a child can
+  refer to them on MySQL as well as PostgreSQL and SQLite. That means a seed expects an empty
+  table; seeding a table that already has rows collides on the key, so use `.set` there.
+
+## Without the generator
+
+A seed is still allowed to be ordinary code. When the rows are part of the deployed state — a
+lookup table, a default role — a migration is better: it runs once, in order, inside the
+migration runner's transaction, and the journal records that it happened.
 
 ```sql
 -- migrations/0003_seed_roles.sql
@@ -64,57 +186,16 @@ INSERT INTO roles (name) VALUES
 ON CONFLICT (name) DO NOTHING;
 ```
 
-```text
-migrations/
-  0001_create_users.sql
-  0002_create_roles.sql
-  0003_seed_roles.sql
-  0003_seed_roles.down.sql
-```
-
 The file is applied by `besu migrate`, or by `Migrator::from_dir` plus `db.migrate(..)` at
-start-up. `ON CONFLICT` is PostgreSQL and SQLite spelling; MySQL needs `INSERT IGNORE` or an
-explicit check. Writing the `.down.sql` is optional but expected: without it the migration
+start-up. `ON CONFLICT` is PostgreSQL and SQLite spelling; MySQL needs another form of
+idempotence. Writing the `.down.sql` is optional but expected: without it the migration
 cannot be reverted.
-
-## Defaults instead of seed values
-
-A default belongs in the schema, not in a seed. A column with a default is not a required
-insert argument, so every seed row omits it and the database supplies it.
-
-```rust
-#[derive(Table)]
-#[besu(table = "users")]
-pub struct User {
-    #[besu(primary_key, auto_increment)]
-    pub id: i64,
-    #[besu(default = 0)]
-    pub login_count: i32,
-    #[besu(default_now)]
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    #[besu(default_sql = "gen_random_uuid()")]
-    pub public_id: uuid::Uuid,
-}
-```
-
-`default` accepts a string, integer, float or boolean literal; `default_sql` is inserted
-verbatim and is the place for a database function; `default_now` renders
-`DEFAULT CURRENT_TIMESTAMP`. The full list and the per-dialect rendering are in
-[Declaring a schema](../schema/declaration.md).
-
-No seed API is tracked. The insert builder, `Set` for optional columns, and `on_conflict` for
-idempotence already express a seed without new surface.
 
 ## Gotchas
 
 - **There is no environment guard.** A seeding binary pointed at production will seed
   production. Check the connection string yourself before it runs.
-- **No factories, no RNG.** Fields are filled explicitly, or by a database default. That is
-  the trade: a seed is obvious and boring, and it never silently changes shape.
 - **A seed migration is forever.** It runs once per database, and editing an applied file is
   refused because the journal checksums it. Fix data with a new migration.
-- **`values` is one statement and one round trip.** For a few thousand rows that is fine; for
-  more, `values_chunked` is the practical route, and beyond that use the database's own bulk
-  loader (`COPY`, `LOAD DATA`) outside Besu.
-- **A seed row that references another row needs its id.** With `RETURNING`, take the id from
-  the insert; without it (MySQL), select the row back by a unique column.
+- **The seed owns the table's columns.** A column added to the struct is generated on the next
+  run, which is usually what a test wants but is a change to the data as well as the code.

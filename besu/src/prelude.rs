@@ -39,9 +39,11 @@ pub use crate::expr::{
 };
 pub use crate::macros::Fragment;
 pub use crate::query::{
-    Cte, Delete, Derived, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update, derived,
+    Alias, Cte, Delete, Derived, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update,
+    alias, derived,
 };
 pub use crate::relation::{HasMany, WithRelation, has_many};
+pub use crate::seed::{TableSeed, seed};
 pub use crate::selection::Selection;
 pub use crate::sql;
 pub use crate::table::{Insertable, Set, Table};

@@ -96,5 +96,5 @@ clause"; SQLite tolerates it, but the three should agree.
 - `first()` on a set query sets `LIMIT 1`, replacing any limit you set. It does not add an
   `ORDER BY`.
 - `except` is not commutative. `a.except(b)` and `b.except(a)` are different rows.
-- Without an alias feature ([#77](https://github.com/specta-rs/besu/issues/77)), a compound
-  that selects the same column twice can only be ordered by the underlying column name.
+- A compound that selects the same column twice can only be ordered by the underlying column
+  name, because a compound's `ORDER BY` names output columns rather than tables.

@@ -31,6 +31,18 @@ pub struct Post {
     pub author_id: i64,
 }
 
+/// A table that refers to itself: every employee has at most one manager, who is another
+/// employee. It exists so a query can read the table twice, once as the employee and once as
+/// the manager.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "employees")]
+pub struct Employee {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub manager_id: Option<i64>,
+}
+
 async fn setup() -> besu::Database<Sqlx> {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
     db.execute(sql!(
@@ -49,6 +61,15 @@ async fn setup() -> besu::Database<Sqlx> {
             "id" INTEGER PRIMARY KEY AUTOINCREMENT,
             "title" TEXT NOT NULL,
             "author_id" INTEGER NOT NULL REFERENCES "users"("id") ON DELETE CASCADE
+        )"#
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        r#"CREATE TABLE "employees" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+            "name" TEXT NOT NULL,
+            "manager_id" INTEGER
         )"#
     ))
     .await
@@ -1739,4 +1760,59 @@ async fn numeric_functions_run() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("sqrt"), "{error}");
+}
+
+/// A self-join reads one table twice: `employees` for the employee, and the same table under
+/// the alias `manager` for the person they report to. Both sides decode as `Employee`, and
+/// the right-hand side is optional because the join is a `LEFT JOIN` — Alice has no manager.
+#[tokio::test]
+async fn self_join_with_an_alias() {
+    let db = setup().await;
+
+    let alice = db
+        .insert(employees)
+        .value(employees.insert("Alice"))
+        .returning(employees)
+        .await
+        .unwrap()
+        .remove(0);
+    let bob = db
+        .insert(employees)
+        .value(employees.insert("Bob").manager_id(alice.id))
+        .returning(employees)
+        .await
+        .unwrap()
+        .remove(0);
+    db.insert(employees)
+        .value(employees.insert("Carol").manager_id(alice.id))
+        .await
+        .unwrap();
+
+    let manager = alias(employees, "manager");
+    let rows: Vec<(Employee, Option<Employee>)> = db
+        .select(employees)
+        .left_join(
+            &manager,
+            manager.column(employees.id).eq(employees.manager_id),
+        )
+        .order_by(employees.id)
+        .all()
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], (alice.clone(), None));
+    assert_eq!(rows[1].0, bob);
+    assert_eq!(rows[1].1.as_ref().map(|e| e.name.as_str()), Some("Alice"));
+    assert_eq!(rows[2].0.name, "Carol");
+    assert_eq!(rows[2].1.as_ref().map(|e| e.name.as_str()), Some("Alice"));
+
+    // The alias is also a source in its own right: `SELECT ... FROM "employees" AS "manager"`.
+    let everyone: Vec<Employee> = db.select(&manager).all().await.unwrap();
+    let mut names: Vec<&str> = everyone
+        .iter()
+        .map(|employee| employee.name.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Alice", "Bob", "Carol"]);
 }

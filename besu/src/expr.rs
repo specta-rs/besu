@@ -57,12 +57,13 @@ pub enum ExprKind {
         table: &'static str,
         column: &'static str,
     },
-    /// A column of a common table expression.
+    /// A column of a name that exists only in the statement: a common table expression or a
+    /// table alias.
     ///
     /// Identical to [`ExprKind::Column`] to look at, except that neither name takes the
-    /// tenant prefix: an expression's name is a name in the statement, not a table in the
-    /// database, so rewriting it would produce `"tenant_adults"` and a missing-relation
-    /// error in a prefixed database.
+    /// tenant prefix: such a name is a name in the statement, not a table in the database,
+    /// so rewriting it would produce `"tenant_adults"` and a missing-relation error in a
+    /// prefixed database.
     UnprefixedColumn {
         table: &'static str,
         column: &'static str,

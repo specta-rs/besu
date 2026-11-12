@@ -148,9 +148,10 @@ discards the `NULL` rows, which turns the outer join into an inner one. Put the 
 
 - **The default projection is every column of every joined table**, in join order. Use `pick`
   to narrow it.
-- **A table cannot be joined twice.** The row set ends up containing the table on both sides, and
-  the containment check cannot tell which copy a column means, so the query does not compile.
-  There is no `alias()` yet; see [aliases](aliases.md).
+- **A table handle cannot be joined twice.** The row set ends up containing the table on both
+  sides, and the containment check cannot tell which copy a column means, so the query does
+  not compile. A self-join needs an alias instead: `alias(employees, "manager")` is a distinct
+  type in the row set. See [aliases](aliases.md).
 - **`Option<Model>` means every column was `NULL`.** A joined model whose columns are all
   nullable can decode as `None` even when a row matched, because that is the only signal an
   outer join gives.
