@@ -116,12 +116,30 @@ pub enum TypeDef {
 ///
 /// Comparison, hashing and serialisation all see through the holder, so an array read back
 /// from a snapshot equals the one a struct declared.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum TypeRef {
     /// A type written in a constant expression.
     Static(&'static TypeDef),
     /// A type computed at run time.
     Owned(alloc::boxed::Box<TypeDef>),
+}
+
+// Derived comparison would compare the holder, not the type: `Static(&Int4)` and
+// `Owned(Int4)` describe the same column, and the doc above promises they compare equal.
+// A declared array and the one introspection reports must be equal, or every `push` sees a
+// type change.
+impl PartialEq for TypeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_type() == other.as_type()
+    }
+}
+
+impl Eq for TypeRef {}
+
+impl core::hash::Hash for TypeRef {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.as_type().hash(state);
+    }
 }
 
 impl TypeRef {
@@ -169,5 +187,33 @@ impl<'de> serde::Deserialize<'de> for TypeRef {
     /// there is no static allocation to point at.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(Self::owned(TypeDef::deserialize(deserializer)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_type_reference_compares_by_its_type() {
+        // A declared array holds a `Static` reference; the same array read back from a
+        // snapshot holds an `Owned` one. If those compared unequal, every `push` would see a
+        // type change on an array column and `pull` → `push` would never converge.
+        const INT4: TypeDef = TypeDef::Int4;
+        let borrowed = TypeRef::from_static(&INT4);
+        let owned = TypeRef::owned(TypeDef::Int4);
+        assert_eq!(borrowed, owned);
+        assert_eq!(
+            TypeDef::Array(borrowed.clone()),
+            TypeDef::Array(owned.clone())
+        );
+
+        use core::hash::{Hash as _, Hasher as _};
+        use std::hash::DefaultHasher;
+        let mut a = DefaultHasher::new();
+        borrowed.hash(&mut a);
+        let mut b = std::hash::DefaultHasher::new();
+        owned.hash(&mut b);
+        assert_eq!(a.finish(), b.finish());
     }
 }

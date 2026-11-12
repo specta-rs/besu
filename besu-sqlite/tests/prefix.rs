@@ -130,3 +130,31 @@ async fn the_schema_is_prefixed_and_unprefixed_consistently() {
     assert!(physical.table("t9_users").is_some());
     assert!(physical.table("users").is_none());
 }
+
+#[tokio::test]
+async fn another_tenants_views_are_left_alone() {
+    // `push(&[TableDef])` cannot express a view, so it must not delete or re-create one it
+    // finds. The bug was that it copied *every* live view into the declaration — including
+    // another tenant's — and then tried to `CREATE VIEW` a name that already existed.
+    let driver = Sqlx::memory().await.unwrap();
+    let acme = besu::Database::prefixed(driver.clone(), "acme_");
+    let globex = besu::Database::prefixed(driver, "globex_");
+
+    globex.push([users.def()]).await.unwrap();
+    globex
+        .execute(sql!(
+            "CREATE VIEW \"globex_active_users\" AS SELECT * FROM \"globex_users\""
+        ))
+        .await
+        .unwrap();
+
+    let changes = acme.push([users.def()]).await.unwrap();
+    assert!(
+        !changes.statements.iter().any(|sql| sql.contains("VIEW")),
+        "another tenant's view must not appear in the plan: {:?}",
+        changes.statements
+    );
+
+    let remaining = globex.introspect().await.unwrap();
+    assert!(remaining.view("globex_active_users").is_some());
+}

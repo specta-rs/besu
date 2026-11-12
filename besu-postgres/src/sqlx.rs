@@ -308,11 +308,22 @@ fn encode_element(
         (TypeDef::UInt(64) | TypeDef::UInt(128), Value::UInt(v)) => {
             out.extend_from_slice(&numeric_from_text(&v.to_string())?);
         }
+        (TypeDef::UInt(128), Value::UInt128(v)) => {
+            out.extend_from_slice(&numeric_from_text(&v.to_string())?);
+        }
+        (TypeDef::Decimal(_, _), Value::Int128(v)) => {
+            out.extend_from_slice(&numeric_from_text(&v.to_string())?);
+        }
         (TypeDef::Decimal(_, _), Value::Decimal(text)) => {
             out.extend_from_slice(&numeric_from_text(text)?);
         }
         (TypeDef::Decimal(_, _), Value::Int(v)) => {
             out.extend_from_slice(&numeric_from_text(&v.to_string())?);
+        }
+        // A decimal array element bound from a `String` is text that has already been
+        // validated by the conversion; PostgreSQL parses it as NUMERIC.
+        (TypeDef::Decimal(_, _), Value::Text(v)) => {
+            out.extend_from_slice(&numeric_from_text(v)?);
         }
         (TypeDef::Float4, Value::Float(v)) => out.extend_from_slice(&(*v as f32).to_be_bytes()),
         (TypeDef::Float8, Value::Float(v)) => out.extend_from_slice(&v.to_be_bytes()),
@@ -966,7 +977,10 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<(bool, u128), &'static str> {
     if scale != 0 {
         return Err("a NUMERIC with a fractional part cannot be decoded as an integer");
     }
-    if usize::from(ndigits) != (bytes.len() - 8) / 2 {
+    if bytes.len() < 8
+        || (bytes.len() - 8) % 2 != 0
+        || usize::from(ndigits) != (bytes.len() - 8) / 2
+    {
         return Err("malformed NUMERIC value");
     }
     // A zero has no digits to fold in, and its weight carries no information.
@@ -1069,16 +1083,23 @@ fn decode_numeric_decimal(bytes: &[u8]) -> Result<String, &'static str> {
     if dscale < 0 {
         return Err("malformed NUMERIC value");
     }
-    if usize::from(ndigits) != (bytes.len() - 8) / 2 {
+    if bytes.len() < 8
+        || (bytes.len() - 8) % 2 != 0
+        || usize::from(ndigits) != (bytes.len() - 8) / 2
+    {
         return Err("malformed NUMERIC value");
     }
 
-    let groups: Vec<u16> = (0..usize::from(ndigits))
-        .map(|position| {
-            let offset = 8 + position * 2;
-            u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
-        })
-        .collect();
+    let mut groups: Vec<u16> = Vec::with_capacity(usize::from(ndigits));
+    for position in 0..usize::from(ndigits) {
+        let offset = 8 + position * 2;
+        let group = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+        // Every digit is base 10,000; anything larger is not a NUMERIC this decoder can read.
+        if group >= 10_000 {
+            return Err("malformed NUMERIC value");
+        }
+        groups.push(group);
+    }
 
     // The group at exponent `e` is stored `weight - e` positions from the start.
     let group_at = |exponent: i32| -> Option<u16> {
@@ -1144,9 +1165,9 @@ trait ArrayElement: Sized {
 
     /// Decode one element from the text form of an array literal.
     ///
-    /// sqlx asks the server for a type it does not know in text form, which is how an array
-    /// column normally arrives; the Rust type is known here, so the element does not need the
-    /// header's OID.
+    /// sqlx asks the server for a type it does not know in text form; it requests binary
+    /// results for everything else, so this is the fallback rather than the common path. The
+    /// Rust type is known here, so the element does not need the header's OID.
     fn decode_text(text: &str) -> Result<Self, &'static str>;
 }
 
@@ -1294,6 +1315,35 @@ macro_rules! array_integer_element {
 }
 
 array_integer_element!(i8, i16, i32, i64, u16, u32, u64);
+
+/// A 128-bit integer arrives as a `NUMERIC`, because no PostgreSQL integer is that wide.
+macro_rules! array_wide_integer_element {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ArrayElement for $ty {
+                fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+                    if element != NUMERIC_OID {
+                        return Err("this element is not a NUMERIC");
+                    }
+                    let (negative, value) = decode_numeric_binary(bytes)?;
+                    if negative {
+                        return Err("a negative NUMERIC does not fit in an unsigned integer");
+                    }
+                    <$ty>::try_from(value)
+                        .map_err(|_| "an array element is out of range for its Rust type")
+                }
+
+                fn decode_text(text: &str) -> Result<Self, &'static str> {
+                    text.trim()
+                        .parse()
+                        .map_err(|_| "an array element is not a valid integer")
+                }
+            }
+        )*
+    };
+}
+
+array_wide_integer_element!(u128);
 
 impl ArrayElement for f32 {
     fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
@@ -1470,6 +1520,7 @@ impl_decode_array!(
     chrono::NaiveDateTime,
     chrono::DateTime<chrono::Utc>,
     serde_json::Value,
+    u128,
 );
 
 /// Parse PostgreSQL's text array literal: `{a,"b,c",NULL}`.
@@ -1503,7 +1554,9 @@ fn decode_text_array<T: ArrayElement>(text: &str) -> Result<Vec<T>, &'static str
                 quoted = !quoted;
                 quoted_any = true;
             }
-            '{' | '}' => return Err("only one-dimensional arrays decode into a `Vec`"),
+            '{' | '}' if !quoted => {
+                return Err("only one-dimensional arrays decode into a `Vec`");
+            }
             ',' if !quoted => {
                 out.push(text_element::<T>(&element, quoted_any)?);
                 element.clear();

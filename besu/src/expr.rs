@@ -496,20 +496,29 @@ fn is_simple_json_key(key: &str) -> bool {
 
 /// Append one element of a PostgreSQL array literal.
 fn push_pg_array_element(out: &mut String, element: &str) {
+    // A single quote is escaped wherever it appears: the finished array literal is wrapped in
+    // `'…'` as an SQL string, and PostgreSQL reads a doubled quote as one quote.
     let needs_quotes = element.is_empty()
         || element
             .chars()
-            .any(|ch| matches!(ch, ',' | '{' | '}' | '"' | '\\'));
+            .any(|ch| matches!(ch, '\'' | ',' | '{' | '}' | '"' | '\\'));
     if !needs_quotes {
         out.push_str(element);
         return;
     }
     out.push('"');
     for ch in element.chars() {
-        if matches!(ch, '"' | '\\') {
-            out.push('\\');
+        match ch {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '\'' => {
+                out.push('\'');
+                out.push('\'');
+            }
+            _ => out.push(ch),
         }
-        out.push(ch);
     }
     out.push('"');
 }
@@ -2643,25 +2652,37 @@ decimal_values!(&str, String, &String, alloc::borrow::Cow<'_, str>);
 /// data rather than an array of one-byte integers.
 impl<S: SqlType> IntoSqlValue<Array<S>> for Vec<S::Rust>
 where
+    S::Rust: IntoSqlValue<S>,
     Array<S>: SqlType,
 {
     fn into_sql_value(self) -> Value {
+        // Each element goes through the *element's* conversion, so a `Vec<u128>` becomes
+        // `UInt128` values and a `Vec<String>` in a decimal array becomes `Decimal` — the
+        // encoder matches on the declared element type, and a bare `Into<Value>` would
+        // produce `Text` or `UInt128` instead.
         Value::Array {
             element: S::DEF,
-            values: self.into_iter().map(Into::into).collect(),
+            values: self
+                .into_iter()
+                .map(IntoSqlValue::<S>::into_sql_value)
+                .collect(),
         }
     }
 }
 
 impl<S: SqlType> IntoSqlValue<Array<S>> for &[S::Rust]
 where
-    S::Rust: Clone,
+    S::Rust: Clone + IntoSqlValue<S>,
     Array<S>: SqlType,
 {
     fn into_sql_value(self) -> Value {
         Value::Array {
             element: S::DEF,
-            values: self.iter().cloned().map(Into::into).collect(),
+            values: self
+                .iter()
+                .cloned()
+                .map(IntoSqlValue::<S>::into_sql_value)
+                .collect(),
         }
     }
 }
@@ -4287,18 +4308,21 @@ where
 }
 
 /// `ROUND(value, digits)`: round to `digits` decimal places.
-pub fn round_to<RowSet, A, B, MA, MB>(value: A, digits: B) -> Expr<RowSet, A::SqlType>
+pub fn round_to<RowSet, A, B, MA, MB>(value: A, digits: B) -> Expr<RowSet, Float8>
 where
     A: TypedExpr<RowSet, MA>,
     B: IntoExpr<RowSet, Int8, MB>,
 {
-    call(
+    // Always a double, because PostgreSQL's two-argument `round` is `numeric` and the renderer
+    // casts its argument to get there; returning the argument's type would promise a type the
+    // database does not produce. Use a `Decimal` column if you need exactness.
+    cast_to_float(call::<_, Float8>(
         "round",
         alloc::vec![
             value.into_typed().into_kind(),
             narrow_int(digits.into_expr())
         ],
-    )
+    ))
 }
 
 /// `POWER(value, exponent)`.

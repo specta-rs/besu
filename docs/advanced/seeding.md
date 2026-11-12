@@ -108,9 +108,12 @@ Listing the child first is an error, not a dangling key:
 invalid query: cannot seed a foreign key referencing `users.id`: seed `users` first
 ```
 
-The same applies to a parent seeded with zero rows. A self-referencing table can point at an
-earlier row of itself, but its first row has no parent; seed a root row with `set`, or leave
-the column nullable and override it.
+The same applies to a parent seeded with zero rows. **A self-referencing table is not
+supported**: the key pool for a table is filled from the rows it has already inserted, and the
+first row is generated before any key exists, so seeding one fails with
+`cannot seed a foreign key referencing ...`. `set` pins one value for every row and cannot
+carve out a single root. Seed the roots with a plain `insert` first, then the rest — or leave
+the column nullable and write the parent references yourself.
 
 The referenced column must be a primary key or a unique column, because that is what SQL
 requires of a foreign key. A reference written with a schema prefix

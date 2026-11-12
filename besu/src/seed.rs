@@ -30,9 +30,9 @@
 //! pool. Listing a child before its parent is an error, not a silently dangling key:
 //! [`SeedError::MissingParent`] names the table that has to be seeded first.
 //!
-//! A self-referencing table can point at an earlier row of the same table, but its first row
-//! has no parent yet. Seed one root row with [`TableSeed::set`] or leave the column nullable
-//! and override it.
+//! A self-referencing table is **not** supported: the key pool for a table is filled as its
+//! rows are inserted, and the first row is generated before any key exists. Seed the roots
+//! with a plain `insert` first, then call [`seed`] for the rest.
 //!
 //! # What is not generated
 //!

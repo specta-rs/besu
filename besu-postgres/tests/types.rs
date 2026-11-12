@@ -596,3 +596,28 @@ async fn array_operators_are_rendered_for_postgres() {
         .unwrap();
     assert_eq!(appended[0], ["go", "db"]);
 }
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "arrays_of_numbers")]
+pub struct Numbers {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub amounts: Vec<u128>,
+}
+
+/// An element whose Rust type needs its own conversion (`u128` → `UInt128`, `String` in a
+/// decimal array → `Decimal`) must still encode: the element type travels with the values.
+#[tokio::test]
+async fn array_elements_use_the_declared_element_type() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([arrays_of_numbers.def()]).await.unwrap();
+
+    db.insert(arrays_of_numbers)
+        .value(arrays_of_numbers.insert(1_i64, vec![0, u128::MAX]))
+        .await
+        .unwrap();
+
+    let stored: Vec<Numbers> = db.select(arrays_of_numbers).all().await.unwrap();
+    assert_eq!(stored[0].amounts, [0, u128::MAX]);
+}

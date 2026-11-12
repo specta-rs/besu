@@ -234,6 +234,25 @@ impl<Dr: SchemaDriver> Database<Dr> {
         let mut current = self.introspect().await.map_err(SchemaError::Driver)?;
         let mut desired = self.with_prefix(desired);
 
+        // A shared database holds other tenants' tables. They are not this database's
+        // business, so they are dropped from the comparison rather than reported as a
+        // `DropTable` — which would be refused, and rightly so. Views, sequences and
+        // policies are filtered the same way.
+        if let Some(prefix) = self.prefix() {
+            current
+                .tables
+                .retain(|table| table.name.starts_with(prefix));
+            current
+                .views
+                .retain(|view| unqualified(&view.name).starts_with(prefix));
+            current
+                .sequences
+                .retain(|sequence| sequence.name.starts_with(prefix));
+            current
+                .policies
+                .retain(|policy| unqualified(&policy.table).starts_with(prefix));
+        }
+
         // `push(&[TableDef])` cannot express a view or a sequence, so a live one would look
         // undeclared and the plan would propose dropping it — which is destructive, so the
         // whole push would be refused. Carry them across instead: a declaration that cannot
@@ -255,24 +274,6 @@ impl<Dr: SchemaDriver> Database<Dr> {
             }
         }
 
-        // A shared database holds other tenants' tables. They are not this database's
-        // business, so they are dropped from the comparison rather than reported as a
-        // `DropTable` — which would be refused, and rightly so. Views, sequences and
-        // policies are filtered the same way.
-        if let Some(prefix) = self.prefix() {
-            current
-                .tables
-                .retain(|table| table.name.starts_with(prefix));
-            current
-                .views
-                .retain(|view| unqualified(&view.name).starts_with(prefix));
-            current
-                .sequences
-                .retain(|sequence| sequence.name.starts_with(prefix));
-            current
-                .policies
-                .retain(|policy| unqualified(&policy.table).starts_with(prefix));
-        }
         let ddl = Dr::Ddl::default();
         let changes = besu_schema::diff_with(&current, &desired, &|ty| ddl.normalise_type(ty));
 
