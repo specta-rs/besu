@@ -64,6 +64,30 @@ impl<Dr: Driver> Database<Dr> {
         Select::new(self, T::DEF)
     }
 
+    /// Start a `SELECT` from a common table expression.
+    ///
+    /// The statement renders the expression's definition as a `WITH` clause and then reads
+    /// the name, so one expression is defined exactly where it is used:
+    ///
+    /// ```ignore
+    /// let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    /// let rows: Vec<User> = db.from(&adults).all().await?;
+    /// ```
+    ///
+    /// ```sql
+    /// WITH "adults" AS (SELECT ... FROM "users" WHERE ("users"."age" >= $1))
+    /// SELECT "adults"."id", ... FROM "adults"
+    /// ```
+    ///
+    /// See [`Select::cte`] for how the expression is built, and [`Cte`](crate::Cte) for how
+    /// its columns are reached.
+    pub fn from<T: Table>(
+        &self,
+        cte: &crate::query::Cte<T>,
+    ) -> Select<'_, &Self, (crate::query::Cte<T>,), T::Model> {
+        crate::query::cte::select_from(self, cte)
+    }
+
     /// Start an `INSERT` into `table`.
     pub fn insert<T: Table>(&self, _table: T) -> Insert<'_, &Self, (T,), T::Insert> {
         Insert::new(self, T::DEF)
@@ -185,6 +209,16 @@ impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
     /// Start a `SELECT` inside the transaction.
     pub fn select<T: Table>(&mut self, _table: T) -> Select<'_, &mut Self, (T,), T::Model> {
         Select::new(self, T::DEF)
+    }
+
+    /// Start a `SELECT` from a common table expression inside the transaction.
+    ///
+    /// See [`Database::from`] for what the expression does.
+    pub fn from<T: Table>(
+        &mut self,
+        cte: &crate::query::Cte<T>,
+    ) -> Select<'_, &mut Self, (crate::query::Cte<T>,), T::Model> {
+        crate::query::cte::select_from(self, cte)
     }
 
     /// Start an `INSERT` inside the transaction.

@@ -9,16 +9,18 @@ would actually require. The order is a judgement about impact versus cost, not a
 | 2 | [Table aliases and self-joins](https://github.com/specta-rs/besu/issues/77) | A self-join is impossible today | Medium |
 | 3 | [CTEs](https://github.com/specta-rs/besu/issues/78) | Recursive queries need `sql!` | Medium |
 | 4 | [Derived tables and scalar subqueries](https://github.com/specta-rs/besu/issues/79) | Aggregating a subquery is not expressible | Medium |
-| 5 | [Generated columns](https://github.com/specta-rs/besu/issues/80) | A common schema feature `push` cannot manage | Medium |
-| 6 | [Sequences](https://github.com/specta-rs/besu/issues/81) | PostgreSQL sequences are invisible to the IR | Small |
-| 7 | [Views](https://github.com/specta-rs/besu/issues/83) | `pull` records them, `push` ignores them | Medium |
-| 8 | [Row-level security](https://github.com/specta-rs/besu/issues/82) | Policies are migration SQL only | Small |
-| 9 | [Operator coverage](https://github.com/specta-rs/besu/issues/86) | `IS DISTINCT FROM`, regex and arrays | Small–medium |
-| 10 | [Batch API](https://github.com/specta-rs/besu/issues/84) | One await and one transaction for several statements | Medium |
-| 11 | [Seeding](https://github.com/specta-rs/besu/issues/85) | No deterministic data generator | Large |
-| 12 | [Query comments](https://github.com/specta-rs/besu/issues/87) | Slow-query logs are hard to attribute | Small |
-| 13 | [Custom column types](#custom-column-types) | An exact decimal cannot be read back as a string | Medium |
-| 14 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 5 | [Batch API](https://github.com/specta-rs/besu/issues/84) | One await and one transaction for several statements | Medium |
+| 6 | [Seeding](https://github.com/specta-rs/besu/issues/85) | No deterministic data generator | Large |
+| 7 | [Query comments](https://github.com/specta-rs/besu/issues/87) | Slow-query logs are hard to attribute | Small |
+| 8 | [Operator coverage](https://github.com/specta-rs/besu/issues/86) | `IS DISTINCT FROM`, regex and arrays | Small–medium |
+| 9 | [Exact decimal](https://github.com/specta-rs/besu/issues/88) | `DECIMAL` cannot be written or read | Medium |
+| 10 | [Arrays](https://github.com/specta-rs/besu/issues/89) | No array type, and introspection misreports one | Large |
+| 11 | [JSON operators](https://github.com/specta-rs/besu/issues/91) | Only a static dotted path is expressible | Medium |
+| 12 | [Function coverage](https://github.com/specta-rs/besu/issues/92) | Strings, dates, aggregates and windows are thin | Medium |
+| 13 | [Introspection fidelity](https://github.com/specta-rs/besu/issues/93) | Domains, typmods and collation are lost | Medium |
+| 14 | [Decode without materialising](https://github.com/specta-rs/besu/issues/96) | A select allocates a copy of every column | Large |
+| 15 | [Custom column types](#custom-column-types) | An exact decimal cannot be read back as a string | Medium |
+| 16 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
 
 The complete picture, including what is deliberately not planned, is on the
 [Drizzle parity](parity.md) page.

@@ -979,3 +979,238 @@ fn a_cast_uses_the_cast_spelling_not_the_ddl_one() {
     assert_eq!(sql.sql(), r#"SELECT CAST(1 AS TEXT) FROM "users""#);
     assert!(sql.error().is_none());
 }
+
+// ---------------------------------------------------------------------------------------
+// Comments, operators, functions and common table expressions
+// ---------------------------------------------------------------------------------------
+
+/// A self-referencing table, so a recursive expression has something to walk.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "nodes")]
+pub struct Node {
+    #[besu(primary_key)]
+    id: i64,
+    parent_id: Option<i64>,
+    name: String,
+}
+
+/// A comment is written after the dialect's own suffix, so it is the last thing in the
+/// statement, and every builder offers one.
+#[test]
+fn a_statement_carries_its_comment_last() {
+    let db = dry::<TestDialect>();
+
+    let sql = db.select(users).comment("feed page").to_sql().unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio" FROM "users" /* feed page */"#
+    );
+
+    let sql = db
+        .insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .comment("signup")
+        .to_sql()
+        .unwrap();
+    assert!(
+        sql.sql().ends_with("/* signup */"),
+        "comment is not last: {}",
+        sql.sql()
+    );
+
+    let sql = db
+        .update(users)
+        .comment("backfill")
+        .set(users.name, "Oscar")
+        .filter(users.id.eq(1_i64))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().ends_with("/* backfill */"), "{}", sql.sql());
+
+    let sql = db
+        .delete(users)
+        .filter(users.id.eq(1_i64))
+        .comment("cleanup")
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().ends_with("/* cleanup */"), "{}", sql.sql());
+}
+
+/// A comment containing the sequence that would end it is rewritten, so a label can never
+/// turn the rest of itself into SQL.
+#[test]
+fn a_comment_cannot_end_itself() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .comment("nasty */ DROP TABLE users")
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" /* nasty * / DROP TABLE users */"#
+    );
+}
+
+/// `IS DISTINCT FROM` is a keyword on the standard spelling, and the parameters follow it
+/// like any other comparison.
+#[test]
+fn null_safe_comparisons_render() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.bio.is_distinct_from("x"))
+        .filter(is_not_distinct_from(users.name, "Oscar"))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE ("users"."bio" IS DISTINCT FROM $1) AND ("users"."name" IS NOT DISTINCT FROM $2)"#
+    );
+    assert!(sql.error().is_none());
+}
+
+/// A dialect that has not said how it spells a regular expression records an error rather
+/// than emitting another database's operator.
+#[test]
+fn a_regular_expression_needs_a_dialect_capability() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.name.regex_match("^O"))
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("a regex should be rejected");
+    assert!(error.to_string().contains("regular-expression"), "{error}");
+}
+
+/// A non-recursive expression is defined where it is used, and its parameter comes before
+/// the statement's own.
+#[test]
+fn a_common_table_expression_renders_before_the_statement() {
+    let db = dry::<TestDialect>();
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+
+    let sql = db
+        .from(&adults)
+        .filter(adults.column(users.age).lt(65))
+        .to_sql()
+        .unwrap();
+
+    assert_eq!(
+        sql.sql(),
+        r#"WITH "adults" AS (SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio" FROM "users" WHERE ("users"."age" >= $1)) SELECT "adults"."id", "adults"."email", "adults"."name", "adults"."age", "adults"."bio" FROM "adults" WHERE ("adults"."age" < $2)"#
+    );
+    assert_eq!(sql.args(), [Value::Int(18), Value::Int(65)]);
+    assert!(sql.error().is_none());
+}
+
+/// A recursive expression is defined by the compound that extends it, and the statement
+/// reads the name back out.
+#[test]
+fn a_recursive_common_table_expression_renders() {
+    let db = dry::<TestDialect>();
+    let tree = db
+        .select(nodes)
+        .filter(nodes.parent_id.is_null())
+        .cte("tree");
+    let sql = tree
+        .clone()
+        .union_all(
+            db.select(nodes)
+                .inner_join_cte(&tree, nodes.parent_id.eq(tree.column(nodes.id)))
+                // A union branch has to project the same columns as the anchor, and a join
+                // widens the projection to both sides, so name the side that is wanted.
+                .pick(nodes),
+        )
+        .to_sql()
+        .unwrap();
+
+    assert!(
+        sql.sql().starts_with(r#"WITH RECURSIVE "tree" AS ("#),
+        "{}",
+        sql.sql()
+    );
+    assert!(
+        sql.sql()
+            .contains(r#"INNER JOIN "tree" ON ("nodes"."parent_id" = "tree"."id")"#),
+        "{}",
+        sql.sql()
+    );
+    assert!(
+        sql.sql()
+            .ends_with(r#"SELECT "tree"."id", "tree"."parent_id", "tree"."name" FROM "tree""#),
+        "{}",
+        sql.sql()
+    );
+    assert!(sql.error().is_none());
+}
+
+/// A `FILTER` narrows the aggregate, and an `OVER` window follows it in the same expression.
+#[test]
+fn aggregate_filters_and_windows_render() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .pick((
+            sum(users.age).filter(users.age.gt(18)),
+            row_number().over(
+                Window::new()
+                    .partition_by(users.name)
+                    .order_by(users.age.asc()),
+            ),
+        ))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT (CAST(SUM("users"."age") AS TEXT) FILTER (WHERE ("users"."age" > $1))), ROW_NUMBER() OVER (PARTITION BY "users"."name" ORDER BY "users"."age" ASC) FROM "users""#
+    );
+    assert!(sql.error().is_none());
+}
+
+/// Two expressions in one statement are written in the order they were added, and the
+/// parameters follow the text: the `WITH` clause comes first, so its parameters do too.
+#[test]
+fn several_common_table_expressions_render_in_order() {
+    let db = dry::<TestDialect>();
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    let recent = db.select(posts).filter(posts.id.gt(10_i64)).cte("recent");
+
+    let sql = db
+        .select(posts)
+        .inner_join_cte(&adults, adults.column(users.id).eq(posts.author_id))
+        .inner_join_cte(&recent, recent.column(posts.id).eq(posts.id))
+        .with_cte(&adults)
+        .to_sql()
+        .unwrap();
+
+    let text = sql.sql();
+    let adults_at = text.find(r#"WITH "adults" AS"#).expect("adults is defined");
+    let recent_at = text.find(r#", "recent" AS"#).expect("recent is defined");
+    assert!(adults_at < recent_at, "{text}");
+    assert_eq!(
+        sql.args(),
+        [Value::Int(18), Value::Int(10)],
+        "the clause comes before the statement, so its parameters do"
+    );
+    // Adding the same expression twice keeps one definition, because a name may only appear
+    // once in a `WITH` clause.
+    assert_eq!(text.matches(r#""adults" AS"#).count(), 1, "{text}");
+}
+
+/// A set query takes a comment in the same place, after the compound's own clauses.
+#[test]
+fn a_set_query_carries_its_comment() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .union(db.select(users))
+        .comment("everyone")
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().ends_with("/* everyone */"), "{}", sql.sql());
+}

@@ -21,6 +21,8 @@ pub(crate) struct UpdateQuery {
     pub(crate) sets: Vec<(&'static str, crate::expr::ExprKind)>,
     pub(crate) filter: Vec<ExprKind>,
     pub(crate) returning: Option<Vec<ExprKind>>,
+    /// An application-level label, rendered as a trailing `/* ... */`.
+    pub(crate) comment: Option<alloc::string::String>,
 }
 
 impl UpdateQuery {
@@ -30,6 +32,7 @@ impl UpdateQuery {
             sets: Vec::new(),
             filter: Vec::new(),
             returning: None,
+            comment: None,
         }
     }
 
@@ -78,7 +81,9 @@ impl UpdateQuery {
             }
         }
 
-        out.seal()
+        let mut out = out.seal();
+        crate::query::render_comment(&mut out, self.comment.as_deref());
+        out
     }
 }
 
@@ -205,6 +210,14 @@ impl<'a, E: Executor, T, const SAFE: bool> Update<'a, E, T, SAFE> {
     pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
         Ok(self.query.clone().build(self.exec.table_prefix()))
     }
+
+    /// Label the statement with a comment, rendered as a trailing `/* ... */`.
+    ///
+    /// See [`Select::comment`](crate::Select::comment) for what the label is for.
+    pub fn comment(mut self, comment: impl Into<alloc::string::String>) -> Self {
+        self.query.comment = Some(comment.into());
+        self
+    }
 }
 
 impl<'a, E: Executor, T> Update<'a, E, T, true> {
@@ -252,6 +265,21 @@ pub struct UpdateReturning<'a, E: Executor, T, R> {
     exec: E,
     query: UpdateQuery,
     phantom: PhantomData<(&'a (), fn() -> (T, R))>,
+}
+
+impl<'a, E: Executor, T, R> UpdateReturning<'a, E, T, R> {
+    /// Label the statement with a comment, rendered as a trailing `/* ... */`.
+    ///
+    /// See [`Select::comment`](crate::Select::comment) for what the label is for.
+    pub fn comment(mut self, comment: impl Into<alloc::string::String>) -> Self {
+        self.query.comment = Some(comment.into());
+        self
+    }
+
+    /// Render the exact SQL this query will run.
+    pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
+        Ok(self.query.clone().build(self.exec.table_prefix()))
+    }
 }
 
 impl<'a, E, T, R> IntoFuture for UpdateReturning<'a, E, T, R>

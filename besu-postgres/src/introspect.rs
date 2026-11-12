@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use besu_core::TypeDef;
-use besu_core::schema::ReferenceAction;
+use besu_core::schema::{IndexKind, ReferenceAction};
 use besu_schema::{
-    Check, Column, Enum, ForeignKey, Index, Schema, Table, Unique, View, normalise_expression,
+    Check, Column, Enum, ForeignKey, Generated, Index, Policy, PolicyCommand, Schema, Sequence,
+    Table, Unique, View, normalise_expression, normalise_generated_expression,
 };
 
 use crate::Sqlx;
@@ -22,29 +23,34 @@ use crate::Sqlx;
 /// - indexes with `INCLUDE` columns, which the IR cannot name,
 /// - indexes that back a constraint (exclusion constraints in particular), which the
 ///   constraint owns and `DROP INDEX` cannot remove,
+/// - indexes using an access method the IR has no name for (`hash`, `spgist`),
 /// - triggers, which are never read at all.
 ///
-/// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
-/// ignores that list, so they never appear as tables and `push` never touches them.
+/// Views are read into [`Schema::views`], standalone sequences into
+/// [`Schema::sequences`], policies into [`Schema::policies`] and the RLS flag onto its
+/// table, so `besu pull` records what is really there.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let current = current_schema(db).await?;
 
     let names = db
         .execute(besu::sql!(
-            "SELECT table_schema, table_name FROM information_schema.tables \
-             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
-               AND table_schema NOT LIKE 'pg_toast%' \
-               AND table_schema NOT LIKE 'pg_temp%' \
-               AND table_type = 'BASE TABLE' \
-               AND table_name <> '_besu_migrations' \
-             ORDER BY table_schema, table_name"
+            "SELECT t.table_schema, t.table_name, c.relrowsecurity \
+             FROM information_schema.tables t \
+             JOIN pg_namespace n ON n.nspname = t.table_schema \
+             JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = t.table_name \
+             WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema') \
+               AND t.table_schema NOT LIKE 'pg_toast%' \
+               AND t.table_schema NOT LIKE 'pg_temp%' \
+               AND t.table_type = 'BASE TABLE' \
+               AND t.table_name <> '_besu_migrations' \
+             ORDER BY t.table_schema, t.table_name"
         ))
-        .all::<(String, String)>()
+        .all::<(String, String, bool)>()
         .await?;
 
     let mut tables: BTreeMap<String, Table> = names
         .into_iter()
-        .map(|(schema, name)| {
+        .map(|(schema, name, rls)| {
             let key = qualified(&schema, &name, current.as_deref());
             let table = Table {
                 name,
@@ -57,12 +63,14 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
                 foreign_keys: Vec::new(),
                 checks: Vec::new(),
                 comment: None,
+                rls,
             };
             (key, table)
         })
         .collect();
 
     introspect_columns(db, &mut tables, current.as_deref()).await?;
+    introspect_generated_columns(db, &mut tables, current.as_deref()).await?;
     introspect_constraints(db, &mut tables, current.as_deref()).await?;
     introspect_checks(db, &mut tables, current.as_deref()).await?;
     introspect_indexes(db, &mut tables, current.as_deref()).await?;
@@ -72,6 +80,8 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
     schema.tables = tables.into_values().collect();
     schema.enums = introspect_enums(db, current.as_deref()).await?;
     schema.views = introspect_views(db, current.as_deref()).await?;
+    schema.sequences = introspect_sequences(db, current.as_deref()).await?;
+    schema.policies = introspect_policies(db, current.as_deref()).await?;
     schema.sort();
     Ok(schema)
 }
@@ -137,35 +147,156 @@ async fn introspect_enums(
     Ok(enums)
 }
 
-/// Read every view into [`Schema::views`].
+/// Read every view, materialised or not, into [`Schema::views`].
 ///
-/// A view is not a table and is never diffed, so this exists only so `besu pull` writes down
-/// what the database contains. A view whose definition cannot be read (the owner may have
-/// revoked it) is skipped rather than reported with an empty body.
+/// `pg_class.relkind` is the only catalogue that distinguishes a materialised view from a
+/// plain one; `information_schema.views` lists only the plain ones. `pg_get_viewdef` is the
+/// body, and a view whose definition cannot be read (the owner may have revoked it) is
+/// skipped rather than reported with an empty body.
 async fn introspect_views(
     db: &besu::Database<Sqlx>,
     current: Option<&str>,
 ) -> Result<Vec<View>, sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
-            "SELECT table_schema, table_name, view_definition \
-             FROM information_schema.views \
-             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
-               AND table_schema NOT LIKE 'pg_toast%' \
-               AND table_schema NOT LIKE 'pg_temp%' \
-             ORDER BY table_schema, table_name"
+            "SELECT n.nspname, c.relname, c.relkind = 'm', pg_get_viewdef(c.oid) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('v', 'm') \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+               AND n.nspname NOT LIKE 'pg_temp%' \
+             ORDER BY n.nspname, c.relname"
         ))
-        .all::<(String, String, Option<String>)>()
+        .all::<(String, String, bool, Option<String>)>()
         .await?;
 
     Ok(rows
         .into_iter()
-        .filter_map(|(schema, name, definition)| {
+        .filter_map(|(schema, name, materialised, definition)| {
             Some(View {
                 name: qualified(&schema, &name, current),
                 definition: definition?,
+                materialised,
             })
         })
+        .collect())
+}
+
+/// Read every standalone sequence into [`Schema::sequences`].
+///
+/// A sequence that a `SERIAL` or identity column owns is skipped: it belongs to that column,
+/// which is modelled by [`Column::auto_increment`], and reporting it would make `push` try
+/// to create or drop a sequence the column needs. `pg_depend` is what distinguishes the two:
+/// an auto dependency (`a`) is a `SERIAL`, an internal one (`i`) an identity column.
+///
+/// `pg_sequences` reports a column as `NULL` when the connected role cannot inspect the
+/// sequence, so such a row is skipped rather than guessed at.
+async fn introspect_sequences(
+    db: &besu::Database<Sqlx>,
+    current: Option<&str>,
+) -> Result<Vec<Sequence>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT s.schemaname, s.sequencename, s.data_type::text, s.start_value, \
+                    s.min_value, s.max_value, s.increment_by, s.cycle, s.cache_size \
+             FROM pg_sequences s \
+             JOIN pg_class c ON c.relname = s.sequencename \
+             JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname \
+             WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema') \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   WHERE d.objid = c.oid \
+                     AND d.classid = 'pg_class'::regclass \
+                     AND d.refclassid = 'pg_class'::regclass \
+                     AND d.deptype IN ('a', 'i') \
+               ) \
+             ORDER BY s.schemaname, s.sequencename"
+        ))
+        .all::<(
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            bool,
+            Option<i64>,
+        )>()
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(
+            |(schema, name, data_type, start, min, max, increment, cycle, cache)| {
+                Some(
+                    Sequence {
+                        name,
+                        schema: (Some(schema.as_str()) != current).then_some(schema),
+                        data_type: data_type.unwrap_or_else(|| "bigint".into()),
+                        start: start?,
+                        increment: increment?,
+                        min,
+                        max,
+                        cycle,
+                        cache: cache?,
+                    }
+                    .normalised(),
+                )
+            },
+        )
+        .collect())
+}
+
+/// Read every row-level security policy into [`Schema::policies`].
+///
+/// The list is for `besu pull` and round-tripping only: the differ ignores it, so a policy
+/// written in a migration is never dropped by a `push` that does not declare it. `roles` is
+/// a `name[]`, which is flattened with `array_to_string` because the driver's row type is a
+/// string; `{public}` becomes an empty list, which is how `CREATE POLICY` spells `PUBLIC`.
+async fn introspect_policies(
+    db: &besu::Database<Sqlx>,
+    current: Option<&str>,
+) -> Result<Vec<Policy>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT schemaname, tablename, policyname, cmd, array_to_string(roles, ','), \
+                    qual, with_check \
+             FROM pg_policies \
+             WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+               AND schemaname NOT LIKE 'pg_toast%' \
+               AND schemaname NOT LIKE 'pg_temp%' \
+             ORDER BY schemaname, tablename, policyname"
+        ))
+        .all::<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )>()
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(schema, table, name, command, roles, using, with_check)| Policy {
+                table: qualified(&schema, &table, current),
+                name,
+                command: PolicyCommand::from_catalogue(&command),
+                roles: roles
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|role| !role.is_empty() && !role.eq_ignore_ascii_case("public"))
+                    .map(str::to_owned)
+                    .collect(),
+                using,
+                with_check,
+            },
+        )
         .collect())
 }
 
@@ -257,9 +388,61 @@ async fn introspect_columns(
             } else {
                 default.as_deref().and_then(normalise_default)
             },
+            generated: None,
             comment: None,
             renamed_from: None,
         });
+    }
+
+    Ok(())
+}
+
+/// Read the expression of every generated column.
+///
+/// This is a query of its own because the column row already has twelve fields and the
+/// driver decodes tuples up to twelve; `information_schema.columns.is_generated` is the
+/// catalogue's own marker, so a plain column is never mistaken for one.
+async fn introspect_generated_columns(
+    db: &besu::Database<Sqlx>,
+    tables: &mut BTreeMap<String, Table>,
+    current: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT table_schema, table_name, column_name, generation_expression \
+             FROM information_schema.columns \
+             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+               AND table_schema NOT LIKE 'pg_toast%' \
+               AND is_generated = 'ALWAYS' \
+             ORDER BY table_schema, table_name, ordinal_position"
+        ))
+        .all::<(String, String, String, Option<String>)>()
+        .await?;
+
+    for (schema, table_name, column_name, expression) in rows {
+        // A column whose expression could not be read is left as a plain column: reporting
+        // it as generated with no way to recreate it would make every push drop and add it.
+        let Some(expression) = expression.filter(|expression| !expression.trim().is_empty()) else {
+            continue;
+        };
+        let Some(table) = tables.get_mut(&qualified(&schema, &table_name, current)) else {
+            continue;
+        };
+        let Some(column) = table
+            .columns
+            .iter_mut()
+            .find(|column| column.name == column_name)
+        else {
+            continue;
+        };
+        column.generated = Some(Generated {
+            expression: normalise_generated_expression(&expression),
+            // PostgreSQL implements stored generated columns only.
+            stored: true,
+        });
+        // A generated column owns its value, exactly as an identity column does; the flag
+        // would make the DDL render both spellings.
+        column.auto_increment = false;
     }
 
     Ok(())
@@ -411,12 +594,13 @@ async fn introspect_indexes(
 ) -> Result<(), sqlx::Error> {
     let rows = db
         .execute(besu::sql!(
-            "SELECT n.nspname, t.relname, i.relname, ix.indisunique, ix.indnkeyatts, \
-                    ix.indnatts, a.attname, pg_get_expr(ix.indpred, ix.indrelid) \
+            "SELECT n.nspname, t.relname, i.relname, ix.indisunique, am.amname, \
+                    ix.indnkeyatts, ix.indnatts, a.attname, pg_get_expr(ix.indpred, ix.indrelid) \
              FROM pg_index ix \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_am am ON am.oid = i.relam \
              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) \
              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
                AND n.nspname NOT LIKE 'pg_toast%' \
@@ -433,6 +617,7 @@ async fn introspect_indexes(
             String,
             String,
             bool,
+            String,
             i16,
             i16,
             String,
@@ -444,6 +629,7 @@ async fn introspect_indexes(
         table: String,
         name: String,
         unique: bool,
+        kind: IndexKind,
         keys: usize,
         attributes: usize,
         columns: Vec<String>,
@@ -451,7 +637,10 @@ async fn introspect_indexes(
     }
 
     let mut indexes: Vec<PgIndex> = Vec::new();
-    for (schema, table, name, unique, keys, attributes, column, predicate) in rows {
+    for (schema, table, name, unique, method, keys, attributes, column, predicate) in rows {
+        let Some(kind) = parse_access_method(&method) else {
+            continue;
+        };
         let table = qualified(&schema, &table, current);
         match indexes
             .iter_mut()
@@ -462,6 +651,7 @@ async fn introspect_indexes(
                 table,
                 name,
                 unique,
+                kind,
                 keys: usize::try_from(keys).unwrap_or(0),
                 attributes: usize::try_from(attributes).unwrap_or(0),
                 columns: vec![column],
@@ -495,11 +685,26 @@ async fn introspect_indexes(
             name: index.name,
             columns: index.columns,
             unique: index.unique,
+            kind: index.kind,
             predicate: index.predicate,
         });
     }
 
     Ok(())
+}
+
+/// Map `pg_am.amname` onto an [`IndexKind`].
+///
+/// `None` means the IR has no name for the method (`hash`, `spgist`), so the index is
+/// skipped rather than reported as a b-tree that is not there.
+fn parse_access_method(method: &str) -> Option<IndexKind> {
+    match method {
+        "btree" => Some(IndexKind::Btree),
+        "gin" => Some(IndexKind::Gin),
+        "gist" => Some(IndexKind::Gist),
+        "brin" => Some(IndexKind::Brin),
+        _ => None,
+    }
 }
 
 async fn introspect_foreign_keys(

@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use besu_core::dialect::FullTextStyle;
+use besu_core::dialect::{
+    DistinctFromStyle, FullTextStyle, FunctionStyle, RegexStyle, portable_function,
+};
 use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The PostgreSQL dialect.
@@ -108,5 +110,67 @@ impl Dialect for Postgres {
             TypeDef::Custom(name) => name,
             _ => Cow::Borrowed("TEXT"),
         }
+    }
+
+    /// PostgreSQL is the one dialect that spells both null-safe comparisons as keywords, and
+    /// the one that has the whole `~` family of regular-expression operators.
+    const DISTINCT_FROM: DistinctFromStyle = DistinctFromStyle::Standard;
+    const REGEX: RegexStyle = RegexStyle::Postgres;
+
+    fn function(name: &str) -> Option<FunctionStyle> {
+        use FunctionStyle::{Bare, Named};
+        Some(match name {
+            "char_length" => Named("CHAR_LENGTH"),
+            "octet_length" => Named("OCTET_LENGTH"),
+            "substr" => Named("SUBSTR"),
+            "replace" => Named("REPLACE"),
+            "left" => Named("LEFT"),
+            "right" => Named("RIGHT"),
+            "lpad" => Named("LPAD"),
+            "rpad" => Named("RPAD"),
+            "ltrim" => Named("LTRIM"),
+            "rtrim" => Named("RTRIM"),
+            "btrim" => Named("BTRIM"),
+            "initcap" => Named("INITCAP"),
+            "reverse" => Named("REVERSE"),
+            "repeat" => Named("REPEAT"),
+            "strpos" => Named("STRPOS"),
+            "split_part" => Named("SPLIT_PART"),
+            "translate" => Named("TRANSLATE"),
+            "concat" => Named("CONCAT"),
+            "concat_ws" => Named("CONCAT_WS"),
+            "md5" => Named("MD5"),
+            "regexp_replace" => Named("REGEXP_REPLACE"),
+            "greatest" => Named("GREATEST"),
+            "least" => Named("LEAST"),
+            "ceil" => Named("CEIL"),
+            "floor" => Named("FLOOR"),
+            "trunc" => Named("TRUNC"),
+            "sign" => Named("SIGN"),
+            "sqrt" => Named("SQRT"),
+            "power" => Named("POWER"),
+            "exp" => Named("EXP"),
+            "ln" => Named("LN"),
+            "log10" => Named("LOG10"),
+            "current_date" => Bare("CURRENT_DATE"),
+            "date_trunc" => Named("DATE_TRUNC"),
+            "string_agg" => Named("STRING_AGG"),
+            "json_agg" => Named("JSON_AGG"),
+            "jsonb_agg" => Named("JSONB_AGG"),
+            "json_object" => Named("JSONB_BUILD_OBJECT"),
+            "bool_and" => Named("BOOL_AND"),
+            "bool_or" => Named("BOOL_OR"),
+            "every" => Named("EVERY"),
+            "stddev" => Named("STDDEV"),
+            "stddev_pop" => Named("STDDEV_POP"),
+            "variance" => Named("VARIANCE"),
+            "var_pop" => Named("VAR_POP"),
+            "row_number" => Named("ROW_NUMBER"),
+            "rank" => Named("RANK"),
+            "dense_rank" => Named("DENSE_RANK"),
+            "lag" => Named("LAG"),
+            "lead" => Named("LEAD"),
+            other => return portable_function(other),
+        })
     }
 }

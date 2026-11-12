@@ -187,6 +187,7 @@ async fn generated_ddl() {
                 name: "users_email".into(),
                 columns: vec!["email".into()],
                 unique: true,
+                kind: besu::IndexKind::Btree,
                 predicate: None,
             }
         ),
@@ -219,6 +220,7 @@ async fn generated_ddl() {
         primary_key: false,
         unique: false,
         default: None,
+        generated: None,
         comment: None,
         renamed_from: None,
     };
@@ -1177,4 +1179,451 @@ async fn typed_json_paths_render_and_execute() {
         .await
         .unwrap();
     assert_eq!(value[0], serde_json::json!({ "name": "Oscar", "age": 21 }));
+}
+
+// ---------------------------------------------------------------------------------------
+// Comments, operators, functions and common table expressions
+// ---------------------------------------------------------------------------------------
+
+/// A table with dates and a boolean, so the date and aggregate functions have something to
+/// work on that `users` and `posts` do not provide.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "notes")]
+pub struct Note {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub body: String,
+    pub created: chrono::NaiveDate,
+    pub stamp: chrono::NaiveDateTime,
+    pub active: bool,
+}
+
+/// A self-referencing table, so a recursive expression has something to walk.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "nodes")]
+pub struct Node {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+}
+
+async fn setup_notes(name: &str) -> besu::Database<Sqlx> {
+    let db = fresh(name).await;
+    db.push([users.def(), posts.def(), notes.def(), nodes.def()])
+        .await
+        .unwrap();
+    db
+}
+
+fn date(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+fn stamp(year: i32, month: u32, day: u32) -> chrono::NaiveDateTime {
+    date(year, month, day).and_hms_opt(12, 0, 0).unwrap()
+}
+
+#[tokio::test]
+async fn comments_are_part_of_the_statement() {
+    let db = setup("besu_test_comments").await;
+
+    let sql = db.select(users).comment("feed page").to_sql().unwrap();
+    assert!(sql.sql().ends_with("/* feed page */"), "{}", sql.sql());
+
+    let rows: Vec<User> = db.select(users).comment("feed page").all().await.unwrap();
+    assert!(rows.is_empty());
+}
+
+/// MySQL's null-safe comparison is `<=>`, and `IS NOT DISTINCT FROM` is that operator
+/// without the negation. Its regular expressions are `REGEXP` and `REGEXP_LIKE`.
+#[tokio::test]
+async fn null_safe_comparisons_and_regexes_run() {
+    let db = setup("besu_test_null_safe").await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 20))
+        .await
+        .unwrap();
+    db.insert(users)
+        .value(
+            users
+                .insert("b@example.com", "alice", 30)
+                .bio("hello".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let differing: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_distinct_from("hello"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(differing.len(), 1);
+    assert_eq!(differing[0].name, "Alice");
+
+    let same: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_not_distinct_from(Option::<String>::None))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(same.len(), 1);
+
+    // MySQL's `REGEXP` follows the column's collation, and the default is
+    // `utf8mb4_unicode_ci`, so even the nominally case-sensitive form matches both names.
+    // `REGEXP_LIKE(.., 'i')` is the explicit spelling of the same thing.
+    let matched: Vec<User> = db
+        .select(users)
+        .filter(users.name.regex_match("^A"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(matched.len(), 2);
+
+    let insensitive: Vec<User> = db
+        .select(users)
+        .filter(users.name.regex_match_ci("^A"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(insensitive.len(), 2);
+
+    let negated: Vec<User> = db
+        .select(users)
+        .filter(users.name.not_regex_match_ci("^A"))
+        .all()
+        .await
+        .unwrap();
+    assert!(negated.is_empty());
+}
+
+/// The string helpers MySQL spells differently: `SUBSTRING_INDEX` for `split_part`,
+/// `INSTR` for `strpos`, `SHA2(x, 256)` for `sha256`.
+#[tokio::test]
+async fn string_functions_run() {
+    let db = setup("besu_test_string_fns").await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 20))
+        .await
+        .unwrap();
+
+    let rows: Vec<(i64, i64, String, String, String, String, String)> = db
+        .select(users)
+        .pick((
+            char_length(users.name),
+            octet_length(users.name),
+            substr(users.name, 2, 3),
+            left(users.name, 2),
+            right(users.name, 2),
+            lpad(users.name, 7, "."),
+            rpad(users.name, 7, "."),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        (
+            5,
+            5,
+            "lic".to_string(),
+            "Al".to_string(),
+            "ce".to_string(),
+            "..Alice".to_string(),
+            "Alice..".to_string(),
+        )
+    );
+
+    let rows: Vec<(String, i64, String, String)> = db
+        .select(users)
+        .pick((
+            concat_ws("-", users.name, "x"),
+            strpos(users.name, "ice"),
+            md5(users.name),
+            sha256(users.name),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, "Alice-x");
+    assert_eq!(rows[0].1, 3);
+    assert_eq!(rows[0].2, "64489c85dc2fe0787b85cd87214b3810");
+    assert_eq!(
+        rows[0].3,
+        "3bc51062973c458d5a6f2d8d64a023246354ad7e064b1e4e009ec8a0699a3043"
+    );
+
+    // `split_part` is PostgreSQL's, and MySQL's `SUBSTRING_INDEX` is not the same function:
+    // it returns everything before the nth delimiter rather than the nth field.
+    let error = db
+        .select(users)
+        .pick(split_part("a,b,c", ",", 2))
+        .all()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("split_part"), "{error}");
+
+    let rows: Vec<(String, String, String)> = db
+        .select(users)
+        .pick((
+            regexp_replace(users.name, "A", "O"),
+            regexp_substr(users.name, "l.*e"),
+            to_base64(users.name),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, "Olice");
+    assert_eq!(rows[0].1, "lice");
+    assert_eq!(rows[0].2, "QWxpY2U=");
+
+    let decoded: Vec<String> = db
+        .select(users)
+        .pick(from_base64(to_base64(users.name)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(decoded, ["Alice"]);
+}
+
+/// The date helpers MySQL spells differently: `DATE_FORMAT`, `DATE_ADD` with one unit per
+/// interval, and `FROM_UNIXTIME`.
+#[tokio::test]
+async fn date_functions_run() {
+    let db = setup_notes("besu_test_date_fns").await;
+    db.insert(notes)
+        .value(notes.insert(
+            "first".to_string(),
+            date(2024, 3, 15),
+            stamp(2024, 3, 15),
+            true,
+        ))
+        .await
+        .unwrap();
+
+    let rows: Vec<(i64, i64, i64, i64, String)> = db
+        .select(notes)
+        .pick((
+            extract(DateField::Year, notes.created),
+            extract(DateField::Month, notes.created),
+            datediff(notes.created, notes.created),
+            extract(DateField::Epoch, notes.stamp),
+            date_format(notes.created, "%Y-%m"),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 2024);
+    assert_eq!(rows[0].1, 3);
+    assert_eq!(rows[0].2, 0);
+    assert!(rows[0].3 > 1_700_000_000);
+    assert_eq!(rows[0].4, "2024-03");
+
+    let shifted: Vec<chrono::NaiveDateTime> = db
+        .select(notes)
+        .pick(date_add(notes.stamp, Interval::new().months(1).days(2)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(shifted, [stamp(2024, 4, 17)]);
+
+    let unix: Vec<chrono::NaiveDateTime> = db
+        .select(notes)
+        .pick(from_unixtime(unix_timestamp(notes.stamp)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(unix, [stamp(2024, 3, 15)]);
+
+    let today: Vec<chrono::NaiveDate> = db.select(notes).pick(current_date()).all().await.unwrap();
+    assert_eq!(today.len(), 1);
+}
+
+/// `string_agg` is `GROUP_CONCAT(x SEPARATOR y)` here, and MySQL has no `FILTER` clause at
+/// all, so that one records an error rather than dropping the condition.
+#[tokio::test]
+async fn aggregate_functions_run() {
+    let db = setup_notes("besu_test_aggregates").await;
+    db.insert(notes)
+        .values([
+            notes.insert("a".to_string(), date(2024, 1, 1), stamp(2024, 1, 1), true),
+            notes.insert("b".to_string(), date(2024, 1, 2), stamp(2024, 1, 2), false),
+        ])
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, bool, bool, serde_json::Value)> = db
+        .select(notes)
+        .pick((
+            string_agg(notes.body, ","),
+            bool_and(notes.active),
+            bool_or(notes.active),
+            json_agg(notes.body),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, "a,b");
+    assert!(!rows[0].1);
+    assert!(rows[0].2);
+    assert_eq!(rows[0].3, serde_json::json!(["a", "b"]));
+
+    let error = db
+        .select(notes)
+        .pick(count_all().filter(notes.active))
+        .all()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("FILTER"), "{error}");
+}
+
+/// MySQL supports window functions but not `FILTER`, so the window half runs and the filter
+/// half is refused.
+#[tokio::test]
+async fn windows_run() {
+    let db = setup_notes("besu_test_windows").await;
+    db.insert(notes)
+        .values([
+            notes.insert("a".to_string(), date(2024, 1, 1), stamp(2024, 1, 1), true),
+            notes.insert("b".to_string(), date(2024, 1, 2), stamp(2024, 1, 2), false),
+            notes.insert("c".to_string(), date(2024, 1, 3), stamp(2024, 1, 3), true),
+        ])
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, i64, i64)> = db
+        .select(notes)
+        .pick((
+            notes.body,
+            row_number().over(Window::new().order_by(notes.id.asc())),
+            dense_rank().over(Window::new().order_by(notes.active.asc())),
+        ))
+        .order_by(notes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], ("a".to_string(), 1, 2));
+    assert_eq!(rows[1], ("b".to_string(), 2, 1));
+    assert_eq!(rows[2].1, 3);
+}
+
+/// An expression is defined where it is used, and a recursive one walks the tree it defines.
+#[tokio::test]
+async fn common_table_expressions_run() {
+    let db = setup_notes("besu_test_ctes").await;
+
+    db.insert(users)
+        .values([
+            users.insert("a@example.com", "A", 20),
+            users.insert("b@example.com", "B", 30),
+            users.insert("c@example.com", "C", 10),
+        ])
+        .await
+        .unwrap();
+
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    let rows: Vec<User> = db
+        .from(&adults)
+        .filter(adults.column(users.age).lt(25))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "A");
+
+    db.insert(nodes)
+        .value(nodes.insert(1, "root".to_string()))
+        .await
+        .unwrap();
+    db.insert(nodes)
+        .value(nodes.insert(2, "child".to_string()).parent_id(Some(1_i64)))
+        .await
+        .unwrap();
+    db.insert(nodes)
+        .value(
+            nodes
+                .insert(3, "grandchild".to_string())
+                .parent_id(Some(2_i64)),
+        )
+        .await
+        .unwrap();
+
+    let tree = db
+        .select(nodes)
+        .filter(nodes.parent_id.is_null())
+        .cte("tree");
+    let rows: Vec<Node> = tree
+        .clone()
+        .union_all(
+            db.select(nodes)
+                .inner_join_cte(&tree, nodes.parent_id.eq(tree.column(nodes.id)))
+                .pick(nodes),
+        )
+        .order_by(nodes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>(),
+        ["root", "child", "grandchild"]
+    );
+}
+
+/// The numeric helpers, including the mathematical functions MySQL spells directly.
+#[tokio::test]
+async fn numeric_functions_run() {
+    let db = setup("besu_test_numeric_fns").await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "A", 20))
+        .await
+        .unwrap();
+
+    let double = || users.age.as_expr().cast::<besu::Float8>();
+    let rows: Vec<(f64, f64, f64, f64, f64, f64)> = db
+        .select(users)
+        .pick((
+            sqrt(double()),
+            power(double(), 2),
+            ln(double()),
+            log10(double()),
+            exp(ln(double())),
+            log(2.0, double()),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 20.0_f64.sqrt());
+    assert_eq!(rows[0].1, 400.0);
+    assert!((rows[0].2 - 20.0_f64.ln()).abs() < 1e-9);
+    assert!((rows[0].3 - 20.0_f64.log10()).abs() < 1e-9);
+    assert!((rows[0].4 - 20.0).abs() < 1e-9);
+    assert!((rows[0].5 - 20.0_f64.log2()).abs() < 1e-9);
+
+    let rows: Vec<(f64, f64, f64, i64)> = db
+        .select(users)
+        .pick((
+            ceil(double()),
+            floor(double()),
+            trunc(double()),
+            sign(double()),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], (20.0, 20.0, 20.0, 1));
+
+    let rows: Vec<(i64, i64, i64)> = db
+        .select(users)
+        .pick((
+            greatest(users.age.as_expr().cast::<besu::Int8>(), 25_i64),
+            least(users.age.as_expr().cast::<besu::Int8>(), 25_i64),
+            nullif(users.age.as_expr().cast::<besu::Int8>(), 99_i64),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], (25, 20, 20));
 }

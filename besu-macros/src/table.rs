@@ -100,6 +100,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
         struct_ident,
         table_name,
         schema: table_attrs.schema,
+        rls: table_attrs.rls,
         module_ident,
         handle_ident,
         table_struct_ident,
@@ -131,6 +132,7 @@ fn sanitise_ident(name: &str) -> String {
 struct TableAttrs {
     name: Option<LitStr>,
     schema: Option<LitStr>,
+    rls: bool,
 }
 
 impl TableAttrs {
@@ -138,6 +140,7 @@ impl TableAttrs {
         let mut this = Self {
             name: None,
             schema: None,
+            rls: false,
         };
 
         for attr in attrs {
@@ -153,7 +156,11 @@ impl TableAttrs {
                     this.schema = Some(meta.value()?.parse()?);
                     return Ok(());
                 }
-                Err(meta.error("unrecognised table attribute; expected `table` or `schema`"))
+                if meta.path.is_ident("rls") {
+                    this.rls = true;
+                    return Ok(());
+                }
+                Err(meta.error("unrecognised table attribute; expected `table`, `schema` or `rls`"))
             })?;
         }
 
@@ -175,6 +182,8 @@ struct FieldAttrs {
     references: Option<LitStr>,
     on_delete: Option<String>,
     on_update: Option<String>,
+    generated: Option<LitStr>,
+    generated_stored: Option<bool>,
 }
 
 impl FieldAttrs {
@@ -196,6 +205,15 @@ impl FieldAttrs {
                 }
                 if meta.path.is_ident("auto_increment") || meta.path.is_ident("autoincrement") {
                     this.auto_increment = true;
+                    return Ok(());
+                }
+                if meta.path.is_ident("generated") {
+                    this.generated = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("generated_stored") || meta.path.is_ident("stored") {
+                    let lit: syn::LitBool = meta.value()?.parse()?;
+                    this.generated_stored = Some(lit.value());
                     return Ok(());
                 }
                 if meta.path.is_ident("unique") {
@@ -250,7 +268,7 @@ impl FieldAttrs {
                     "unrecognised column attribute; expected one of `column`, `primary_key`, \
                      `auto_increment`, `unique`, `index`, `skip`, `default`, `default_sql`, \
                      `default_now`, `sql_type`, `renamed_from`, `references`, `on_delete`, \
-                     `on_update`",
+                     `on_update`, `generated`, `stored`",
                 ))
             })?;
         }
@@ -306,6 +324,20 @@ struct Column {
     default: Option<Default>,
     renamed_from: Option<LitStr>,
     reference: Option<Reference>,
+    generated: Option<Generated>,
+}
+
+/// A field computed by the database rather than supplied by the program.
+struct Generated {
+    expression: LitStr,
+    stored: bool,
+}
+
+impl Column {
+    /// Whether the database computes this column, so an insert or update must not.
+    fn is_generated(&self) -> bool {
+        self.generated.is_some()
+    }
 }
 
 struct Reference {
@@ -376,6 +408,45 @@ impl Column {
             ));
         }
 
+        if let Some(stored) = attrs.generated_stored
+            && attrs.generated.is_none()
+        {
+            let _ = stored;
+            return Err(Error::new(
+                ident.span(),
+                "besu: `stored` only applies to a `generated` column",
+            ));
+        }
+
+        if let Some(expression) = &attrs.generated {
+            if expression.value().trim().is_empty() {
+                return Err(Error::new(
+                    expression.span(),
+                    "besu: a generated column needs an SQL expression",
+                ));
+            }
+            // These are all rejected by at least one of the three dialects, and a schema
+            // that only one of them accepts is not a schema Besu can promise to push.
+            if attrs.primary_key || attrs.auto_increment {
+                return Err(Error::new(
+                    ident.span(),
+                    "besu: a generated column cannot be a primary key or auto-increment",
+                ));
+            }
+            if attrs.default.is_some() {
+                return Err(Error::new(
+                    ident.span(),
+                    "besu: a generated column cannot have a default of its own",
+                ));
+            }
+            if attrs.unique {
+                return Err(Error::new(
+                    ident.span(),
+                    "besu: SQLite cannot put a UNIQUE constraint on a generated column",
+                ));
+            }
+        }
+
         let reference = match &attrs.references {
             Some(value) => {
                 let text = value.value();
@@ -412,6 +483,10 @@ impl Column {
             default: attrs.default,
             renamed_from: attrs.renamed_from,
             reference,
+            generated: attrs.generated.map(|expression| Generated {
+                expression,
+                stored: attrs.generated_stored.unwrap_or(true),
+            }),
         })))
     }
 }
@@ -504,6 +579,7 @@ struct Codegen {
     struct_ident: Ident,
     table_name: LitStr,
     schema: Option<LitStr>,
+    rls: bool,
     module_ident: Ident,
     handle_ident: Ident,
     table_struct_ident: Ident,
@@ -526,8 +602,16 @@ impl Codegen {
             Some(schema) => quote!(Some(#schema)),
             None => quote!(None),
         };
+        let rls = self.rls;
 
         let columns = &self.columns;
+        // A generated column is computed by the database, so it has no place in an insert
+        // struct: there is nothing to set, and writing one is an error. Everything that
+        // describes a row — the handle, the decode order and `model_values` — still sees it.
+        let writable: Vec<&Column> = columns
+            .iter()
+            .filter(|column| !column.is_generated())
+            .collect();
 
         // --- table handle fields ------------------------------------------------------
         let handle_fields = columns.iter().map(|column| {
@@ -552,7 +636,10 @@ impl Codegen {
             let name = &column.sql_name;
             let type_def = &column.type_def;
             let nullable = column.nullable;
-            let auto_increment = column.auto_increment;
+            // A generated column is produced by the database exactly as an identity column
+            // is, and the query layer uses this flag to leave it out of a whole-row insert
+            // or update. The distinction between the two spellings lives in `generated`.
+            let auto_increment = column.auto_increment || column.is_generated();
             let primary_key = column.primary_key;
             let unique = column.unique;
             let renamed_from = match &column.renamed_from {
@@ -567,6 +654,17 @@ impl Codegen {
                 Some(Default::Now) => quote!(Some(#besu::DefaultValue::Now)),
                 None => quote!(None),
             };
+            let generated = match &column.generated {
+                Some(generated) => {
+                    let expression = &generated.expression;
+                    let stored = generated.stored;
+                    quote!(Some(#besu::Generated {
+                        expression: #expression,
+                        stored: #stored,
+                    }))
+                }
+                None => quote!(None),
+            };
             quote! {
                 #besu::ColumnDef {
                     name: #name,
@@ -576,6 +674,7 @@ impl Codegen {
                     primary_key: #primary_key,
                     unique: #unique,
                     default: #default,
+                    generated: #generated,
                     renamed_from: #renamed_from,
                 }
             }
@@ -596,6 +695,7 @@ impl Codegen {
                     name: #name,
                     columns: &[#column_name],
                     unique: false,
+                    kind: #besu::IndexKind::Btree,
                 }
             }
         });
@@ -642,15 +742,18 @@ impl Codegen {
             quote!(#ty: #besu::Decode<Dr>)
         });
         let column_count = columns.len();
+        // The insert struct has one field per writable column, so its value buffer is
+        // shorter than the row's column count whenever a generated column exists.
+        let writable_count = writable.len();
 
         // --- insert struct ------------------------------------------------------------
-        let insert_fields = columns.iter().map(|column| {
+        let insert_fields = writable.iter().map(|column| {
             let ident = &column.ident;
             let ty = &column.ty;
             quote!(pub #ident: #besu::Set<#ty>)
         });
 
-        let required: Vec<&Column> = columns
+        let required: Vec<&&Column> = writable
             .iter()
             .filter(|column| !column.nullable && !column.auto_increment && column.default.is_none())
             .collect();
@@ -663,7 +766,7 @@ impl Codegen {
             quote!(#ident: impl ::core::convert::Into<#ty>)
         });
 
-        let insert_initialisers = columns.iter().map(|column| {
+        let insert_initialisers = writable.iter().map(|column| {
             let ident = &column.ident;
             if required
                 .iter()
@@ -675,7 +778,7 @@ impl Codegen {
             }
         });
 
-        let setters = columns.iter().map(|column| {
+        let setters = writable.iter().map(|column| {
             let ident = &column.ident;
             let ty = &column.ty;
             let doc = format!("Set `{}`.", column.sql_name.value());
@@ -691,20 +794,20 @@ impl Codegen {
             }
         });
 
-        let insert_columns = columns.iter().map(|column| &column.sql_name);
-        let insert_values = columns.iter().map(|column| {
+        let insert_columns = writable.iter().map(|column| &column.sql_name);
+        let insert_values = writable.iter().map(|column| {
             let ident = &column.ident;
             quote!(self.#ident.to_value())
         });
         // The same values, written straight into the statement's buffer. `self` is consumed
         // either way, so a derived row never materialises the intermediate `Vec` that
         // `into_values` returns.
-        let insert_values_sink = columns.iter().map(|column| {
+        let insert_values_sink = writable.iter().map(|column| {
             let ident = &column.ident;
             quote!(out.push(self.#ident.to_value());)
         });
 
-        let from_model = columns.iter().map(|column| {
+        let from_model = writable.iter().map(|column| {
             let ident = &column.ident;
             if column.auto_increment {
                 quote!(#ident: #besu::Set::Unset)
@@ -760,6 +863,7 @@ impl Codegen {
                         columns: &[#(#column_defs),*],
                         indexes: &[#(#index_defs),*],
                         foreign_keys: &[#(#foreign_keys),*],
+                        rls: #rls,
                     };
                 }
 
@@ -789,7 +893,7 @@ impl Codegen {
                         self,
                         out: &mut ::std::vec::Vec<::core::option::Option<#besu::Value>>,
                     ) {
-                        out.reserve(#column_count);
+                        out.reserve(#writable_count);
                         #(#insert_values_sink)*
                     }
                 }

@@ -135,6 +135,10 @@ impl<Dr: SchemaDriver> Database<Dr> {
     }
 
     /// Apply this database's table prefix to a schema, if it has one.
+    ///
+    /// Only the object names are rewritten. A view's definition is raw SQL and is not
+    /// parsed, so a prefixed view still reads the tables its text names; a schema that uses
+    /// both a prefix and views has to write the prefixed table names itself.
     fn with_prefix(&self, schema: &Schema) -> Schema {
         let Some(prefix) = self.prefix() else {
             return schema.clone();
@@ -144,9 +148,17 @@ impl<Dr: SchemaDriver> Database<Dr> {
         for table in &mut schema.tables {
             table.name = alloc::format!("{prefix}{}", table.name);
             for foreign_key in &mut table.foreign_keys {
-                foreign_key.references_table =
-                    alloc::format!("{prefix}{}", foreign_key.references_table);
+                foreign_key.references_table = prefixed_name(prefix, &foreign_key.references_table);
             }
+        }
+        for view in &mut schema.views {
+            view.name = prefixed_name(prefix, &view.name);
+        }
+        for sequence in &mut schema.sequences {
+            sequence.name = alloc::format!("{prefix}{}", sequence.name);
+        }
+        for policy in &mut schema.policies {
+            policy.table = prefixed_name(prefix, &policy.table);
         }
         schema
     }
@@ -221,11 +233,21 @@ impl<Dr: SchemaDriver> Database<Dr> {
 
         // A shared database holds other tenants' tables. They are not this database's
         // business, so they are dropped from the comparison rather than reported as a
-        // `DropTable` — which would be refused, and rightly so.
+        // `DropTable` — which would be refused, and rightly so. Views, sequences and
+        // policies are filtered the same way.
         if let Some(prefix) = self.prefix() {
             current
                 .tables
                 .retain(|table| table.name.starts_with(prefix));
+            current
+                .views
+                .retain(|view| unqualified(&view.name).starts_with(prefix));
+            current
+                .sequences
+                .retain(|sequence| sequence.name.starts_with(prefix));
+            current
+                .policies
+                .retain(|policy| unqualified(&policy.table).starts_with(prefix));
         }
         let ddl = Dr::Ddl::default();
         let changes = besu_schema::diff_with(&current, &desired, &|ty| ddl.normalise_type(ty));
@@ -354,3 +376,19 @@ impl<Dr: SchemaDriver> Database<Dr> {
 
 #[allow(unused)]
 fn _keep_dialect<D: Dialect>(_: Option<Sql<D>>) {}
+
+/// Prefix the last segment of a possibly schema-qualified name.
+fn prefixed_name(prefix: &str, name: &str) -> String {
+    match name.split_once('.') {
+        Some((schema, name)) => alloc::format!("{schema}.{prefix}{name}"),
+        None => alloc::format!("{prefix}{name}"),
+    }
+}
+
+/// The name without its schema qualifier.
+fn unqualified(name: &str) -> &str {
+    match name.split_once('.') {
+        Some((_, name)) => name,
+        None => name,
+    }
+}

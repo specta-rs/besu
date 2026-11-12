@@ -46,6 +46,8 @@ mod table;
 /// - `#[besu(table = "name")]` — the SQL table name. Defaults to the struct name in
 ///   `snake_case`.
 /// - `#[besu(schema = "name")]` — a schema/namespace, meaningful to PostgreSQL.
+/// - `#[besu(rls)]` — enable row-level security on the table. PostgreSQL only; it is never
+///   disabled automatically.
 ///
 /// On a field:
 ///
@@ -55,6 +57,8 @@ mod table;
 /// - `#[besu(column = "name")]` — the SQL column name. Defaults to the field name.
 /// - `#[besu(default = <literal>)]` — a literal default. Also `default_sql = "expr"` for an
 ///   expression and `default_now` for `CURRENT_TIMESTAMP`.
+/// - `#[besu(generated = "expr")]` — a column the database computes from the others. It is
+///   never written by an insert or an update. `stored = false` asks for a virtual column.
 /// - `#[besu(references = "table.column")]` — declare a foreign key. Combine with
 ///   `on_delete = "cascade"` and `on_update = "..."`.
 /// - `#[besu(index)]` — create a single-column index.

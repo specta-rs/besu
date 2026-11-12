@@ -117,7 +117,7 @@ let rows: Vec<User> = db
 Anything the typed builders cannot express:
 
 ```rust
-// A window function. There is no window builder.
+// A window function over a grouped result that has no typed spelling here.
 let ranked: Vec<(String, i64)> = db
     .execute(sql!(
         r#"SELECT "name", ROW_NUMBER() OVER (ORDER BY "age" DESC) FROM "users""#
@@ -127,7 +127,8 @@ let ranked: Vec<(String, i64)> = db
 ```
 
 ```rust
-// A CTE. There is no builder for a named subquery.
+// A CTE whose columns are not a table's, so there is no handle to type against.
+// See [common table expressions](../advanced/ctes.md) for the builder.
 let counts: Vec<(String, i64)> = db
     .execute(sql!(
         r#"WITH "counts" AS (

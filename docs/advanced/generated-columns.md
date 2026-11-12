@@ -1,107 +1,79 @@
 # Generated columns
 
-> **Not supported yet.** `#[derive(Table)]` has no attribute for a generated column, and the
-> schema IR has no field that describes one. Create it in a migration and read it with
-> `sql!`.
-
 A generated column is computed by the database from an expression over other columns. It is
-either `STORED`, meaning the value is written on each insert and update, or `VIRTUAL`, meaning
-it is computed when read. The typed builder has no column handle for one, so the model should
-not declare it.
+either `STORED` (written on each insert and update) or `VIRTUAL` (computed when read). Declare
+it on the model and Besu writes it in `CREATE TABLE`, reads it back through introspection, and
+never writes it.
 
-## Creating one
-
-Write the `ALTER TABLE` in a migration; see
-[Migrations](../migrations/overview.md) for the file layout. Each dialect has its own form,
-and MySQL is the one that needs an explicit type and `CONCAT`.
-
-```sql
--- SQLite
-ALTER TABLE "users"
-    ADD COLUMN "full_name" TEXT
-    GENERATED ALWAYS AS ("first_name" || ' ' || "last_name") STORED;
+```rust
+#[derive(Table)]
+#[besu(table = "users")]
+pub struct User {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub first_name: String,
+    pub last_name: String,
+    /// Computed by the database; `users.insert(..)` does not take it.
+    #[besu(generated = "first_name || ' ' || last_name")]
+    pub full_name: String,
+}
 ```
 
 ```sql
--- PostgreSQL
-ALTER TABLE "users"
-    ADD COLUMN "full_name" TEXT
-    GENERATED ALWAYS AS ("first_name" || ' ' || "last_name") STORED;
+CREATE TABLE "users" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "first_name" TEXT NOT NULL,
+    "last_name" TEXT NOT NULL,
+    "full_name" TEXT NOT NULL GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED
+)
 ```
 
+The generated column is dropped from the insert struct and from `set_model`, so there is no
+way to write to it by accident — the database would reject it.
+
+## Stored and virtual
+
+`STORED` is the default. `#[besu(generated = "..", stored = false)]` asks for `VIRTUAL`, which
+SQLite and MySQL support and PostgreSQL does not; on PostgreSQL the dialect maps it to stored,
+because `GENERATED ALWAYS AS ... VIRTUAL` is not a thing there.
+
 ```sql
--- MySQL: a generated column needs an explicit type, and CONCAT rather than ||
-ALTER TABLE `users`
-    ADD COLUMN `full_name` VARCHAR(255)
-    GENERATED ALWAYS AS (CONCAT(`first_name`, ' ', `last_name`)) STORED;
+-- MySQL
+`full_name` VARCHAR(255) NOT NULL GENERATED ALWAYS AS (concat(`first_name`,' ',`last_name`)) VIRTUAL
 ```
 
 ## Reading one
 
-Keep the column out of the struct. `db.select(users)` projects the declared columns only, so
-the generated one has to be named in raw SQL, with an explicit column list and an explicit row
-type:
+A generated column is an ordinary column on the model, so a `select` returns it like any other.
+It cannot be filtered on with an index unless you add one, and a virtual column cannot be
+indexed in MySQL before 8.0.13.
 
-```rust
-let rows: Vec<(i64, String)> = db
-    .execute(sql!("SELECT id, full_name FROM users ORDER BY id"))
-    .all()
-    .await?;
-```
+## Migrations
 
-`pick` cannot help: it takes a column handle or an expression built from one, and there is no
-handle for a column the derive never saw. `SELECT *` does not help either: a model decodes by
-position, so the extra column is not read into anything.
+The differ compares the expression, folding `::type` casts and identifier quoting, so
+PostgreSQL's `to_tsvector('english'::regconfig, bio)` compares equal to
+`to_tsvector('english', bio)`.
 
-Do not work around this by declaring `full_name` as an ordinary field. The insert struct would
-require it as an argument, so the generated `INSERT` would name it, and the database rejects a
-write to a generated column. The DDL would also disagree with the table, which is what the next
-section is about.
-
-## What `push` does
-
-The derive is not the only layer that misses the column; introspection does too, but not
-uniformly.
-
-| Database | Introspection | What `push` does |
-| --- | --- | --- |
-| SQLite | `PRAGMA table_info` lists ordinary columns only, so the generated column is absent | Nothing. It is invisible until a table rebuild recreates the table from the IR |
-| PostgreSQL | `information_schema.columns` includes it, and the query does not filter `is_generated` | Sees a column the derive did not declare and proposes `DROP COLUMN` |
-| MySQL | `information_schema.COLUMNS` includes it; `EXTRA` is only inspected for `auto_increment` and expression defaults | The same: it proposes `DROP COLUMN` |
-
-`Change::DropColumn` is destructive, so plain `push` refuses with `SchemaError::Destructive`
-and `push_destructive` applies it. On PostgreSQL and MySQL a snapshot from `besu pull` records
-the column as an ordinary one, so `push --schema` against that snapshot leaves it alone; that
-does not make `create_schema` understand it.
-
-Nothing tracks generated columns on the roadmap. The work would start in the schema IR: its
-`Column` has no generated flag and no expression field, so the derive and introspection have
-nowhere to put one today.
-
-On SQLite there is a sharper edge. Because the column is absent from the IR, a table rebuild
-— which `push` performs to change any other column — creates the table from the declared
-columns and copies the shared ones across. The generated column is not in either list, so it
-is gone after the rebuild. Keep schema changes to that table in migrations.
+- On PostgreSQL and MySQL, changing the expression is a drop and re-add of the column.
+- On SQLite it is a table rebuild; the rebuild copies the base columns and lets the generated
+  one recompute, rather than trying to insert into it.
 
 ## What is checked
 
-| Mistake | When it fails |
-| --- | --- |
-| Declaring a generated column in the model | Not a compile error; `push` disagrees with the table, and a required insert argument cannot be written |
-| Referencing the column from `pick` or `filter` | Compile error: the derive generated no handle |
-| Expecting `SELECT *` to return the generated column | No error; the extra column is ignored by the model |
-| `push` on PostgreSQL or MySQL | Runtime, `SchemaError::Destructive`, unless forced |
-| A SQLite table rebuild after the column was added | No error; the column is silently lost |
+- The expression is opaque to the compiler: a typo is a database error at `push`, not a
+  compile error.
+- A field with `#[besu(generated = "..")]` is excluded from the insert struct, so writing it
+  is a compile error.
+- Introspection reads it back on all three dialects (`information_schema` on PostgreSQL and
+  MySQL, `PRAGMA table_xinfo` on SQLite), so `pull` → `push` converges.
 
 ## Gotchas
 
-- **`push` is not the tool for this table.** A migration is the only place the column can be
-  created, so it is also the place a change to it belongs.
-- **`STORED` versus `VIRTUAL` is a migration decision.** A stored column costs space on every
-  row and is recomputed on write; a virtual one costs time on every read. PostgreSQL can index
-  only the stored form; MySQL and SQLite can index both.
-- **The expression has dialect-specific differences.** `||` concatenates on SQLite and
-  PostgreSQL but is a logical OR on MySQL, which needs `CONCAT`. Functions differ further;
-  `sql!` cannot check any of it.
-- **A generated column is not selected by the default projection.** A migration cannot change
-  that, because the projection comes from the `TableDef`.
+- A generated column still needs its Rust type to match what the expression produces, and the
+  compiler cannot check that. A `i32` field over a `TEXT` expression decodes as an error.
+- SQLite's `PRAGMA table_info` hides generated columns; Besu uses `table_xinfo`. If you inspect
+  the schema with another tool that uses `table_info`, the column will look missing.
+- A `VIRTUAL` column cannot be added to a table that already has `STORED` columns on older
+  MySQL point releases; the server says so and `push` reports it.
+- A hand-written `TableDef` must set `auto_increment` alongside `generated` for `set_model` to
+  skip it. The derive does that for you.

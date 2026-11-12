@@ -1236,3 +1236,441 @@ async fn cast_to_every_marker_executes() {
     cast!("'2020-01-01 12:00:00'", besu::TimestampTz);
     cast!("1.5", besu::Decimal<10, 2>);
 }
+
+// ---------------------------------------------------------------------------------------
+// Comments, operators, functions and common table expressions
+// ---------------------------------------------------------------------------------------
+
+/// A table with a date and a boolean, so the date and aggregate functions have something to
+/// work on that `users` and `posts` do not provide.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "notes")]
+pub struct Note {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub body: String,
+    pub created: chrono::NaiveDate,
+    pub active: bool,
+}
+
+/// A self-referencing table, so a recursive expression has something to walk.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "nodes")]
+pub struct Node {
+    // Deliberately not marked as the primary key: the derive leaves a primary key out of
+    // the insert shape, and this test supplies the ids so the tree is deterministic.
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+}
+
+async fn setup_notes(db: &besu::Database<Sqlx>) {
+    db.execute(sql!(
+        r#"CREATE TABLE "notes" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+            "body" TEXT NOT NULL,
+            "created" DATE NOT NULL,
+            "active" BOOLEAN NOT NULL
+        )"#
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        r#"CREATE TABLE "nodes" (
+            "id" INTEGER PRIMARY KEY,
+            "parent_id" INTEGER,
+            "name" TEXT NOT NULL
+        )"#
+    ))
+    .await
+    .unwrap();
+}
+
+fn date(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+/// A date written into the statement, for the side of a comparison that is a constant
+/// rather than a column. The arguments are integers chosen in the test, never user input.
+fn date_literal(year: i32, month: u32, day: u32) -> Expr<(NoteTable,), besu::Date> {
+    // SQLite has no typed date literal; a text value in the ISO form is what its date
+    // functions parse.
+    Expr::raw(format!("'{year:04}-{month:02}-{day:02}'"))
+}
+
+/// Every builder takes a comment, it renders last, and the statement still runs.
+#[tokio::test]
+async fn comments_are_part_of_the_statement() {
+    let db = setup().await;
+
+    let sql = db.select(users).comment("feed page").to_sql().unwrap();
+    assert!(sql.sql().ends_with("/* feed page */"), "{}", sql.sql());
+
+    let rows: Vec<User> = db.select(users).comment("feed page").all().await.unwrap();
+    assert!(rows.is_empty());
+
+    db.insert(users)
+        .value(users.insert("oscar@example.com", "Oscar", 21))
+        .comment("signup")
+        .await
+        .unwrap();
+
+    let sql = db
+        .update(users)
+        .set(users.name, "Oscar")
+        .filter(users.id.eq(1_i64))
+        .comment("rename")
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().ends_with("/* rename */"), "{}", sql.sql());
+}
+
+/// `IS DISTINCT FROM` compares `NULL` as a value, which `<>` does not.
+#[tokio::test]
+async fn null_safe_comparisons_run() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "A", 20))
+        .await
+        .unwrap();
+    db.insert(users)
+        .value(
+            users
+                .insert("b@example.com", "B", 30)
+                .bio("hello".to_string()),
+        )
+        .await
+        .unwrap();
+
+    // `bio = 'hello'` is unknown for the row whose bio is NULL, so `<>` misses it; the
+    // null-safe form is true there.
+    let differing: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_distinct_from("hello"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&differing), ["A"]);
+
+    let same: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_not_distinct_from(Option::<String>::None))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&same), ["A"]);
+}
+
+/// SQLite has no regular-expression matching without an extension, so the statement is
+/// rejected while it is built instead of being sent to fail there.
+#[tokio::test]
+async fn regular_expressions_are_unsupported_on_sqlite() {
+    let db = setup().await;
+    let error = db
+        .select(users)
+        .filter(users.name.regex_match("^A"))
+        .all()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("regular-expression"), "{error}");
+}
+
+/// The string helpers are spelled the SQLite way: `length` for `char_length`, `trim` for
+/// `btrim` and `instr` for `strpos`.
+#[tokio::test]
+async fn string_functions_run() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "  Oscar  ", 20))
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, String, i64, i64, String, i64)> = db
+        .select(users)
+        .pick((
+            upper(users.name),
+            btrim(users.name),
+            char_length(users.name),
+            strpos(users.name, "Oscar"),
+            replace(users.name, "Oscar", "Sam"),
+            length(users.email),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        (
+            "  OSCAR  ".to_string(),
+            "Oscar".to_string(),
+            9,
+            3,
+            "  Sam  ".to_string(),
+            13
+        )
+    );
+
+    let joined: Vec<String> = db
+        .select(users)
+        .pick(concat(users.name, "!"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(joined, ["  Oscar  !"]);
+}
+
+/// The date helpers on SQLite: `current_date`, `EXTRACT` through `strftime`, a difference of
+/// two dates and a shift by an interval.
+#[tokio::test]
+async fn date_functions_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+    db.insert(notes)
+        .value(notes.insert("first".to_string(), date(2024, 3, 15), true))
+        .await
+        .unwrap();
+
+    let rows: Vec<(i64, i64, i64, i64)> = db
+        .select(notes)
+        .pick((
+            extract(DateField::Year, notes.created),
+            extract(DateField::Month, notes.created),
+            datediff(notes.created, date_literal(2024, 3, 10)),
+            extract(DateField::Quarter, notes.created),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], (2024, 3, 5, 1));
+
+    let shifted: Vec<chrono::NaiveDate> = db
+        .select(notes)
+        .pick(date_add(notes.created, Interval::new().days(1)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(shifted, [date(2024, 3, 16)]);
+
+    let today: Vec<chrono::NaiveDate> = db.select(notes).pick(current_date()).all().await.unwrap();
+    assert_eq!(today.len(), 1);
+}
+
+/// `string_agg` is `group_concat` here, `bool_and` and `bool_or` are `min` and `max`, and
+/// `json_agg` is `json_group_array`. The PostgreSQL-only aggregates are rejected.
+#[tokio::test]
+async fn aggregate_functions_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+    db.insert(notes)
+        .values([
+            notes.insert("a".to_string(), date(2024, 1, 1), true),
+            notes.insert("b".to_string(), date(2024, 1, 2), false),
+        ])
+        .await
+        .unwrap();
+
+    let joined: Vec<String> = db
+        .select(notes)
+        .pick(string_agg(notes.body, ","))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(joined, ["a,b"]);
+
+    let rows: Vec<(bool, bool, serde_json::Value)> = db
+        .select(notes)
+        .pick((
+            bool_and(notes.active),
+            bool_or(notes.active),
+            json_agg(notes.body),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(false, true, serde_json::json!(["a", "b"]))]);
+
+    let error = db
+        .select(notes)
+        .pick(stddev(notes.id))
+        .all()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("stddev"), "{error}");
+}
+
+/// A window function numbers the rows of a partition, and `FILTER` narrows an aggregate to
+/// some of them.
+#[tokio::test]
+async fn windows_and_filters_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+    db.insert(notes)
+        .values([
+            notes.insert("a".to_string(), date(2024, 1, 1), true),
+            notes.insert("b".to_string(), date(2024, 1, 2), false),
+            notes.insert("c".to_string(), date(2024, 1, 3), true),
+        ])
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, i64)> = db
+        .select(notes)
+        .pick((
+            notes.body,
+            row_number().over(Window::new().order_by(notes.id.asc())),
+        ))
+        .order_by(notes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3)
+        ]
+    );
+
+    let counted: Vec<i64> = db
+        .select(notes)
+        .pick(count_all().filter(notes.active))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(counted, [2]);
+
+    let jumped: Vec<(String, i64)> = db
+        .select(notes)
+        .pick((
+            notes.body,
+            lag(notes.id).over(Window::new().order_by(notes.id.asc())),
+        ))
+        .order_by(notes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    // The first row has no predecessor, so it is `NULL`; `lag` is only used here for its
+    // place in the window, so the row is read as the id it lagged.
+    assert_eq!(jumped.len(), 3);
+}
+
+/// A non-recursive expression is defined where it is used and read back, and a recursive one
+/// walks the tree it defines.
+#[tokio::test]
+async fn common_table_expressions_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    db.insert(users)
+        .values([
+            users.insert("a@example.com", "A", 20),
+            users.insert("b@example.com", "B", 30),
+            users.insert("c@example.com", "C", 10),
+        ])
+        .await
+        .unwrap();
+
+    let rows: Vec<User> = db
+        .from(&adults)
+        .filter(adults.column(users.age).lt(25))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&rows), ["A"]);
+
+    db.insert(nodes)
+        .value(nodes.insert(1, "root".to_string()))
+        .await
+        .unwrap();
+    db.insert(nodes)
+        .value(nodes.insert(2, "child".to_string()).parent_id(Some(1_i64)))
+        .await
+        .unwrap();
+    db.insert(nodes)
+        .value(
+            nodes
+                .insert(3, "grandchild".to_string())
+                .parent_id(Some(2_i64)),
+        )
+        .await
+        .unwrap();
+
+    let tree = db
+        .select(nodes)
+        .filter(nodes.parent_id.is_null())
+        .cte("tree");
+    let rows: Vec<Node> = tree
+        .clone()
+        .union_all(
+            db.select(nodes)
+                .inner_join_cte(&tree, nodes.parent_id.eq(tree.column(nodes.id)))
+                .pick(nodes),
+        )
+        .order_by(nodes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>(),
+        ["root", "child", "grandchild"]
+    );
+}
+
+/// The numeric helpers, including the mathematical functions SQLite only has when its
+/// amalgamation is built with `SQLITE_ENABLE_MATH_FUNCTIONS` — which is how `sqlx` builds it.
+#[tokio::test]
+async fn numeric_functions_run() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "A", 20))
+        .await
+        .unwrap();
+
+    let rows: Vec<(f64, f64, f64, f64, f64)> = db
+        .select(users)
+        .pick((
+            abs(users.age.as_expr().cast::<besu::Float8>()),
+            round(users.age.as_expr().cast::<besu::Float8>()),
+            round_to(users.age.as_expr().cast::<besu::Float8>(), 1),
+            round_to(users.age.as_expr().cast::<besu::Float8>(), 0),
+            abs(users.age.as_expr().cast::<besu::Float8>()),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 20.0);
+    assert_eq!(rows[0].1, 20.0);
+    assert_eq!(rows[0].2, 20.0);
+    assert_eq!(rows[0].3, 20.0);
+    assert_eq!(rows[0].4, 20.0);
+
+    let rows: Vec<(i64, i64, i64)> = db
+        .select(users)
+        .pick((
+            greatest(users.age.as_expr().cast::<besu::Int8>(), 25_i64),
+            least(users.age.as_expr().cast::<besu::Int8>(), 25_i64),
+            nullif(users.age.as_expr().cast::<besu::Int8>(), 99_i64),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 25);
+    assert_eq!(rows[0].1, 20);
+    // `nullif` returns the first argument unless the two are equal.
+    assert_eq!(rows[0].2, 20);
+
+    // SQLite's mathematical functions need `SQLITE_ENABLE_MATH_FUNCTIONS`, which the
+    // amalgamation `sqlx` builds does not set, so the ones it spells through that library
+    // record an error rather than being sent to fail there.
+    let error = db
+        .select(users)
+        .pick(sqrt(users.age.as_expr().cast::<besu::Float8>()))
+        .all()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("sqrt"), "{error}");
+}

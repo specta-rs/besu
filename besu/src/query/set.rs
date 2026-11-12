@@ -16,7 +16,10 @@ use alloc::vec::Vec;
 use besu_core::{Decode, Dialect, DialectOf, Driver, Error, ErrorOf, Executor, Sql};
 
 use crate::expr::{IntoOrder, OrderClause};
-use crate::query::{Select, SelectQuery, render_limit, render_order, select::decode_rows};
+use crate::query::{
+    Cte, CteRoot, Select, SelectQuery, WithClause, render_limit, render_order, select::decode_rows,
+};
+use crate::table::Table;
 
 /// Which set operator joins two `SELECT`s.
 ///
@@ -95,26 +98,149 @@ pub(crate) struct SetParts {
     order_by: Vec<OrderClause>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// An application-level label, rendered as a trailing `/* ... */`.
+    comment: Option<alloc::string::String>,
+    /// The common table expressions this statement defines.
+    with: Option<WithClause>,
+    /// When set, these branches *are* that expression's definition and the statement is a
+    /// `SELECT` from it.
+    root: Option<CteRoot>,
 }
 
 impl SetParts {
-    fn new(first: SelectQuery) -> Self {
-        Self {
-            branches: alloc::vec![first],
+    pub(crate) fn new(mut first: SelectQuery) -> Self {
+        let mut this = Self {
+            branches: Vec::new(),
             operators: Vec::new(),
             order_by: Vec::new(),
             limit: None,
             offset: None,
-        }
+            comment: None,
+            with: None,
+            root: None,
+        };
+        this.hoist(&mut first);
+        this.branches.push(first);
+        this
     }
 
-    fn push(&mut self, op: SetOp, branch: SelectQuery) {
+    pub(crate) fn push(&mut self, op: SetOp, mut branch: SelectQuery) {
+        self.hoist(&mut branch);
         self.operators.push(op);
         self.branches.push(branch);
     }
 
+    /// Take a branch's `WITH` clause up into the compound's.
+    ///
+    /// A branch cannot carry its own: inside a `WITH` definition it would nest a second one
+    /// in a grammar position that does not allow it, which SQLite rejects outright. The
+    /// clause belongs to the statement, so it is lifted to the compound, and the entries of
+    /// the branch that reached this point first are kept in order.
+    fn hoist(&mut self, branch: &mut SelectQuery) {
+        if let Some(with) = branch.with.take() {
+            self.push_with(with);
+        }
+    }
+
+    /// Mark these branches as a common table expression's definition.
+    ///
+    /// The statement then renders the definition inside a `WITH RECURSIVE` clause and reads
+    /// the name back out, which is what lets the definition refer to itself.
+    pub(crate) fn set_root(&mut self, root: CteRoot) {
+        // The definition itself is written from `root`, so an entry of the same name that
+        // arrived from a branch must not be written a second time.
+        if let Some(with) = &mut self.with {
+            with.entries.retain(|entry| entry.name != root.name);
+            with.recursive = true;
+        }
+        self.root = Some(root);
+    }
+
+    /// Merge a `WITH` clause into this statement's, keeping the first entry of each name.
+    pub(crate) fn push_with(&mut self, with: WithClause) {
+        match &mut self.with {
+            Some(existing) => existing.push(with),
+            None => self.with = Some(with),
+        }
+    }
+
     /// Render the compound query.
     fn render_into<D: Dialect>(&mut self, out: &mut Sql<D>) {
+        // Taken out of `self` so that the branches can be borrowed mutably while the
+        // definition's name is still in hand.
+        let root = self.root.take();
+
+        if root.is_some()
+            || self
+                .with
+                .as_ref()
+                .is_some_and(|with| !with.entries.is_empty())
+        {
+            out.push_raw("WITH ");
+            if root.is_some() || self.with.as_ref().is_some_and(|with| with.recursive) {
+                out.push_raw("RECURSIVE ");
+            }
+            let mut first = true;
+            if let Some(with) = &mut self.with {
+                for entry in &mut with.entries {
+                    if !first {
+                        out.push_raw(", ");
+                    }
+                    first = false;
+                    out.push_ident(entry.name);
+                    out.push_raw(" AS (");
+                    entry.body.render_branches(out);
+                    out.push_raw(")");
+                }
+            }
+            if let Some(root) = &root {
+                if !first {
+                    out.push_raw(", ");
+                }
+                out.push_ident(root.name);
+                out.push_raw(" AS (");
+                self.render_branches(out);
+                out.push_raw(")");
+            }
+            out.push_raw(" ");
+        }
+
+        match &root {
+            Some(root) => {
+                // The compound is the expression's definition, so the statement itself reads
+                // the expression back out.
+                out.push_raw("SELECT ");
+                for (i, column) in root.columns.iter().enumerate() {
+                    if i != 0 {
+                        out.push_raw(", ");
+                    }
+                    out.push_qualified(root.name, column.name);
+                }
+                out.push_raw(" FROM ");
+                out.push_ident(root.name);
+            }
+            None => self.render_branches(out),
+        }
+
+        if !self.order_by.is_empty() {
+            out.push_raw(" ORDER BY ");
+            for (i, clause) in self.order_by.iter_mut().enumerate() {
+                if i != 0 {
+                    out.push_raw(", ");
+                }
+                // PostgreSQL and MySQL only accept a result column name here, so a
+                // qualified one is rewritten to the bare name the compound exposes.
+                clause.expr.unqualify();
+                render_order(out, clause);
+            }
+        }
+
+        render_limit::<D>(out, self.limit, self.offset);
+    }
+
+    /// Render the branches and the operators between them, with no `ORDER BY`, `LIMIT` or
+    /// `WITH`: the part that is also a CTE's definition.
+    pub(crate) fn render_branches<D: Dialect>(&mut self, out: &mut Sql<D>) {
         self.check_precedence(out);
 
         let mut expected = None;
@@ -143,21 +269,6 @@ impl SetParts {
             check_branch::<D>(out, index, &self.branches[index]);
             self.branches[index].render_into(out);
         }
-
-        if !self.order_by.is_empty() {
-            out.push_raw(" ORDER BY ");
-            for (i, clause) in self.order_by.iter_mut().enumerate() {
-                if i != 0 {
-                    out.push_raw(", ");
-                }
-                // PostgreSQL and MySQL only accept a result column name here, so a
-                // qualified one is rewritten to the bare name the compound exposes.
-                clause.expr.unqualify();
-                render_order(out, clause);
-            }
-        }
-
-        render_limit::<D>(out, self.limit, self.offset);
     }
 
     fn capacity_hint(&self) -> usize {
@@ -167,7 +278,10 @@ impl SetParts {
         for branch in &self.branches {
             bytes += branch.capacity_hint();
         }
-        bytes + self.operators.len() * 12 + self.order_by.len() * 24
+        bytes
+            + self.operators.len() * 12
+            + self.order_by.len() * 24
+            + self.comment.as_ref().map_or(0, alloc::string::String::len)
     }
 
     /// Refuse a chain that mixes `INTERSECT` with `UNION` or `EXCEPT`.
@@ -273,6 +387,25 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
         }
     }
 
+    /// Start a compound from already-built parts, which is how a common table expression's
+    /// definition becomes a statement.
+    pub(crate) fn from_parts(exec: E, query: SetParts) -> Self {
+        Self {
+            exec,
+            query,
+            phantom: PhantomData,
+        }
+    }
+
+    /// Define `cte` before this statement, so the statement may refer to it.
+    ///
+    /// A statement that reads from the expression already carries its definition; calling
+    /// this is harmless then, because an entry is kept only once per name.
+    pub fn with_cte<T: Table>(mut self, cte: &Cte<T>) -> Self {
+        self.query.push_with(cte.entries());
+        self
+    }
+
     /// Add a `UNION` branch: rows from both sides, with duplicates removed.
     pub fn union<'a2, E2, M2>(mut self, other: Select<'a2, E2, M2, R>) -> Self
     where
@@ -358,6 +491,15 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
         self
     }
 
+    /// Label the statement with a comment, rendered as a trailing `/* ... */`.
+    ///
+    /// The label is part of the statement text, so a slow-query log shows it. See
+    /// [`Select::comment`] for what the label is for and how an embedded `*/` is written.
+    pub fn comment(mut self, comment: impl Into<alloc::string::String>) -> Self {
+        self.query.comment = Some(comment.into());
+        self
+    }
+
     /// Render the exact SQL this query will run, without running it.
     ///
     /// Like [`Select::to_sql`], a capability the dialect lacks is recorded as
@@ -378,7 +520,9 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
         query.render_into(&mut out);
         // Sealed here, so the text `to_sql` shows and the text the driver runs are the same
         // string — which is what the prepared-statement cache key depends on.
-        out.seal()
+        let mut out = out.seal();
+        crate::query::render_comment(&mut out, self.query.comment.as_deref());
+        out
     }
 }
 

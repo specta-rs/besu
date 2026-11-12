@@ -447,3 +447,43 @@ fn the_database_can_be_wrapped_in_place() {
     assert_eq!(driver.statements().len(), 1);
     assert_eq!(recorder.take().len(), 1);
 }
+
+/// A statement's comment is part of its text, so the event that reports the statement
+/// reports the label too — no extra field, and no way for the two to disagree.
+#[cfg(feature = "derive")]
+#[allow(unused_imports)]
+mod comment {
+    use super::*;
+    use besu::prelude::*;
+
+    #[derive(Table)]
+    #[besu(table = "users")]
+    pub struct User {
+        #[besu(primary_key)]
+        pub id: i64,
+    }
+
+    #[test]
+    fn a_comment_reaches_the_log() {
+        let driver = Fake::default();
+        let db = Database::new(Logged::new(driver.clone()));
+        let recorder = Recorder::default();
+
+        let sql = db
+            .select(users)
+            .pick(users.id)
+            .comment("feed page")
+            .to_sql()
+            .expect("a select renders");
+
+        run(&recorder, db.driver().query(&sql)).expect("the fake driver never fails");
+
+        let events = recorder.take();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let reported = events[0].field("sql").expect("the event reports the SQL");
+        assert!(
+            reported.ends_with("/* feed page */"),
+            "the comment is not in the log: {reported}"
+        );
+    }
+}

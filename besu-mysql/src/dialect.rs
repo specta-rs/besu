@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use besu_core::dialect::FullTextStyle;
+use besu_core::dialect::{
+    DistinctFromStyle, FullTextStyle, FunctionStyle, RegexStyle, portable_function,
+};
 use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The MySQL dialect.
@@ -169,6 +171,80 @@ impl Dialect for MySql {
                 _ => "CHAR",
             }),
         }
+    }
+
+    /// MySQL has no `IS DISTINCT FROM` keyword; `<=>` is the null-safe equality the negated
+    /// form is built on. Its regular expressions are `REGEXP` and `REGEXP_LIKE`.
+    const DISTINCT_FROM: DistinctFromStyle = DistinctFromStyle::MySql;
+    const REGEX: RegexStyle = RegexStyle::MySql;
+
+    fn function(name: &str) -> Option<FunctionStyle> {
+        use FunctionStyle::{Bare, Named, Separator, WithSuffix};
+        Some(match name {
+            // `CHAR_LENGTH` counts characters and `LENGTH` counts bytes, which is the
+            // opposite of what the names suggest on `TEXT`.
+            "char_length" => Named("CHAR_LENGTH"),
+            "octet_length" => Named("LENGTH"),
+            "substr" => Named("SUBSTR"),
+            "replace" => Named("REPLACE"),
+            "left" => Named("LEFT"),
+            "right" => Named("RIGHT"),
+            "lpad" => Named("LPAD"),
+            "rpad" => Named("RPAD"),
+            "ltrim" => Named("LTRIM"),
+            "rtrim" => Named("RTRIM"),
+            "btrim" => Named("TRIM"),
+            "reverse" => Named("REVERSE"),
+            "repeat" => Named("REPEAT"),
+            // `INSTR` takes the haystack first, exactly like PostgreSQL's `strpos`.
+            "strpos" => Named("INSTR"),
+            "concat" => Named("CONCAT"),
+            "concat_ws" => Named("CONCAT_WS"),
+            "md5" => Named("MD5"),
+            // MySQL's `SHA2` always names the digest size.
+            "sha256" => WithSuffix("SHA2", &["256"]),
+            "to_base64" => Named("TO_BASE64"),
+            "from_base64" => Named("FROM_BASE64"),
+            "regexp_replace" => Named("REGEXP_REPLACE"),
+            "regexp_substr" => Named("REGEXP_SUBSTR"),
+            "date_format" => Named("DATE_FORMAT"),
+            "greatest" => Named("GREATEST"),
+            "least" => Named("LEAST"),
+            // MySQL's `TRUNCATE` always takes the number of decimal places.
+            "ceil" => Named("CEIL"),
+            "floor" => Named("FLOOR"),
+            "trunc" => WithSuffix("TRUNCATE", &["0"]),
+            "sign" => Named("SIGN"),
+            "sqrt" => Named("SQRT"),
+            "power" => Named("POWER"),
+            "exp" => Named("EXP"),
+            "ln" => Named("LN"),
+            "log10" => Named("LOG10"),
+            "current_date" => Bare("CURRENT_DATE"),
+            "unix_timestamp" => Named("UNIX_TIMESTAMP"),
+            "from_unixtime" => Named("FROM_UNIXTIME"),
+            "string_agg" => Separator("GROUP_CONCAT"),
+            "json_agg" => Named("JSON_ARRAYAGG"),
+            // MySQL has one JSON type, so the binary variant is the same aggregate.
+            "jsonb_agg" => Named("JSON_ARRAYAGG"),
+            "json_object" => Named("JSON_OBJECT"),
+            // `MIN` and `MAX` over a boolean column return the column's own `TINYINT`, so
+            // the value decodes as a boolean. The bitwise aggregates would return a
+            // `BIGINT`, which does not.
+            "bool_and" => Named("MIN"),
+            "bool_or" => Named("MAX"),
+            "every" => Named("MIN"),
+            "stddev" => Named("STDDEV"),
+            "stddev_pop" => Named("STDDEV_POP"),
+            "variance" => Named("VARIANCE"),
+            "var_pop" => Named("VAR_POP"),
+            "row_number" => Named("ROW_NUMBER"),
+            "rank" => Named("RANK"),
+            "dense_rank" => Named("DENSE_RANK"),
+            "lag" => Named("LAG"),
+            "lead" => Named("LEAD"),
+            other => return portable_function(other),
+        })
     }
 }
 

@@ -16,6 +16,9 @@ pub struct ColumnDef {
     /// Whether the column accepts `NULL`.
     pub nullable: bool,
     /// Whether the database generates the value (`SERIAL`, `AUTO_INCREMENT`, ...).
+    ///
+    /// A generated column sets this too, because its value is equally not supplied by the
+    /// program; [`ColumnDef::generated`] distinguishes the two spellings.
     pub auto_increment: bool,
     /// Whether the column is part of the primary key.
     pub primary_key: bool,
@@ -23,12 +26,35 @@ pub struct ColumnDef {
     pub unique: bool,
     /// A literal default value, rendered by each dialect.
     pub default: Option<DefaultValue>,
+    /// How the database computes this column, if it is generated.
+    ///
+    /// A generated column is never written by an `INSERT` or an `UPDATE`: the value is a
+    /// function of the other columns, so the derive leaves it out of the insert struct and
+    /// whole-row updates skip it. Declaring it in the static metadata is what lets DDL and
+    /// introspection agree about the column, instead of treating it as an ordinary one.
+    pub generated: Option<Generated>,
     /// The column's previous name, if it was renamed.
     ///
     /// A pure diff cannot tell a rename from a drop plus an add, and guessing would be
     /// dangerous, so the intent is declared instead. Migrations then emit
     /// `ALTER TABLE ... RENAME COLUMN` and the data survives.
     pub renamed_from: Option<&'static str>,
+}
+
+/// A column whose value the database computes from other columns.
+///
+/// The expression is raw SQL, written verbatim inside `GENERATED ALWAYS AS (...)`. It cannot
+/// be checked by Besu, and the same expression is not portable across dialects, so it is the
+/// caller's responsibility that all three accept it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Generated {
+    /// The SQL expression that computes the value.
+    pub expression: &'static str,
+    /// Whether the value is stored on disk (`STORED`) or computed on read (`VIRTUAL`).
+    ///
+    /// PostgreSQL only implements stored generated columns, so a virtual column is created
+    /// there as a stored one.
+    pub stored: bool,
 }
 
 /// A column default, kept in a form each dialect can render.
@@ -67,6 +93,52 @@ impl DefaultValue {
     }
 }
 
+/// The access method an index is built with.
+///
+/// A b-tree is the default everywhere and the only kind SQLite has. PostgreSQL names its
+/// methods in `pg_am`; MySQL spells two of them in the index syntax itself. The enum is
+/// deliberately small: these are the methods that change what a query planner can do, and
+/// the dialect that implements one reports it back through introspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum IndexKind {
+    /// The default ordered index, `btree` on PostgreSQL and `BTREE` on MySQL.
+    #[default]
+    Btree,
+    /// A MySQL `FULLTEXT` index, which `MATCH ... AGAINST` requires.
+    FullText,
+    /// A MySQL `SPATIAL` index over a geometry column.
+    Spatial,
+    /// A PostgreSQL GIN index, for `jsonb`, arrays, `tsvector` and trigram search.
+    Gin,
+    /// A PostgreSQL GiST index, for ranges, geometry and nearest-neighbour search.
+    Gist,
+    /// A PostgreSQL BRIN index, for large append-only tables.
+    Brin,
+}
+
+impl IndexKind {
+    /// The spelling the catalogue uses, which is also the PostgreSQL `USING` clause.
+    ///
+    /// `fulltext` and `spatial` are MySQL's spellings, not PostgreSQL access methods; the
+    /// PostgreSQL dialect maps them onto `gin` and `gist` when it renders DDL.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Btree => "btree",
+            Self::FullText => "fulltext",
+            Self::Spatial => "spatial",
+            Self::Gin => "gin",
+            Self::Gist => "gist",
+            Self::Brin => "brin",
+        }
+    }
+
+    /// Whether this is the default access method, which snapshots leave out.
+    pub const fn is_btree(&self) -> bool {
+        matches!(self, Self::Btree)
+    }
+}
+
 /// A secondary index declaration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Index {
@@ -76,6 +148,8 @@ pub struct Index {
     pub columns: &'static [&'static str],
     /// Whether the index enforces uniqueness.
     pub unique: bool,
+    /// The access method the index uses.
+    pub kind: IndexKind,
 }
 
 /// A foreign key constraint.
@@ -150,6 +224,12 @@ pub struct TableDef {
     pub indexes: &'static [Index],
     /// Foreign keys.
     pub foreign_keys: &'static [ForeignKey],
+    /// Whether `push` should enable row-level security on this table.
+    ///
+    /// Only PostgreSQL implements it. Enabling is safe and happens on creation or as an
+    /// `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`; it is deliberately never disabled
+    /// automatically, because disabling one removes a guarantee every policy depends on.
+    pub rls: bool,
 }
 
 impl TableDef {

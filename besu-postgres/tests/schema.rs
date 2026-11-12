@@ -8,7 +8,10 @@ mod common;
 
 use besu::TypeDef;
 use besu::prelude::*;
-use besu::schema::{Change, Check, Column, Enum, Safety, Schema, Table as TableIr, Unique};
+use besu::schema::{
+    Change, Check, Column, Enum, Generated, Index, IndexKind, Safety, Schema, Sequence,
+    Table as TableIr, Unique, View,
+};
 use besu_postgres::Sqlx;
 
 /// A `NOT NULL` column with no constraint of its own.
@@ -21,6 +24,7 @@ fn column(name: &str, ty: TypeDef) -> Column {
         primary_key: false,
         unique: false,
         default: None,
+        generated: None,
         comment: None,
         renamed_from: None,
     }
@@ -36,6 +40,7 @@ fn table(name: &str, columns: Vec<Column>) -> TableIr {
         foreign_keys: Vec::new(),
         checks: Vec::new(),
         comment: None,
+        rls: false,
     }
 }
 
@@ -44,6 +49,7 @@ fn schema(tables: Vec<TableIr>, enums: Vec<Enum>) -> Schema {
         tables,
         enums,
         views: Vec::new(),
+        ..Schema::default()
     };
     schema.sort();
     schema
@@ -583,19 +589,39 @@ async fn check_constraints_round_trip() {
     assert!(db.push_schema(&with).await.unwrap().is_empty());
 }
 
-/// A view is reported by introspection so `besu pull` writes it down, but it is never a
-/// table and the differ never creates or drops one.
+/// A view is declared, created after the tables it reads, replaced when its definition
+/// changes, and dropped before them. Introspection reports what is really there, so pushing
+/// the same schema twice is a no-op even though PostgreSQL rewrites the definition.
 #[tokio::test]
-async fn a_view_is_reported_but_never_touched() {
+async fn views_are_created_replaced_and_dropped() {
     let db = common::database().await;
     common::reset(&db).await;
 
-    db.execute(sql!("CREATE TABLE users (id BIGINT PRIMARY KEY)"))
-        .await
-        .unwrap();
-    db.execute(sql!("CREATE VIEW user_ids AS SELECT id FROM users"))
-        .await
-        .unwrap();
+    let users = || {
+        schema(
+            vec![table(
+                "users",
+                vec![{
+                    let mut id = column("id", TypeDef::Int8);
+                    id.primary_key = true;
+                    id
+                }],
+            )],
+            Vec::new(),
+        )
+    };
+
+    let mut desired = users();
+    desired.add_view(View::new("user_ids", "SELECT id FROM users"));
+
+    let first = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "users" ("id" BIGINT PRIMARY KEY)"#,
+            r#"CREATE VIEW "user_ids" AS SELECT id FROM users"#,
+        ]
+    );
 
     let introspected = db.introspect().await.unwrap();
     assert!(
@@ -604,13 +630,49 @@ async fn a_view_is_reported_but_never_touched() {
     );
     assert_eq!(introspected.views.len(), 1);
     assert_eq!(introspected.views[0].name, "user_ids");
+    assert!(!introspected.views[0].materialised);
     assert!(
         introspected.views[0].definition.contains("users"),
         "got {:?}",
         introspected.views[0].definition
     );
 
-    let desired = schema(
+    // PostgreSQL qualifies every column, which must not look like a change.
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+    assert!(db.push_schema(&introspected).await.unwrap().is_empty());
+
+    // A changed definition is replaced, not dropped and created.
+    let mut changed = desired.clone();
+    changed.views[0].definition = "SELECT id FROM users WHERE id > 0".into();
+    let replaced = db.push_schema(&changed).await.unwrap();
+    assert_eq!(
+        replaced.changes,
+        [Change::ReplaceView(changed.views[0].clone())]
+    );
+    assert_eq!(replaced.changes[0].safety(), Safety::Risky);
+    assert_eq!(
+        replaced.statements,
+        [r#"CREATE OR REPLACE VIEW "user_ids" AS SELECT id FROM users WHERE id > 0"#]
+    );
+    assert!(db.push_schema(&changed).await.unwrap().is_empty());
+
+    // Dropping the table means dropping the view first.
+    let dropped = db.push_schema_destructive(&Schema::new()).await.unwrap();
+    assert_eq!(
+        dropped.statements,
+        [r#"DROP VIEW "user_ids""#, r#"DROP TABLE "users""#]
+    );
+    assert!(db.push_schema(&Schema::new()).await.unwrap().is_empty());
+}
+
+/// A materialised view is its own object: it is created, refreshed when its definition
+/// changes, and dropped with `DROP MATERIALIZED VIEW`.
+#[tokio::test]
+async fn materialised_views_converge() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let mut desired = schema(
         vec![table(
             "users",
             vec![{
@@ -621,14 +683,406 @@ async fn a_view_is_reported_but_never_touched() {
         )],
         Vec::new(),
     );
-    let pushed = db.push_schema(&desired).await.unwrap();
-    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+    let mut view = View::new("user_ids", "SELECT id FROM users");
+    view.materialised = true;
+    desired.add_view(view);
+
+    let first = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "users" ("id" BIGINT PRIMARY KEY)"#,
+            r#"CREATE MATERIALIZED VIEW "user_ids" AS SELECT id FROM users"#,
+        ]
+    );
+    assert!(db.introspect().await.unwrap().views[0].materialised);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+
+    let mut changed = desired.clone();
+    changed.views[0].definition = "SELECT id FROM users WHERE id > 0".into();
+    let replaced = db.push_schema(&changed).await.unwrap();
+    // PostgreSQL cannot `CREATE OR REPLACE` a materialised view, so it is recreated and
+    // refreshed.
+    assert_eq!(
+        replaced.statements,
+        [
+            r#"DROP MATERIALIZED VIEW "user_ids""#,
+            r#"CREATE MATERIALIZED VIEW "user_ids" AS SELECT id FROM users WHERE id > 0"#,
+            r#"REFRESH MATERIALIZED VIEW "user_ids""#,
+        ]
+    );
+    assert!(db.push_schema(&changed).await.unwrap().is_empty());
+
+    let dropped = db.push_schema_destructive(&Schema::new()).await.unwrap();
+    assert_eq!(
+        dropped.statements,
+        [
+            r#"DROP MATERIALIZED VIEW "user_ids""#,
+            r#"DROP TABLE "users""#,
+        ]
+    );
+}
+
+/// An index's access method is part of its definition: a GIN index is created with
+/// `USING gin`, read back as GIN, and replacing it with a b-tree is a drop and a create.
+#[tokio::test]
+async fn index_access_methods_round_trip() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let base = |kind: IndexKind| {
+        let mut events = table(
+            "events",
+            vec![
+                {
+                    let mut id = column("id", TypeDef::Int8);
+                    id.primary_key = true;
+                    id
+                },
+                column("payload", TypeDef::Jsonb),
+            ],
+        );
+        events.indexes.push(Index {
+            name: "events_payload_idx".into(),
+            columns: vec!["payload".into()],
+            unique: false,
+            kind,
+            predicate: None,
+        });
+        schema(vec![events], Vec::new())
+    };
+
+    let gin = base(IndexKind::Gin);
+    let first = db.push_schema(&gin).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "events" ("id" BIGINT PRIMARY KEY, "payload" JSONB NOT NULL)"#,
+            r#"CREATE INDEX "events_payload_idx" ON "events" USING gin ("payload")"#,
+        ]
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(
+        introspected.table("events").unwrap().indexes[0].kind,
+        IndexKind::Gin
+    );
+    assert!(db.push_schema(&gin).await.unwrap().is_empty());
+
+    // A changed access method is a drop-then-create, because both statements use the name.
+    // Dropping an index is a destructive change, so it needs the explicit form.
+    let btree = base(IndexKind::Btree);
+    let changed = db.push_schema_destructive(&btree).await.unwrap();
+    assert_eq!(
+        changed.statements,
+        [
+            r#"DROP INDEX "events_payload_idx""#,
+            r#"CREATE INDEX "events_payload_idx" ON "events" ("payload")"#,
+        ]
+    );
+    assert!(db.push_schema(&btree).await.unwrap().is_empty());
+}
+
+/// A standalone sequence is created, altered in place and dropped after the tables that use
+/// it. The sequence behind an identity column is not a standalone one and is never reported.
+#[tokio::test]
+async fn sequences_are_created_altered_and_dropped() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let mut desired = schema(
+        vec![table(
+            "orders",
+            vec![{
+                let mut id = column("id", TypeDef::Int8);
+                id.primary_key = true;
+                id.auto_increment = true;
+                id
+            }],
+        )],
+        Vec::new(),
+    );
+    let mut numbers = Sequence::new("order_number_seq");
+    numbers.start = 1000;
+    desired.add_sequence(numbers);
+
+    let first = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE SEQUENCE "order_number_seq" AS bigint INCREMENT BY 1 START WITH 1000 CACHE 1 NO CYCLE"#,
+            r#"CREATE TABLE "orders" ("id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY)"#,
+        ]
+    );
+
+    // The identity column's own sequence is not reported as a standalone one.
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(introspected.sequences.len(), 1);
+    assert_eq!(introspected.sequences[0].name, "order_number_seq");
+    assert_eq!(introspected.sequences[0].start, 1000);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+
+    // `ALTER SEQUENCE` describes the whole desired sequence.
+    let mut changed = desired.clone();
+    changed.sequences[0].start = 2000;
+    changed.sequences[0].increment = 2;
+    changed.sequences[0].cycle = true;
+    let altered = db.push_schema(&changed).await.unwrap();
+    assert_eq!(
+        altered.statements,
+        [
+            r#"ALTER SEQUENCE "order_number_seq" AS bigint INCREMENT BY 2 NO MINVALUE NO MAXVALUE START WITH 2000 CACHE 1 CYCLE"#
+        ]
+    );
+    assert_eq!(altered.changes[0].safety(), Safety::Risky);
+    assert!(db.push_schema(&changed).await.unwrap().is_empty());
+
+    // A table goes before the sequence it might default to.
+    let dropped = db.push_schema_destructive(&Schema::new()).await.unwrap();
+    assert_eq!(
+        dropped.statements,
+        [
+            r#"DROP TABLE "orders""#,
+            r#"DROP SEQUENCE "order_number_seq""#
+        ]
+    );
+    assert!(db.push_schema(&Schema::new()).await.unwrap().is_empty());
+}
+
+/// A hand-written policy survives a `push` that does not declare it, and RLS is never turned
+/// off by one. Introspection records both so `besu pull` can write them down.
+#[tokio::test]
+async fn policies_are_recorded_and_never_dropped() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    db.execute(sql!(
+        "CREATE TABLE invoices (\
+             id BIGINT PRIMARY KEY, \
+             owner_id UUID NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("ALTER TABLE invoices ENABLE ROW LEVEL SECURITY"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE POLICY own_invoices ON invoices \
+         USING (owner_id = current_setting('app.user_id')::uuid)"
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    let invoices = introspected.table("invoices").unwrap();
+    assert!(invoices.rls);
+    assert_eq!(introspected.policies.len(), 1);
+    let policy = &introspected.policies[0];
+    assert_eq!(policy.table, "invoices");
+    assert_eq!(policy.name, "own_invoices");
+    assert_eq!(policy.command, besu::schema::PolicyCommand::All);
+    assert!(policy.roles.is_empty(), "PUBLIC is an empty role list");
     assert!(
-        !pushed
-            .statements
-            .iter()
-            .any(|sql| sql.to_uppercase().contains("VIEW")),
+        policy
+            .using
+            .as_deref()
+            .is_some_and(|using| using.contains("owner_id")),
         "got {:?}",
-        pushed.statements
+        policy.using
+    );
+
+    // Pushing exactly what introspection saw is a no-op, policies and all.
+    assert!(db.push_schema(&introspected).await.unwrap().is_empty());
+
+    // A declared schema that does not mention the policy does not drop it, and one that
+    // does not enable RLS does not disable it.
+    let mut declared = schema(
+        vec![table(
+            "invoices",
+            vec![
+                {
+                    let mut id = column("id", TypeDef::Int8);
+                    id.primary_key = true;
+                    id
+                },
+                column("owner_id", TypeDef::Uuid),
+            ],
+        )],
+        Vec::new(),
+    );
+    let pushed = db.push_schema(&declared).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+    assert_eq!(db.introspect().await.unwrap().policies.len(), 1);
+
+    // Enabling RLS from the declaration is a statement, not part of `CREATE TABLE`.
+    declared.tables[0].rls = true;
+    let enabled = db.push_schema(&declared).await.unwrap();
+    assert!(enabled.is_empty(), "RLS is already on");
+
+    db.execute(sql!("DROP POLICY own_invoices ON invoices"))
+        .await
+        .unwrap();
+    db.execute(sql!("ALTER TABLE invoices DISABLE ROW LEVEL SECURITY"))
+        .await
+        .unwrap();
+    let enabled = db.push_schema(&declared).await.unwrap();
+    assert_eq!(
+        enabled.statements,
+        [r#"ALTER TABLE "invoices" ENABLE ROW LEVEL SECURITY"#]
+    );
+    assert!(db.push_schema(&declared).await.unwrap().is_empty());
+}
+
+/// `#[besu(rls)]` turns row-level security on when the table is created, and a later push
+/// neither turns it on again nor turns it off.
+#[tokio::test]
+async fn declaring_rls_enables_it_on_creation() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let first = db.push([secured::secrets.def()]).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "secrets" ("id" BIGINT PRIMARY KEY)"#,
+            r#"ALTER TABLE "secrets" ENABLE ROW LEVEL SECURITY"#,
+        ]
+    );
+    assert!(db.introspect().await.unwrap().table("secrets").unwrap().rls);
+    assert!(db.push([secured::secrets.def()]).await.unwrap().is_empty());
+}
+
+mod secured {
+    #![allow(unused_imports)]
+    use besu::Table;
+
+    /// A table whose reader is always restricted by a policy written in a migration.
+    #[derive(Table, Debug, Clone, PartialEq)]
+    #[besu(table = "secrets", rls)]
+    #[allow(dead_code)]
+    pub struct Secret {
+        #[besu(primary_key)]
+        pub id: i64,
+    }
+}
+
+mod generated {
+    #![allow(unused_imports)]
+    use besu::Table;
+
+    /// A table whose `handle` column the database computes from `name`.
+    #[derive(Table, Debug, Clone, PartialEq)]
+    #[besu(table = "people")]
+    #[allow(dead_code)]
+    pub struct Person {
+        #[besu(primary_key)]
+        pub id: i64,
+        pub name: String,
+        #[besu(generated = "lower(name)")]
+        pub handle: String,
+    }
+}
+
+mod generated_more {
+    #![allow(unused_imports)]
+    use besu::Table;
+
+    /// The same table with one more generated column, to exercise `ADD COLUMN`.
+    #[derive(Table, Debug, Clone, PartialEq)]
+    #[besu(table = "people")]
+    #[allow(dead_code)]
+    pub struct Person {
+        #[besu(primary_key)]
+        pub id: i64,
+        pub name: String,
+        #[besu(generated = "lower(name)")]
+        pub handle: String,
+        #[besu(generated = "upper(name)")]
+        pub shout: String,
+    }
+}
+
+/// A generated column is declared by the derive, rendered inside `CREATE TABLE`, read back
+/// by introspection and never written by an insert.
+#[tokio::test]
+async fn generated_columns_round_trip() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let first = db.push([generated::people.def()]).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "people" ("id" BIGINT PRIMARY KEY, "name" TEXT NOT NULL, "handle" TEXT GENERATED ALWAYS AS (lower(name)) STORED NOT NULL)"#
+        ]
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(
+        introspected
+            .table("people")
+            .unwrap()
+            .column("handle")
+            .unwrap()
+            .generated,
+        Some(Generated {
+            expression: "lower(name)".into(),
+            stored: true,
+        })
+    );
+    assert!(db.push([generated::people.def()]).await.unwrap().is_empty());
+
+    // The generated column is not part of the insert struct, and the database fills it in.
+    let insert = generated::people.insert(1, "Oscar");
+    assert_eq!(
+        <generated::PersonInsert as Insertable>::COLUMNS,
+        ["id", "name"],
+        "a generated column must never be written by an insert"
+    );
+    let _ = insert;
+
+    // A whole-row update skips it for the same reason.
+    let person = generated::Person {
+        id: 1,
+        name: "Oscar".into(),
+        handle: "oscar".into(),
+    };
+    let update = db
+        .update(generated::people)
+        .set_model(&person)
+        .filter(generated::people.id.eq(1))
+        .to_sql()
+        .unwrap();
+    assert!(
+        !update.sql().contains("handle"),
+        "set_model must skip a generated column: {}",
+        update.sql()
+    );
+    assert!(update.sql().contains("\"name\""), "{}", update.sql());
+
+    db.execute(sql!("INSERT INTO people (id, name) VALUES (1, 'Oscar')"))
+        .await
+        .unwrap();
+    let rows: Vec<String> = db
+        .execute(sql!("SELECT handle FROM people"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, ["oscar".to_string()]);
+
+    // Adding another generated column is one `ADD COLUMN`.
+    let added = db.push([generated_more::people.def()]).await.unwrap();
+    assert_eq!(
+        added.statements,
+        [
+            r#"ALTER TABLE "people" ADD COLUMN "shout" TEXT GENERATED ALWAYS AS (upper(name)) STORED NOT NULL"#
+        ]
+    );
+    assert_eq!(added.changes[0].safety(), Safety::Safe);
+    assert!(
+        db.push([generated_more::people.def()])
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
