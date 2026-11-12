@@ -7,7 +7,7 @@
 //! This brings in the query builders, the expression helpers, the derive macro and the
 //! traits that make method syntax work.
 
-pub use crate::types::{Column, NonNull, Nullability, Nullable, SqlType};
+pub use crate::types::{Column, NonNull, Nullability, Nullable, SqlType, TypeWitness};
 pub use besu_core::{TypeDef, Value};
 
 #[cfg(feature = "derive")]
@@ -33,13 +33,13 @@ pub use crate::expr::{
     log, log10, lower, lpad, lt, lte, ltrim, matches, max, md5, min, ne, new_row, not, not_between,
     not_exists, not_ilike, not_in, not_like, not_regex_match, not_regex_match_ci, now, nullif,
     octet_length, or, power, rank, raw, regex_match, regex_match_ci, regexp_replace, regexp_substr,
-    repeat, replace, reverse, right, round, round_to, row_number, rpad, rtrim, sha256, sign,
-    split_part, sqrt, stddev, stddev_pop, string_agg, string_to_array, strpos, substr, substring,
-    sum, to_base64, translate, trim, trunc, unix_timestamp, upper, var_pop, variance,
+    repeat, replace, reverse, right, round, round_to, row_number, rpad, rtrim, scalar, sha256,
+    sign, split_part, sqrt, stddev, stddev_pop, string_agg, string_to_array, strpos, substr,
+    substring, sum, to_base64, translate, trim, trunc, unix_timestamp, upper, var_pop, variance,
 };
 pub use crate::macros::Fragment;
 pub use crate::query::{
-    Cte, Delete, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update,
+    Cte, Delete, Derived, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update, derived,
 };
 pub use crate::relation::{HasMany, WithRelation, has_many};
 pub use crate::selection::Selection;

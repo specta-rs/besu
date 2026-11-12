@@ -10,7 +10,7 @@ use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
 use crate::expr::{Expr, IntoCondition, IntoOrder};
 use crate::query::{Cte, JoinClause, JoinKind, SelectQuery, SetOp, SetQuery, set::SetParts};
 use crate::selection::Selection;
-use crate::table::Table;
+use crate::table::{Table, TableRef};
 
 /// A `SELECT` under construction.
 ///
@@ -23,10 +23,10 @@ pub struct Select<'a, E: Executor, M, R> {
 }
 
 impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
-    pub(crate) fn new(exec: E, table: &'static besu_core::TableDef) -> Self {
+    pub(crate) fn new(exec: E, source: crate::query::From) -> Self {
         Self {
             exec,
-            query: SelectQuery::new(table),
+            query: SelectQuery::from_source(source),
             phantom: PhantomData,
         }
     }
@@ -220,7 +220,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// select from, which the database will reject as an unknown column. The reverse check —
     /// that the enclosing query really does contain `users` — cannot be made here, because
     /// the enclosing query's type is not in scope; see [`IntoSubquery`](crate::IntoSubquery).
-    pub fn correlate<T: Table>(self, _table: T) -> Select<'a, E, (M, T), R> {
+    pub fn correlate<T: TableRef>(self, _table: T) -> Select<'a, E, (M, T::Marker), R> {
         Select {
             exec: self.exec,
             query: self.query,
@@ -364,14 +364,14 @@ impl<'a, E: Executor, T: Table> Select<'a, E, (T,), T::Model> {
 
 impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// An `INNER JOIN`. Rows must match on both sides.
-    pub fn inner_join<T: Table>(
+    pub fn inner_join<T: TableRef>(
         mut self,
-        _table: T,
-        on: Expr<(M, T), Bool>,
-    ) -> Select<'a, E, (M, T), (R, T::Model)> {
+        table: T,
+        on: Expr<(M, T::Marker), Bool>,
+    ) -> Select<'a, E, (M, T::Marker), (R, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Inner,
-            source: crate::query::From::Table(T::DEF),
+            source: table.into_source(),
             on: Some(on.into_kind()),
         });
         Select {
@@ -382,14 +382,14 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 
     /// A `LEFT JOIN`. The joined row becomes `Option<T>`, `None` when nothing matched.
-    pub fn left_join<T: Table>(
+    pub fn left_join<T: TableRef>(
         mut self,
-        _table: T,
-        on: Expr<(M, Option<T>), Bool>,
-    ) -> Select<'a, E, (M, Option<T>), (R, Option<T::Model>)> {
+        table: T,
+        on: Expr<(M, Option<T::Marker>), Bool>,
+    ) -> Select<'a, E, (M, Option<T::Marker>), (R, Option<T::Model>)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Left,
-            source: crate::query::From::Table(T::DEF),
+            source: table.into_source(),
             on: Some(on.into_kind()),
         });
         Select {
@@ -400,14 +400,14 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 
     /// A `RIGHT JOIN`.
-    pub fn right_join<T: Table>(
+    pub fn right_join<T: TableRef>(
         mut self,
-        _table: T,
-        on: Expr<(M, T), Bool>,
-    ) -> Select<'a, E, (M, T), (Option<R>, T::Model)> {
+        table: T,
+        on: Expr<(M, T::Marker), Bool>,
+    ) -> Select<'a, E, (M, T::Marker), (Option<R>, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Right,
-            source: crate::query::From::Table(T::DEF),
+            source: table.into_source(),
             on: Some(on.into_kind()),
         });
         Select {
@@ -419,14 +419,14 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
 
     /// A `FULL OUTER JOIN`. Not every dialect supports it; the query fails at build time if
     /// yours does not.
-    pub fn full_join<T: Table>(
+    pub fn full_join<T: TableRef>(
         mut self,
-        _table: T,
-        on: Expr<(M, Option<T>), Bool>,
-    ) -> Select<'a, E, (M, Option<T>), (Option<R>, Option<T::Model>)> {
+        table: T,
+        on: Expr<(M, Option<T::Marker>), Bool>,
+    ) -> Select<'a, E, (M, Option<T::Marker>), (Option<R>, Option<T::Model>)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Full,
-            source: crate::query::From::Table(T::DEF),
+            source: table.into_source(),
             on: Some(on.into_kind()),
         });
         Select {
@@ -437,10 +437,13 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 
     /// A `CROSS JOIN`, which pairs every row with every row.
-    pub fn cross_join<T: Table>(mut self, _table: T) -> Select<'a, E, (M, T), (R, T::Model)> {
+    pub fn cross_join<T: TableRef>(
+        mut self,
+        table: T,
+    ) -> Select<'a, E, (M, T::Marker), (R, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Cross,
-            source: crate::query::From::Table(T::DEF),
+            source: table.into_source(),
             on: None,
         });
         Select {

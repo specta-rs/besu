@@ -142,14 +142,14 @@ pub use macros::Fragment;
 #[cfg(feature = "migrate")]
 pub use migrate::{PushResult, SchemaDriver, SchemaError};
 pub use query::{
-    Cte, Delete, DeleteReturning, Insert, InsertReturning, JoinKind, OnConflict, Select, SetOp,
-    SetQuery, Update, UpdateReturning,
+    Cte, Delete, DeleteReturning, Derived, Insert, InsertReturning, JoinKind, OnConflict, Select,
+    SetOp, SetQuery, Update, UpdateReturning, derived,
 };
 pub use relation::{HasMany, WithRelation, has_many};
 pub use selection::Selection;
 pub use stream::Rows;
-pub use table::{Insertable, Set, Table};
-pub use types::{Column, NonNull, Nullability, Nullable, SqlType};
+pub use table::{Insertable, Set, Table, TableRef};
+pub use types::{Column, NonNull, Nullability, Nullable, SqlType, TypeWitness};
 
 /// Derive a [`Table`] from a struct.
 #[cfg(feature = "derive")]

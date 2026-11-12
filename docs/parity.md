@@ -44,9 +44,9 @@ not implemented. **N/A** — no meaning in a Rust library.
 | Aliases | **No** | A self-join needs one, and is the clearest gap against Drizzle. Use `sql!` for now — [#77](https://github.com/specta-rs/besu/issues/77) |
 | `sql` operator | **Yes** | `sql!`, with compile-time arity checking |
 | SQL comments | **Yes** | `.comment("..")` on every builder, visible in `to_sql`, `inspect` and the query log |
-| Query utils | **Partial** | `to_sql`, `inspect`, `stream`. No `$dynamic`, `$count`, or subquery as a table — [#79](https://github.com/specta-rs/besu/issues/79) |
+| Query utils | **Partial** | `to_sql`, `inspect`, `stream`. No `$dynamic` or `$count` |
 | Set operations | **Yes** | `union`, `union_all`, `intersect`, `intersect_all`, `except`, `except_all`, chainable, with the compound's own ordering and paging |
-| Subqueries | **Partial** | `EXISTS`, `NOT EXISTS` and `IN (SELECT …)`, correlated with `correlate(..)`. No derived table in `FROM`, no scalar subquery in a projection, and a set operation cannot be used as a subquery — [#79](https://github.com/specta-rs/besu/issues/79) |
+| Subqueries | **Yes** | `EXISTS`, `NOT EXISTS`, `IN (SELECT …)` and scalar subqueries, correlated with `correlate(..)`, plus derived tables in `FROM`. A set operation cannot be used as a subquery yet |
 | CTEs | **Partial** | `Select::cte` / `with_cte`, including `WITH RECURSIVE`; a handle exists for a whole-row select over one table |
 | Transactions | **Yes** | `begin`/`commit`/`rollback`, `transaction()`, savepoints |
 | Batch API | **Partial** | `db.batch((..))` runs up to eight writes in one transaction with a typed tuple of outputs. Selects are not batched yet |

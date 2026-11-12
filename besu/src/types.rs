@@ -121,6 +121,21 @@ impl<T, S: SqlType, N: Nullability> PartialEq for Column<T, S, N> {
 
 impl<T, S: SqlType, N: Nullability> Eq for Column<T, S, N> {}
 
+/// A value that names a [`SqlType`], so the compiler can infer it from an argument.
+///
+/// A subquery's row type is its Rust type, which does not determine its SQL type — `String`
+/// is both `TEXT` and `DECIMAL`, and `i64` is both `INT8` and a `DECIMAL(39, 0)`. Helpers
+/// that need the SQL type accept a witness instead of making the caller write a turbofish:
+/// either the marker itself (`scalar(query, Int8)`) or a column of the type it should have
+/// (`scalar(query, users.id)`).
+///
+/// Nothing is read from the witness; it exists only to fix a type parameter.
+pub trait TypeWitness<S: SqlType> {}
+
+impl<S: SqlType> TypeWitness<S> for S {}
+
+impl<T, S: SqlType, N: Nullability> TypeWitness<S> for Column<T, S, N> {}
+
 macro_rules! sql_types {
     ($($(#[$attr:meta])* $name:ident = $def:expr => $rust:ty),* $(,)?) => {
         $(

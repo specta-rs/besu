@@ -17,8 +17,8 @@ use besu_core::{Dialect, Executor, Sql, TypeDef, Value};
 
 use crate::types::{
     Array, Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, I128, Int1, Int2, Int4, Int8,
-    Json, Jsonb, Nullability, SqlType, Text, Time, Timestamp, TimestampTz, U128, UInt1, UInt2,
-    UInt4, UInt8, Uuid, VarChar,
+    Json, Jsonb, Nullability, SqlType, Text, Time, Timestamp, TimestampTz, TypeWitness, U128,
+    UInt1, UInt2, UInt4, UInt8, Uuid, VarChar,
 };
 
 use crate::condition::Contains;
@@ -251,6 +251,15 @@ pub enum ExprKind {
         query: Box<Subquery>,
         /// `true` for `NOT IN`.
         negated: bool,
+    },
+    /// `(SELECT ...)`, a subquery that produces a single value.
+    ///
+    /// The parentheses are part of the node rather than of the caller because a scalar
+    /// subquery is only valid where a value is: in a projection, in a comparison and as an
+    /// argument to a function.
+    ScalarSubquery {
+        /// The subquery, which must project exactly one column.
+        query: Box<Subquery>,
     },
 }
 
@@ -1259,6 +1268,20 @@ impl ExprKind {
                 query.query.render_into(out);
                 out.push_raw("))");
             }
+            Self::ScalarSubquery { query } => {
+                let columns = query.query.projection_len();
+                if columns != 1 {
+                    out.set_error(besu_core::Error::invalid_query(alloc::format!(
+                        "a scalar subquery must select exactly one column, but this one selects \
+                         {columns}"
+                    )));
+                }
+                out.push_raw("(");
+                // Rendered into the same statement, so its parameters continue the outer
+                // statement's numbering.
+                query.query.render_into(out);
+                out.push_raw(")");
+            }
         }
     }
 
@@ -1367,6 +1390,7 @@ impl ExprKind {
             | Self::Raw(_)
             | Self::Star
             | Self::Exists { .. }
+            | Self::ScalarSubquery { .. }
             | Self::UnprefixedColumn { .. }
             | Self::UpsertRef { .. } => {}
         }
@@ -1434,7 +1458,8 @@ impl ExprKind {
             | Self::Value(_)
             | Self::Star
             | Self::Raw(_)
-            | Self::Exists { .. } => false,
+            | Self::Exists { .. }
+            | Self::ScalarSubquery { .. } => false,
         }
     }
 
@@ -1535,7 +1560,8 @@ impl ExprKind {
             | Self::Value(_)
             | Self::Star
             | Self::Raw(_)
-            | Self::Exists { .. } => {}
+            | Self::Exists { .. }
+            | Self::ScalarSubquery { .. } => {}
         }
     }
 }
@@ -3165,6 +3191,68 @@ pub fn not_exists<RowSet, Q: IntoSubquery>(query: Q) -> Expr<RowSet, Bool> {
     Expr::from_kind(ExprKind::Exists {
         query: Box::new(query.into_subquery()),
         negated: true,
+    })
+}
+
+/// `(SELECT ...)`: a subquery that produces a single value, usable wherever an expression is.
+///
+/// ```ignore
+/// let rows: Vec<(String, i64)> = db
+///     .select(users)
+///     .pick((
+///         users.name,
+///         scalar(
+///             db.select(posts)
+///                 .correlate(users)
+///                 .filter(posts.author_id.eq(users.id))
+///                 .pick(count_all()),
+///             Int8,
+///         ),
+///     ))
+///     .all()
+///     .await?;
+/// ```
+///
+/// ```sql
+/// SELECT "users"."name", (
+///     SELECT COUNT(*) FROM "posts" WHERE ("posts"."author_id" = "users"."id")
+/// ) FROM "users"
+/// ```
+///
+/// # Why the type comes from the caller
+///
+/// [`pick`](crate::Select::pick) turns a selection into the Rust type it decodes, and that
+/// loses the SQL type: `i64` is [`Int8`] as often as it is a `DECIMAL(39, 0)`, and `String`
+/// is both [`Text`] and a `DECIMAL`. The `witness` argument supplies the missing half, and
+/// it is either the marker itself or any column of the intended type:
+///
+/// ```ignore
+/// scalar(q, Int8)          // COUNT(*)
+/// scalar(q, users.id)      // the same type as `users.id`
+/// ```
+///
+/// `(Q::Row, S::Rust): SameType` then checks that the subquery really decodes as the Rust
+/// type the witness implies, which is the same check
+/// [`in_query`](crate::Column::in_query) makes. A projection of more than one column is
+/// rejected while the statement is built.
+///
+/// The subquery is rendered into the enclosing statement, so its parameters continue the
+/// outer statement's numbering. It may be correlated with [`correlate`](crate::Select::correlate)
+/// exactly like an `EXISTS` subquery.
+///
+/// A scalar subquery yields `NULL` when it returns no row, and this expression decodes into
+/// `S::Rust` rather than `Option<S::Rust>`. If no row is possible, guard the value with
+/// [`coalesce`] or make the subquery aggregate over an empty set (an aggregate always
+/// returns a row).
+pub fn scalar<RowSet, S: SqlType, Q, W>(query: Q, witness: W) -> Expr<RowSet, S>
+where
+    Q: IntoSubquery,
+    W: TypeWitness<S>,
+    (Q::Row, S::Rust): SameType,
+{
+    let _ = witness;
+    Expr::from_kind(ExprKind::ScalarSubquery {
+        query: Box::new(query.into_subquery()),
     })
 }
 

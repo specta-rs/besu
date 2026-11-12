@@ -2,6 +2,7 @@
 
 pub(crate) mod cte;
 pub(crate) mod delete;
+pub(crate) mod derived;
 pub(crate) mod insert;
 pub(crate) mod select;
 pub(crate) mod set;
@@ -9,6 +10,7 @@ pub(crate) mod update;
 
 pub use cte::Cte;
 pub use delete::{Delete, DeleteReturning};
+pub use derived::{Derived, derived};
 pub use insert::{Insert, InsertReturning, OnConflict};
 pub use select::Select;
 pub use set::{SetOp, SetQuery};
@@ -22,10 +24,11 @@ use crate::expr::{ExprKind, NullsOrder, Order, OrderClause};
 
 /// Where a `SELECT` reads its rows from.
 ///
-/// A statement's source is either a table in the database or a common table expression
-/// defined by the same statement. They render differently in three places — the name, the
-/// prefix, and the default projection — so the distinction has to be explicit rather than a
-/// bare `&'static TableDef`.
+/// A statement's source is a table in the database, a common table expression defined by the
+/// same statement, or a derived table — a subquery given a name and read as if it were one.
+/// They render differently in three places — the name, the prefix, and the default
+/// projection — so the distinction has to be explicit rather than a bare
+/// `&'static TableDef`.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum From {
@@ -33,6 +36,8 @@ pub enum From {
     Table(&'static TableDef),
     /// A common table expression, which is neither.
     Cte(CteSource),
+    /// A subquery in `FROM`, which is written out in place and given an alias.
+    Derived(DerivedSource),
 }
 
 /// A common table expression used as a `SELECT`'s source.
@@ -45,33 +50,110 @@ pub struct CteSource {
     pub columns: &'static [ColumnDef],
 }
 
+/// A derived table used as a `SELECT`'s source.
+///
+/// The name is an alias in the statement rather than a table in the database, so it is never
+/// schema-qualified and never given the tenant prefix. The columns are the subquery's
+/// projection: a plain column keeps its name, while an expression has none of its own until
+/// dialects agree on one, which they do not — `COUNT(*)` is called `count` on PostgreSQL and
+/// `count(*)` on the other two. Those columns are recorded as `None` and can only be reached
+/// by name through [`Derived::column_named`](crate::Derived::column_named).
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedSource {
+    /// The alias written after the subquery.
+    pub alias: &'static str,
+    /// The column names the subquery produces, in order.
+    pub columns: Vec<Option<&'static str>>,
+    /// The subquery itself.
+    pub body: Box<SelectQuery>,
+}
+
 impl From {
-    /// The columns the source produces, in order.
-    pub(crate) fn columns(&self) -> &'static [ColumnDef] {
+    /// The number of columns the source produces.
+    pub(crate) fn column_count(&self) -> usize {
         match self {
-            Self::Table(def) => def.columns,
-            Self::Cte(source) => source.columns,
+            Self::Table(def) => def.columns.len(),
+            Self::Cte(source) => source.columns.len(),
+            Self::Derived(source) => source.columns.len(),
+        }
+    }
+
+    /// The columns' names, where a name is known.
+    pub(crate) fn column_names(&self) -> Vec<Option<&'static str>> {
+        match self {
+            Self::Table(def) => def.columns.iter().map(|column| Some(column.name)).collect(),
+            Self::Cte(source) => source
+                .columns
+                .iter()
+                .map(|column| Some(column.name))
+                .collect(),
+            Self::Derived(source) => source.columns.clone(),
+        }
+    }
+
+    /// Write the default projection — every column of the source — into `out`.
+    ///
+    /// A derived table whose projection includes an expression column has no name to write,
+    /// so the statement records an error rather than referencing a column the database does
+    /// not have. The caller must `pick` explicitly in that case.
+    pub(crate) fn render_default_projection<D: Dialect>(&self, out: &mut Sql<D>, first: &mut bool) {
+        match self {
+            Self::Table(def) => {
+                for column in def.columns {
+                    push_comma(out, first);
+                    out.push_qualified(def.name, column.name);
+                }
+            }
+            Self::Cte(source) => {
+                for column in source.columns {
+                    push_comma(out, first);
+                    out.push_ident(source.name);
+                    out.push_raw(".");
+                    out.push_ident(column.name);
+                }
+            }
+            Self::Derived(source) => {
+                for (index, column) in source.columns.iter().enumerate() {
+                    push_comma(out, first);
+                    let Some(name) = column else {
+                        out.set_error(besu_core::Error::invalid_query(alloc::format!(
+                            "the derived table `{}` projects an expression column, which has \
+                             no single name across dialects; give the outer query an explicit \
+                             `pick` and reach the column with `column_named`",
+                            source.alias
+                        )));
+                        // A well-formed stand-in, so `inspect` and the query log stay readable
+                        // even though the statement is rejected.
+                        out.push_ident(source.alias);
+                        out.push_raw(".");
+                        let placeholder = alloc::format!("column_{}", index + 1);
+                        out.push_ident(&placeholder);
+                        continue;
+                    };
+                    out.push_ident(source.alias);
+                    out.push_raw(".");
+                    out.push_ident(name);
+                }
+            }
         }
     }
 
     /// The quoted name, as it appears after `FROM`.
-    pub(crate) fn render<D: Dialect>(&self, out: &mut Sql<D>) {
+    pub(crate) fn render<D: Dialect>(&mut self, out: &mut Sql<D>) {
         match self {
             Self::Table(def) => out.push_table(def.schema, def.name),
             // A CTE is a name in the statement, not a table in the database, so it is never
             // schema-qualified and never given the tenant prefix.
             Self::Cte(source) => out.push_ident(source.name),
-        }
-    }
-
-    /// The quoted and qualified name of one of the source's columns.
-    pub(crate) fn render_column<D: Dialect>(&self, out: &mut Sql<D>, column: &str) {
-        match self {
-            Self::Table(def) => out.push_qualified(def.name, column),
-            Self::Cte(source) => {
-                out.push_ident(source.name);
-                out.push_raw(".");
-                out.push_ident(column);
+            // The parentheses are part of the source: `FROM (SELECT ...) AS "t"`. The body
+            // is rendered into the same statement, so its parameters continue the outer
+            // statement's numbering and any error it records is the outer statement's.
+            Self::Derived(source) => {
+                out.push_raw("(");
+                source.body.render_into(out);
+                out.push_raw(") AS ");
+                out.push_ident(source.alias);
             }
         }
     }
@@ -85,7 +167,21 @@ impl From {
                 .iter()
                 .map(|column| source.name.len() + column.name.len() + 6)
                 .sum(),
+            Self::Derived(source) => source
+                .columns
+                .iter()
+                .map(|column| source.alias.len() + column.map_or(8, str::len) + 6)
+                .sum(),
         }
+    }
+}
+
+/// Write a `, ` between columns, and nothing before the first.
+fn push_comma<D: Dialect>(out: &mut Sql<D>, first: &mut bool) {
+    if *first {
+        *first = false;
+    } else {
+        out.push_raw(", ");
     }
 }
 
@@ -241,8 +337,9 @@ pub(crate) fn table_list_bytes(table: &TableDef) -> usize {
         .sum()
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SelectQuery {
+pub struct SelectQuery {
     pub(crate) from: From,
     /// `None` means "every column of every table in the query".
     pub(crate) projection: Option<Vec<ExprKind>>,
@@ -358,13 +455,7 @@ impl SelectQuery {
                     } else {
                         &self.joins[index - 1].source
                     };
-                    for column in source.columns() {
-                        if !first {
-                            out.push_raw(", ");
-                        }
-                        first = false;
-                        source.render_column(out, column.name);
-                    }
+                    source.render_default_projection(out, &mut first);
                 }
             }
         }
@@ -469,7 +560,7 @@ impl SelectQuery {
             Some(projection) => projection.len(),
             None => core::iter::once(&self.from)
                 .chain(self.joins.iter().map(|join| &join.source))
-                .map(|source| source.columns().len())
+                .map(From::column_count)
                 .sum(),
         }
     }
