@@ -123,11 +123,9 @@ ones. Afterwards, add the trusted publisher above to each crate that just appear
 **Require trusted publishing**; from then on the token is refused and only `release.yml` can
 publish.
 
-`besu`, `besu-macros`, `besu-sqlite`, `besu-postgres` and `besu-mysql` were published before this
-repository adopted trusted publishing, so they are already configured. `besu-core`,
-`besu-schema`, `besu-any`, `besu-cli` and `besu-studio` are not on crates.io yet: they need the
-token publish above, and the four fields configured, before the tag-driven workflow can release
-them.
+All ten crates were released once by hand at `0.1.0` — the last time a token is used — and every
+one of them now carries the trusted publisher above with **Require trusted publishing** enabled.
+A version tag is therefore the only way to publish from here on.
 
 **Cutting a release:**
 
