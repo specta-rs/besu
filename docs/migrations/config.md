@@ -52,8 +52,8 @@ besu migrate --dir migrations
 An explicit flag beats the variable. In `--help` the variable is shown with its current value,
 so `[env: DATABASE_URL=]` means it is unset.
 
-`besu-studio` is the exception: its `--database` has no environment fallback and must be
-passed on the command line.
+`besu studio` reads it the same way, so a shell that already has `DATABASE_URL` set needs no
+`--database` at all.
 
 ## Defaults
 
@@ -63,7 +63,7 @@ passed on the command line.
 | `besu push` | `--database`, `--schema` | none |
 | `besu generate` | `--database`, `--schema` | `--out migrations`, `--name schema` |
 | `besu migrate` | `--database` | `--dir migrations` |
-| `besu-studio` | `--database` | `--port 4983`, loopback only |
+| `besu studio` | `--database` | `--port 4983`, loopback only |
 
 There is no flag for a snapshot path on `migrate`, no input directory for `generate` (it
 diffs against the database), and no way to point the CLI at a named environment.
@@ -75,7 +75,7 @@ diffs against the database), and no way to point the CLI at a named environment.
 - **The statement splitter.** It is fixed, and its limits are described in
   [custom migrations](custom.md#statements).
 - **Logging.** The CLI installs no subscriber, so there is no `RUST_LOG` behaviour to set;
-  `besu-studio` does install one.
+  `besu studio` does install one.
 - **Migration naming.** `generate` uses `NNNN_name.sql` and does not consult a template.
 
 ## Gotchas

@@ -69,7 +69,7 @@ not implemented. **N/A** — no meaning in a Rust library.
 | `export` | **Partial** | `pull` writes the schema IR; SQL comes from `generate` |
 | `check` | **No** | The differ and the journal verify checksums at run time instead |
 | `up` | **No** | The journal upgrades itself when the runner opens it |
-| `studio` | **Yes** | `besu-studio`, development only |
+| `studio` | **Yes** | `besu studio`, development only |
 | Seeding | **Yes** | `seed(&db).table(users, 1_000)` — deterministic per type, unique where the schema says unique, foreign keys resolved parent-first |
 | Config file | **Partial** | Flags and environment variables; no project file |
 

@@ -309,9 +309,10 @@ statement returns an error.
 
 ## The studio
 
-`besu-studio` is the only interactive consumer of the layers above. It is a separate crate
-and binary rather than a `besu studio` subcommand because it needs axum, a runtime and a
-frontend of its own, and a database browser should not sit in the library's dependency tree.
+`besu studio` is the only interactive consumer of the layers above, and it is a subcommand of
+the CLI: the server is a library (`besu-studio`) that the binary serves, so the web stack stays
+out of `besu` and `besu-core` while shipping as one command. The CLI depends on `besu-studio`;
+nothing in the library depends on the CLI.
 
 It uses only the dynamic APIs. `AnyDatabase::introspect` supplies `GET /api/schema`; the row
 endpoint matches on the backend, asks the driver for each cell as text — the driver is the

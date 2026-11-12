@@ -24,6 +24,14 @@ use besu_any::AnyDatabase;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+/// Serve the studio until the listener stops.
+///
+/// This exists so the binary that runs the studio does not need `axum` as a dependency: the
+/// CLI depends on this crate, and the HTTP stack stays inside it.
+pub async fn serve(listener: tokio::net::TcpListener, db: AnyDatabase) -> std::io::Result<()> {
+    axum::serve(listener, router(db)).await
+}
+
 /// Build the studio's router around a live database.
 ///
 /// The returned router serves:

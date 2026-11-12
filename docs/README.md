@@ -48,7 +48,7 @@ do not, read them in order.
 
 - [Migrations overview](migrations/overview.md)
 - [`besu generate`](migrations/generate.md) · [`besu migrate`](migrations/migrate.md) · [`besu push`](migrations/push.md) · [`besu pull`](migrations/pull.md)
-- [`besu-studio`](migrations/studio.md)
+- [`besu studio`](migrations/studio.md)
 - [Custom migrations](migrations/custom.md)
 - [Configuration](migrations/config.md)
 
