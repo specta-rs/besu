@@ -107,7 +107,7 @@ carries the column's name, type and nullability in the type system.
 | [`besu-sqlite`](besu-sqlite) · [`besu-postgres`](besu-postgres) · [`besu-mysql`](besu-mysql) | Dialects, drivers, DDL and introspection for each database. |
 | [`besu-any`](besu-any) | `AnyDatabase`: one type over all three backends, chosen from a connection string. |
 | [`besu-cli`](cli) | `besu push`, `besu pull`, `besu generate` and `besu migrate`. |
-| [`besu-studio`](besu-studio) | A development-only schema and data browser. |
+| [`besu-studio`](besu-studio) | The library behind `besu studio`, a development-only schema and data browser. |
 
 The layers are deliberately independent. `besu-core` knows nothing about the query API, `besu`
 knows nothing about sqlx, and each driver knows nothing about the others. Use the whole stack, or

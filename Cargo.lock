@@ -219,10 +219,13 @@ dependencies = [
  "besu-postgres",
  "besu-schema",
  "besu-sqlite",
+ "besu-studio",
  "clap",
  "serde_json",
  "sqlx",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -312,7 +315,6 @@ dependencies = [
  "axum",
  "besu",
  "besu-any",
- "clap",
  "serde",
  "serde_json",
  "tempfile",
@@ -320,7 +322,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

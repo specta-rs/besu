@@ -137,7 +137,7 @@ besu migrate --database postgres://user:pass@host/db --dir migrations
 | [`besu migrate`](migrate.md) | Apply pending files, or revert with `--down` |
 | [`besu push`](push.md) | Apply a snapshot directly, with no file |
 | [`besu check`](check.md) | Not supported yet |
-| [`besu-studio`](studio.md) | A development-only browser for schema and rows |
+| [`besu studio`](studio.md) | A development-only browser for schema and rows |
 
 Hand-written files, down migrations and the append-only rule are covered in
 [custom migrations](custom.md). Connection strings and defaults are in

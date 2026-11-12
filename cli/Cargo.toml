@@ -26,8 +26,11 @@ besu-schema = { workspace = true }
 besu-postgres = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 besu-mysql = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 besu-sqlite = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+besu-studio = { workspace = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "postgres", "mysql", "runtime-tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

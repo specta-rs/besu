@@ -11,6 +11,7 @@
 //! besu generate --database postgres://… --schema schema.json --out migrations
 //! besu migrate  --database postgres://… --dir migrations
 //! besu migrate  --database postgres://… --dir migrations --down --to 0
+//! besu studio   --database postgres://…
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -20,6 +21,7 @@ mod generate;
 mod migrate;
 mod pull;
 mod push;
+mod studio;
 
 #[derive(Parser)]
 #[command(name = "besu")]
@@ -39,6 +41,10 @@ enum Command {
     Generate(generate::Args),
     /// Apply migration files, or revert them with `--down`.
     Migrate(migrate::Args),
+    /// Browse the database's schema and rows in a browser.
+    ///
+    /// A development tool: it runs arbitrary SQL and has no authentication.
+    Studio(studio::Args),
 }
 
 #[tokio::main]
@@ -50,5 +56,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Push(args) => push::run(args).await,
         Command::Generate(args) => generate::run(args).await,
         Command::Migrate(args) => migrate::run(args).await,
+        Command::Studio(args) => studio::run(args).await,
     }
 }

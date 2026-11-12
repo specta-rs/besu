@@ -1,12 +1,12 @@
-# `besu-studio`
+# `besu studio`
 
-`besu-studio` is a development-only schema and data browser: one HTML page served beside the
-introspected schema, a paged row view and a one-statement SQL box. It is a separate binary,
-not a subcommand — `besu studio` is not recognised, because the studio needs a web stack and
-a database browser should not sit in the CLI's dependency tree.
+`besu studio` is a development-only schema and data browser: one HTML page served beside the
+introspected schema, a paged row view and a one-statement SQL box. It is a subcommand of the
+CLI, so it ships with `besu` and needs nothing extra installed; the server itself lives in the
+`besu studio` crate, which is a library and has no binary of its own.
 
 ```sh
-Usage: besu-studio [OPTIONS] --database <DATABASE>
+Usage: besu studio [OPTIONS] --database <DATABASE>
 
 Options:
       --database <DATABASE>
@@ -30,18 +30,19 @@ Options:
 ```
 
 ```sh
-besu-studio --database sqlite://app.db
-# besu-studio 0.1.0 listening on http://127.0.0.1:4983
+besu studio --database sqlite://app.db
+# besu studio 0.1.0 listening on http://127.0.0.1:4983
 ```
 
-Unlike the CLI, `--database` does not read `DATABASE_URL`; it is required on the command line.
-`RUST_LOG` is honoured for its own tracing.
+`--database` reads `DATABASE_URL` like every other subcommand, so a shell that already exports
+it needs no flag. `RUST_LOG` is honoured — `besu studio` is the one subcommand that installs a
+tracing subscriber, because a server without its request log is hard to trust.
 
 ## What it serves
 
 | Route | Purpose |
 | --- | --- |
-| `GET /` | The single page, inlined into the binary |
+| `GET /` | The single page, inlined into the `besu` binary |
 | `GET /api/schema` | The introspected `Schema` as JSON |
 | `GET /api/tables/{table}/rows` | A page of rows, `?limit=` and `?offset=` |
 | `POST /api/query` | One SQL statement, body `{ "sql": "..." }` |
