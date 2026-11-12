@@ -39,15 +39,15 @@ not implemented. **N/A** — no meaning in a Rust library.
 | Select | **Yes** | Filter, order, group, having, limit/offset, distinct, row locks, joins |
 | Insert | **Yes** | `value`/`values`, `RETURNING`, `ON CONFLICT`, chunked and bulk |
 | Update / delete | **Yes** | Type-state guard against a `WHERE`-less write |
-| Operators | **Partial** | Comparison, `LIKE`/`ILIKE`, `BETWEEN`, `IN`, null and boolean tests, arithmetic, `COALESCE`, `CASE`, `CAST`, JSON paths, full text. Missing: `IS DISTINCT FROM`, array operators, regex operators, `ANY`/`ALL` over arrays — [#86](https://github.com/specta-rs/besu/issues/86) |
+| Operators | **Partial** | Comparison, `LIKE`/`ILIKE`, `BETWEEN`, `IN`, null-safe `IS DISTINCT FROM`, regex, arithmetic, `COALESCE`/`NULLIF`/`GREATEST`/`LEAST`, `CASE`, `CAST`, JSON paths, full text. Missing: array operators and `ANY`/`ALL` over arrays — [#89](https://github.com/specta-rs/besu/issues/89) |
 | Joins | **Yes** | Inner, left, right, full, cross; outer joins widen the projection to `Option` |
 | Aliases | **No** | A self-join needs one, and is the clearest gap against Drizzle. Use `sql!` for now — [#77](https://github.com/specta-rs/besu/issues/77) |
 | `sql` operator | **Yes** | `sql!`, with compile-time arity checking |
-| SQL comments | **No** | Use `sql!` — [#87](https://github.com/specta-rs/besu/issues/87) |
+| SQL comments | **Yes** | `.comment("..")` on every builder, visible in `to_sql`, `inspect` and the query log |
 | Query utils | **Partial** | `to_sql`, `inspect`, `stream`. No `$dynamic`, `$count`, or subquery as a table — [#79](https://github.com/specta-rs/besu/issues/79) |
 | Set operations | **Yes** | `union`, `union_all`, `intersect`, `intersect_all`, `except`, `except_all`, chainable, with the compound's own ordering and paging |
 | Subqueries | **Partial** | `EXISTS`, `NOT EXISTS` and `IN (SELECT …)`, correlated with `correlate(..)`. No derived table in `FROM`, no scalar subquery in a projection, and a set operation cannot be used as a subquery — [#79](https://github.com/specta-rs/besu/issues/79) |
-| CTEs | **No** | `WITH` and `WITH RECURSIVE` are not expressible — [#78](https://github.com/specta-rs/besu/issues/78) |
+| CTEs | **Partial** | `Select::cte` / `with_cte`, including `WITH RECURSIVE`; a handle exists for a whole-row select over one table |
 | Transactions | **Yes** | `begin`/`commit`/`rollback`, `transaction()`, savepoints |
 | Batch API | **No** | Await each statement, or use one transaction — [#84](https://github.com/specta-rs/besu/issues/84) |
 | Dynamic query building | **Partial** | A query is a value, so it can be stored, passed and composed; there is no `$dynamic` mutation handle |
