@@ -194,7 +194,7 @@ published at [specta.dev/docs/besu](https://specta.dev/docs/besu).
 - [Operators](docs/queries/operators.md), [joins](docs/queries/joins.md) and [the `sql!` operator](docs/queries/sql.md)
 - [Transactions](docs/advanced/transactions.md), [set operations](docs/advanced/set-operations.md) and [subqueries](docs/advanced/subqueries.md)
 - [Migrations](docs/migrations/overview.md)
-- [Drizzle parity](docs/parity.md), [performance](docs/performance.md) and [writing a driver](docs/drivers.md)
+- [Performance](docs/performance.md) and [writing a driver](docs/drivers.md)
 - [Architecture](docs/architecture.md), [comparison](docs/comparison.md) and [roadmap](docs/roadmap.md)
 
 API reference is on [docs.rs](https://docs.rs/besu).

@@ -1,8 +1,7 @@
 # `besu check`
 
 > **Not supported yet.** There is no `check` subcommand. The CLI's own commands are `pull`,
-> `push`, `generate` and `migrate`. See the [roadmap](../roadmap.md) and
-> [Drizzle parity](../parity.md).
+> `push`, `generate` and `migrate`.
 
 Drizzle Kit's `check` compares the migrations folder against the schema and reports what is
 inconsistent. Besu has no command that does that ahead of time. The equivalent checks happen

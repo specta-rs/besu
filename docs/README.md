@@ -66,7 +66,6 @@ do not, read them in order.
 ## Reference
 
 - [Performance](performance.md) — what a query costs, with numbers
-- [Drizzle parity](parity.md) — the full scoreboard against Drizzle
 - [Architecture](architecture.md) — the crate graph and how a query becomes SQL
 - [Writing a driver](drivers.md) — `Dialect`, `Driver`, `SchemaDriver`, `Ddl`, `Decode`
 - [Comparison](comparison.md) — Besu against Diesel, SeaORM, sqlx and Drizzle

@@ -130,7 +130,7 @@ assert_eq!(child.args().len(), 3);
   a relation works whether or not the database enforces it.
 
 > **Not supported yet.** Many-to-many, `belongs_to`, nested relations and per-parent limits.
-> See the [roadmap](../roadmap.md) and [Drizzle parity](../parity.md).
+> See [#97](https://github.com/specta-rs/besu/issues/97).
 
 ## What is checked
 
