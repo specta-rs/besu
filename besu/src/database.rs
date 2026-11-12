@@ -11,7 +11,7 @@ use besu_core::{Decode, Dialect, DialectOf, Driver, DryDriver, ErrorOf, Executor
 
 use crate::macros::Fragment;
 use crate::query::{Delete, Insert, Select, Update};
-use crate::table::Table;
+use crate::table::{Table, TableRef};
 
 /// A database you can run queries against.
 ///
@@ -60,8 +60,18 @@ impl<Dr: Driver> Database<Dr> {
     }
 
     /// Start a `SELECT` over `table`.
-    pub fn select<T: Table>(&self, _table: T) -> Select<'_, &Self, (T,), T::Model> {
-        Select::new(self, T::DEF)
+    ///
+    /// The source is anything implementing [`TableRef`](crate::TableRef): a declared table
+    /// from `#[derive(Table)]`, or a derived table from [`derived`](crate::derived). Pass a
+    /// derived table by reference when its columns are also needed:
+    ///
+    /// ```ignore
+    /// let totals = derived(db.select(posts).pick(posts.author_id), "totals");
+    /// let author = totals.column(posts.author_id);
+    /// db.select(&totals).pick((author.clone(), count_all())).group_by(author)
+    /// ```
+    pub fn select<T: TableRef>(&self, table: T) -> Select<'_, &Self, (T::Marker,), T::Model> {
+        Select::new(self, table.into_source())
     }
 
     /// Start a `SELECT` from a common table expression.
@@ -211,8 +221,11 @@ pub struct Transaction<'a, Dr: TransactionDriver> {
 
 impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
     /// Start a `SELECT` inside the transaction.
-    pub fn select<T: Table>(&mut self, _table: T) -> Select<'_, &mut Self, (T,), T::Model> {
-        Select::new(self, T::DEF)
+    pub fn select<T: TableRef>(
+        &mut self,
+        table: T,
+    ) -> Select<'_, &mut Self, (T::Marker,), T::Model> {
+        Select::new(self, table.into_source())
     }
 
     /// Start a `SELECT` from a common table expression inside the transaction.

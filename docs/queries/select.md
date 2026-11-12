@@ -86,6 +86,38 @@ let names: Vec<String> = db.select(users).pick(users.name).all().await?;
 let pairs: Vec<(i64, String)> = db.select(users).pick((users.id, users.name)).all().await?;
 ```
 
+## Derived table
+
+A `SELECT` can read another `SELECT` as if it were a table, which is how an outer statement
+filters or aggregates a limited or grouped result:
+
+```rust
+let recent = derived(
+    db.select(posts)
+        .filter(posts.title.eq("Hello"))
+        .pick(posts.author_id),
+    "recent",
+);
+let author = recent.column(posts.author_id);
+
+let counts: Vec<(i64, i64)> = db
+    .select(&recent)
+    .pick((author.clone(), count_all()))
+    .group_by(author)
+    .all()
+    .await?;
+```
+
+```sql
+SELECT "recent"."author_id", COUNT(*) FROM (
+    SELECT "posts"."author_id" FROM "posts" WHERE ("posts"."title" = $1)
+) AS "recent" GROUP BY "recent"."author_id"
+```
+
+`select` consumes its source, so pass the handle by reference when its columns are also
+needed. [Subqueries](../advanced/subqueries.md) covers column access, expression columns and
+the alias rules.
+
 ## Aggregate
 
 ```rust
@@ -150,7 +182,8 @@ SQLite has no row locking; the dialect records an error rather than emitting the
 ## Set operations and subqueries
 
 - [Set operations](../advanced/set-operations.md) — `union`, `union_all`, `intersect`, `except`
-- [Subqueries](../advanced/subqueries.md) — `EXISTS`, `IN (SELECT ...)`
+- [Subqueries](../advanced/subqueries.md) — `EXISTS`, `IN (SELECT ...)`, scalar subqueries and
+  derived tables
 
 ## Streaming
 

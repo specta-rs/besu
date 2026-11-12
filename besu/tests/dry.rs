@@ -570,6 +570,185 @@ fn in_query_takes_exactly_one_column() {
     );
 }
 
+/// A scalar subquery is an expression: it renders inside parentheses wherever a value is
+/// allowed, and its parameters continue the outer statement's numbering.
+#[test]
+fn scalar_subqueries_render_in_a_projection_and_a_comparison() {
+    let db = dry::<TestDialect>();
+
+    let sql = db
+        .select(users)
+        .pick((
+            users.name,
+            scalar(
+                db.select(posts)
+                    .correlate(users)
+                    .filter(posts.author_id.eq(users.id))
+                    .pick(count_all()),
+                // The witness is a column of the intended SQL type, so no marker needs
+                // importing.
+                users.id,
+            ),
+        ))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."name", (SELECT COUNT(*) FROM "posts" WHERE ("posts"."author_id" = "users"."id")) FROM "users""#
+    );
+    assert!(sql.args().is_empty());
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gt(18))
+        .filter(
+            users
+                .id
+                .eq(scalar(db.select(posts).pick(posts.author_id), users.id)),
+        )
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) AND ("users"."id" = (SELECT "posts"."author_id" FROM "posts"))"#
+    );
+    assert_eq!(sql.args(), [Value::Int(18)]);
+
+    // The scalar subquery is rendered before the outer `WHERE`, so its parameter takes the
+    // earlier placeholder even though the outer clause is written later in the builder.
+    let sql = db
+        .select(users)
+        .pick(scalar(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id))
+                .filter(posts.title.eq("hello"))
+                .pick(count_all()),
+            users.id,
+        ))
+        .filter(users.age.gt(18))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT (SELECT COUNT(*) FROM "posts" WHERE ("posts"."author_id" = "users"."id") AND ("posts"."title" = $1)) FROM "users" WHERE ("users"."age" > $2)"#
+    );
+    assert_eq!(sql.args(), [Value::Text("hello".into()), Value::Int(18)]);
+}
+
+/// A derived table is a subquery in `FROM`: its body is written out in place, its columns
+/// are addressed through the alias, and its parameters come before the outer ones.
+#[test]
+fn derived_tables_render_in_from() {
+    let db = dry::<TestDialect>();
+
+    let recent = derived(
+        db.select(posts)
+            .filter(posts.title.eq("hello"))
+            .pick(posts.author_id),
+        "recent",
+    );
+    let author = recent.column(posts.author_id);
+
+    // The default projection reads the expression's columns through the alias.
+    let sql = db.select(&recent).to_sql().unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "recent"."author_id" FROM (SELECT "posts"."author_id" FROM "posts" WHERE ("posts"."title" = $1)) AS "recent""#
+    );
+    assert_eq!(sql.args(), [Value::Text("hello".into())]);
+
+    let sql = db
+        .select(&recent)
+        .pick((author.clone(), count_all()))
+        .group_by(author)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "recent"."author_id", COUNT(*) FROM (SELECT "posts"."author_id" FROM "posts" WHERE ("posts"."title" = $1)) AS "recent" GROUP BY "recent"."author_id""#
+    );
+
+    // A derived table is a `TableRef`, so it joins like a declared one.
+    let sql = db
+        .select(users)
+        .inner_join(&recent, recent.column(posts.author_id).eq(users.id))
+        .pick(users.name)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."name" FROM "users" INNER JOIN (SELECT "posts"."author_id" FROM "posts" WHERE ("posts"."title" = $1)) AS "recent" ON ("recent"."author_id" = "users"."id")"#
+    );
+
+    // The body is rendered inside `FROM` before the outer `WHERE`, so its parameter comes
+    // first and the outer one continues the numbering.
+    let author = recent.column(posts.author_id);
+    let sql = db
+        .select(&recent)
+        .pick(author.clone())
+        .filter(author.gt(0_i64))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "recent"."author_id" FROM (SELECT "posts"."author_id" FROM "posts" WHERE ("posts"."title" = $1)) AS "recent" WHERE ("recent"."author_id" > $2)"#
+    );
+    assert_eq!(sql.args(), [Value::Text("hello".into()), Value::Int(0)]);
+
+    // An expression column has no portable name, so it is reached by name with a witness.
+    let named = derived(
+        db.select(posts).pick((posts.author_id, count_all())),
+        "named",
+    );
+    let author = named.column(posts.author_id);
+    let total = named.column_named("count", users.id);
+    let sql = db
+        .select(&named)
+        .pick((author.clone(), total.clone()))
+        .group_by(author)
+        .having(total.gt(1_i64))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "named"."author_id", "named"."count" FROM (SELECT "posts"."author_id", COUNT(*) FROM "posts") AS "named" GROUP BY "named"."author_id" HAVING ("named"."count" > $1)"#
+    );
+
+    // The same statement on a dialect with backtick identifiers and `?` placeholders.
+    let db = dry::<BacktickDialect>();
+    let recent = derived(
+        db.select(posts)
+            .filter(posts.title.eq("hello"))
+            .pick(posts.author_id),
+        "recent",
+    );
+    let author = recent.column(posts.author_id);
+    let sql = db
+        .select(&recent)
+        .pick((author.clone(), count_all()))
+        .group_by(author)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        "SELECT `recent`.`author_id`, COUNT(*) FROM (SELECT `posts`.`author_id` FROM `posts` WHERE (`posts`.`title` = ?)) AS `recent` GROUP BY `recent`.`author_id`"
+    );
+}
+
+/// A derived table whose projection contains an unnamed expression cannot be read with the
+/// default projection, because the three databases give that column three different names.
+#[test]
+fn a_derived_expression_needs_an_explicit_pick() {
+    let db = dry::<TestDialect>();
+    let named = derived(db.select(posts).pick(count_all()), "counted");
+    let sql = db.select(&named).to_sql().unwrap();
+    let error = sql.error().expect("the unnamed column must be rejected");
+    assert!(error.to_string().contains("no single name"), "{error:?}");
+}
+
 #[test]
 fn a_built_statement_can_be_wrapped_in_raw_sql() {
     // `EXPLAIN`, `INSERT ... SELECT` and `CREATE TABLE ... AS` have no builder, but they do

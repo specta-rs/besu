@@ -853,6 +853,72 @@ async fn subqueries() {
         .await
         .unwrap();
     assert_eq!(names(&non_authors), ["Bob", "Carol"]);
+
+    // A scalar subquery in a projection: one value per outer row, correlated with it.
+    let counts: Vec<(String, i64)> = db
+        .select(users)
+        .pick((
+            users.name,
+            scalar(
+                db.select(posts)
+                    .correlate(users)
+                    .filter(posts.author_id.eq(users.id))
+                    .pick(count_all()),
+                users.id,
+            ),
+        ))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        counts,
+        [
+            ("Alice".to_string(), 2),
+            ("Bob".to_string(), 0),
+            ("Carol".to_string(), 0),
+        ]
+    );
+
+    // The same value in a comparison, which is the other place a scalar subquery is valid.
+    let prolific: Vec<User> = db
+        .select(users)
+        .filter(
+            scalar(
+                db.select(posts)
+                    .correlate(users)
+                    .filter(posts.author_id.eq(users.id))
+                    .pick(count_all()),
+                users.id,
+            )
+            .eq(2_i64),
+        )
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&prolific), ["Alice"]);
+
+    // A derived table in `FROM`: the inner query filters and projects, and the outer one
+    // groups and aggregates its rows.
+    let recent = derived(
+        db.select(posts)
+            .filter(posts.title.eq("Hello"))
+            .pick(posts.author_id),
+        "recent",
+    );
+    let author = recent.column(posts.author_id);
+
+    let ids: Vec<i64> = db.select(&recent).all().await.unwrap();
+    assert_eq!(ids, [alice.id]);
+
+    let per_author: Vec<(i64, i64)> = db
+        .select(&recent)
+        .pick((author.clone(), count_all()))
+        .group_by(author)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(per_author, [(alice.id, 1)]);
 }
 
 /// The exact statement PostgreSQL receives for a compound query and for each subquery form.

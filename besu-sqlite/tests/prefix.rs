@@ -43,6 +43,20 @@ async fn every_rendered_table_name_carries_the_prefix() {
     let dry = besu::dry::<SQLite>();
     let sql = dry.select(users).to_sql().unwrap();
     assert!(sql.sql().contains(r#"FROM "users""#), "{}", sql.sql());
+
+    // A derived table's body is a table in the database and takes the prefix; its alias is
+    // a name in the statement and must not.
+    let prefixed = besu::Database::prefixed(Sqlx::memory().await.unwrap(), "tenant_1_");
+    let recent = derived(prefixed.select(users).pick(users.id), "recent");
+    let id = recent.column(users.id);
+    let sql = prefixed.select(&recent).pick(id).to_sql().unwrap();
+    assert!(
+        sql.sql()
+            .contains(r#"FROM (SELECT "tenant_1_users"."id" FROM "tenant_1_users") AS "recent""#),
+        "the derived body must be prefixed and the alias must not: {}",
+        sql.sql()
+    );
+    assert!(!sql.sql().contains("tenant_1_recent"), "{}", sql.sql());
 }
 
 #[tokio::test]
