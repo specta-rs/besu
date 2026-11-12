@@ -80,26 +80,62 @@ A few rules are load-bearing; please do not break them without a discussion in a
 
 ## Releasing
 
-The crates must be published in dependency order, because each one depends on the ones
-before it and `cargo package` verifies against the registry rather than the workspace:
+Publishing uses crates.io trusted publishing: the `release` workflow exchanges its GitHub OIDC
+identity for a short-lived crates.io token, so **no `CARGO_REGISTRY_TOKEN` is stored** in this
+repository or in Actions secrets.
+
+**One-time setup** — a crate owner adds a trusted publisher in the crates.io UI (the crate's
+**Settings → Trusted Publishing**) for every published crate, and enables **Require trusted
+publishing** so a long-lived token cannot be used instead. These values must match
+`.github/workflows/release.yml` exactly, or the token exchange is refused:
+
+| Field | Value |
+| --- | --- |
+| Owner | `specta-rs` |
+| Repository | `besu` |
+| Workflow filename | `release.yml` |
+| Environment | `release` |
+
+The workflow publishes the whole workspace, so each of these crates needs its own trusted
+publisher:
 
 ```
-besu-core -> besu-schema -> besu-macros -> besu -> besu-sqlite / besu-postgres / besu-mysql
+besu-core, besu-schema, besu-macros, besu,
+besu-sqlite, besu-postgres, besu-mysql, besu-any,
+besu-cli, besu-studio
 ```
 
-Run `cargo publish -p <crate> --dry-run` for the first two, then `cargo publish` for each in
-turn. `besu-cli` ships a binary called `besu`, so it is published last. Bump every version
-together — the workspace uses `version.workspace = true`, so one edit to the root
-`Cargo.toml` moves all of them.
+`cargo publish --workspace` works out the order from the dependency graph, so the list does not
+have to be kept sorted by hand. The examples are `publish = false` and are skipped.
 
-Before publishing, check:
+**Cutting a release:**
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --exclude besu-cli
-```
+1. Bump the `version` of every workspace crate and merge to `main`. The tag names the `besu`
+   crate version; the workspace uses `version.workspace = true`, so one edit to the root
+   `Cargo.toml` moves all of them.
+2. Make sure the release is what CI tested:
+
+   ```sh
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets --all-features -- -D warnings
+   cargo test --workspace --all-features
+   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --exclude besu-cli
+   ```
+
+3. Tag the merge commit and push the tag:
+
+   ```sh
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+The `release` workflow verifies that the tag matches `besu`'s version, then checks and tests the
+whole workspace — with PostgreSQL and MySQL service containers, because two of the drivers'
+suites need a live server — publishes every crate in dependency order, and creates the GitHub
+release.
+
+If the token exchange fails, the four fields above do not match the trusted publisher for one
+of the crates, or that crate has not been given one yet.
 
 ## Adding a driver
 
