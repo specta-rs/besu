@@ -145,7 +145,7 @@ against a rendering from that dialect rather than a hand-written string.
   level only; there is no general `$with` for arbitrary queries.
 - **`$dynamic`** — a query is a value and can be stored, passed and composed, but there is no
   mutable dynamic handle with a changed result type.
-- **A subquery as a table** is [`derived`](queries/select.md#derived-table), with typed columns
+- **A subquery as a table** is [`derived`](select.md#derived-table), with typed columns
   reached through the handle. There is no shorthand that infers an alias.
 
 See [Drizzle parity](../parity.md) for the full list.
