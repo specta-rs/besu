@@ -401,3 +401,133 @@ async fn generated_columns_round_trip() {
         .unwrap();
     assert_eq!(totals, [12]);
 }
+
+// ---------------------------------------------------------------------------------------
+// Introspection fidelity
+// ---------------------------------------------------------------------------------------
+
+/// A table whose columns use the native spellings `TEXT`, `INT` and `BIGINT` would flatten,
+/// plus the modifiers `EXTRA` and `COLLATION_NAME` carry.
+#[tokio::test]
+async fn native_type_names_and_modifiers_are_kept() {
+    let db = fresh("besu_test_fidelity").await;
+    db.execute(sql!(
+        "CREATE TABLE fidelity (\
+             id BIGINT PRIMARY KEY, \
+             tiny TINYINT NOT NULL, \
+             medium MEDIUMINT NOT NULL, \
+             yr YEAR NOT NULL, \
+             body LONGTEXT NOT NULL, \
+             blob_data LONGBLOB NOT NULL, \
+             at TIME(6) NOT NULL, \
+             stamp DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), \
+             name VARCHAR(20) COLLATE utf8mb4_bin NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    let table = introspected.table("fidelity").unwrap();
+    assert_eq!(
+        table.column("tiny").unwrap().ty,
+        TypeDef::Custom("tinyint".into())
+    );
+    assert_eq!(
+        table.column("medium").unwrap().ty,
+        TypeDef::Custom("mediumint".into())
+    );
+    assert_eq!(
+        table.column("yr").unwrap().ty,
+        TypeDef::Custom("year".into())
+    );
+    assert_eq!(
+        table.column("body").unwrap().ty,
+        TypeDef::Custom("longtext".into())
+    );
+    assert_eq!(
+        table.column("blob_data").unwrap().ty,
+        TypeDef::Custom("longblob".into())
+    );
+    assert_eq!(table.column("at").unwrap().ty, TypeDef::TimeP(6));
+    assert_eq!(
+        table.column("name").unwrap().ty,
+        TypeDef::Collated(Box::new(TypeDef::VarChar(20)), "utf8mb4_bin".into())
+    );
+    let default = table.column("stamp").unwrap().default.as_deref().unwrap();
+    assert!(
+        default.contains("ON UPDATE CURRENT_TIMESTAMP(6)"),
+        "got {default:?}"
+    );
+
+    // The snapshot replays to the same schema: nothing is altered by pushing it back.
+    let pushed = db.push_schema(&introspected).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+}
+
+/// Replaying the snapshot into an empty database reproduces the declared types.
+#[tokio::test]
+async fn a_snapshot_replays_to_the_same_types() {
+    let source = fresh("besu_test_fidelity_source").await;
+    source
+        .execute(sql!(
+            "CREATE TABLE replay (\
+                 id BIGINT PRIMARY KEY, \
+                 tiny TINYINT NOT NULL, \
+                 body LONGTEXT NOT NULL, \
+                 at TIME(3) NOT NULL, \
+                 name VARCHAR(20) COLLATE utf8mb4_bin NOT NULL)"
+        ))
+        .await
+        .unwrap();
+    let snapshot = source.introspect().await.unwrap();
+
+    let destination = fresh("besu_test_fidelity_destination").await;
+    destination.push_schema(&snapshot).await.unwrap();
+
+    let replayed = destination.introspect().await.unwrap();
+    let replayed = replayed.table("replay").unwrap();
+    assert_eq!(
+        replayed.column("tiny").unwrap().ty,
+        TypeDef::Custom("tinyint".into())
+    );
+    assert_eq!(
+        replayed.column("body").unwrap().ty,
+        TypeDef::Custom("longtext".into())
+    );
+    assert_eq!(replayed.column("at").unwrap().ty, TypeDef::TimeP(3));
+    assert_eq!(
+        replayed.column("name").unwrap().ty,
+        TypeDef::Collated(Box::new(TypeDef::VarChar(20)), "utf8mb4_bin".into())
+    );
+}
+
+/// A declared `NaiveTime` renders `TIME(6)` and comes back with its precision folded, so a
+/// second push is still a no-op.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "clocks")]
+pub struct Clock {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub at: chrono::NaiveTime,
+}
+
+#[tokio::test]
+async fn a_time_keeps_its_nanoseconds() {
+    let db = fresh("besu_test_time_precision").await;
+    let first = db.push([clocks.def()]).await.unwrap();
+    assert!(
+        first.statements[0].contains("`at` TIME(6) NOT NULL"),
+        "{:?}",
+        first.statements
+    );
+    let second = db.push([clocks.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+
+    let value = chrono::NaiveTime::from_hms_nano_opt(1, 2, 3, 456_789_000).unwrap();
+    db.insert(clocks)
+        .value(clocks.insert(1, value))
+        .await
+        .unwrap();
+    let stored: Vec<Clock> = db.select(clocks).await.unwrap();
+    assert_eq!(stored[0].at, value);
+}

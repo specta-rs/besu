@@ -188,7 +188,8 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         tables: impl IntoIterator<Item = &'static TableDef>,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        self.push_schema(&Self::schema(tables)).await
+        self.push_schema_inner(&Self::schema(tables), false, false)
+            .await
     }
 
     /// Like [`Database::push`], but drops columns and tables when the schema no longer
@@ -197,7 +198,8 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         tables: impl IntoIterator<Item = &'static TableDef>,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        self.push_schema_inner(&Self::schema(tables), true).await
+        self.push_schema_inner(&Self::schema(tables), true, false)
+            .await
     }
 
     /// Diff a schema against the live database and apply the difference.
@@ -205,7 +207,7 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         desired: &Schema,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        self.push_schema_inner(desired, false).await
+        self.push_schema_inner(desired, false, true).await
     }
 
     /// Like [`Database::push_schema`], but applies destructive changes too.
@@ -213,7 +215,7 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         desired: &Schema,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
-        self.push_schema_inner(desired, true).await
+        self.push_schema_inner(desired, true, true).await
     }
 
     /// The JSON snapshot of a schema, ready to hand to `besu push`.
@@ -227,9 +229,31 @@ impl<Dr: SchemaDriver> Database<Dr> {
         &self,
         desired: &Schema,
         allow_destructive: bool,
+        manage_views_and_sequences: bool,
     ) -> Result<PushResult, SchemaError<Dr::Error>> {
         let mut current = self.introspect().await.map_err(SchemaError::Driver)?;
-        let desired = self.with_prefix(desired);
+        let mut desired = self.with_prefix(desired);
+
+        // `push(&[TableDef])` cannot express a view or a sequence, so a live one would look
+        // undeclared and the plan would propose dropping it — which is destructive, so the
+        // whole push would be refused. Carry them across instead: a declaration that cannot
+        // mention an object does not get to delete it. A snapshot (`push_schema`) can
+        // mention one, so it manages them.
+        if !manage_views_and_sequences {
+            for view in &current.views {
+                if desired.view(&view.name).is_none() {
+                    desired.views.push(view.clone());
+                }
+            }
+            for sequence in &current.sequences {
+                if desired
+                    .find_sequence(sequence.schema.as_deref(), &sequence.name)
+                    .is_none()
+                {
+                    desired.sequences.push(sequence.clone());
+                }
+            }
+        }
 
         // A shared database holds other tenants' tables. They are not this database's
         // business, so they are dropped from the comparison rather than reported as a

@@ -158,6 +158,7 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
         .iter()
         .map(|value| match value {
             Value::UInt128(_) | Value::Int128(_) => 41,
+            Value::Decimal(v) => v.len() + 9,
             _ => 8,
         })
         .sum();
@@ -176,6 +177,10 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             Value::Int128(v) => add(&mut arguments, Decimal::from_i128(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
+            // MySQL coerces a string parameter to the column's type, so the exact decimal
+            // text goes over the wire unchanged and the server rounds it to the column's
+            // scale. Building a `BigDecimal` would copy the digits twice for no gain.
+            Value::Decimal(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
             Value::Uuid(v) => add(&mut arguments, *v)?,
             Value::Date(v) => add(&mut arguments, *v)?,
@@ -185,6 +190,14 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             Value::Json(v) => {
                 let text = std::str::from_utf8(v).unwrap_or("null");
                 add(&mut arguments, if text.is_empty() { "null" } else { text })?
+            }
+            // MySQL has no array type. Binding `NULL` instead would turn a programming
+            // mistake into a missing value, so the statement fails before it is sent.
+            Value::Array { .. } => {
+                return Err(<Sqlx as Driver>::error(Error::encode(
+                    value.display(),
+                    "`mysql` has no array type; store the elements as JSON instead",
+                )));
             }
             _ => add(&mut arguments, None::<i64>)?,
         }
@@ -354,6 +367,17 @@ impl_decode!(
 impl Decode<Sqlx> for String {
     fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
         let index = *offset;
+
+        // A `DECIMAL` column arrives as text and `sqlx` refuses to hand it to `String`
+        // because the declared type is not a string type. Reading those bytes directly keeps
+        // the column's own scale — 0.00 stays `0.00` — which `BigDecimal` normalises away.
+        if <BigDecimal as Type<MySql>>::compatible(row.try_get_raw(index)?.type_info().as_ref()) {
+            let value = row.try_get_raw(index)?;
+            let text = <&str as sqlx::Decode<MySql>>::decode(value)
+                .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))?;
+            *offset += 1;
+            return Ok(text.to_owned());
+        }
 
         // Most text columns decode directly, but MySQL flags the `information_schema`
         // text columns as binary. Those still hold UTF-8, so fall back to reading the

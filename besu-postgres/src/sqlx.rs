@@ -1,4 +1,5 @@
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
+use chrono::Timelike;
 use sqlx::{
     Arguments, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
     postgres::{
@@ -56,6 +57,328 @@ impl Sqlx {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+/// A fixed-precision decimal, encoded directly into PostgreSQL's binary `NUMERIC` format.
+///
+/// sqlx implements `NUMERIC` only for `BigDecimal`, which allocates a digit vector and then
+/// walks it again to write the wire format. A decimal column's value is already exact text,
+/// so parsing those digits straight into the wire format keeps the encode path allocation-free
+/// and leaves the parameter's SQL type exactly `NUMERIC`.
+#[derive(Debug, Clone, Copy)]
+struct NumericText<'a> {
+    text: &'a str,
+}
+
+impl sqlx::Type<SqlxPostgres> for NumericText<'_> {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(NUMERIC_OID))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for NumericText<'_> {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let bytes = numeric_from_text(self.text)
+            .map_err(|reason| <Sqlx as Driver>::error(Error::encode("decimal", reason)))?;
+        buffer.extend_from_slice(&bytes);
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        // The header plus at most one two-byte digit per four decimal characters.
+        8 + self.text.len().div_ceil(4) * 2
+    }
+}
+
+/// Encode decimal text into PostgreSQL's binary `NUMERIC` representation.
+///
+/// The wire format is a header of `ndigits`, `weight`, `sign` and `dscale`, followed by
+/// base-10,000 digits, most significant first. `weight` is the exponent of the first digit,
+/// and `dscale` is how many digits after the decimal point to display.
+fn numeric_from_text(text: &str) -> Result<Vec<u8>, &'static str> {
+    let text = text.trim();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, text),
+    };
+    let (integer, fraction) = match digits.split_once('.') {
+        Some((integer, fraction)) => (integer, fraction),
+        None => (digits, ""),
+    };
+    if (integer.is_empty() && fraction.is_empty())
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("the decimal is not a plain digit string");
+    }
+
+    // Each group is four decimal digits, and the groups are aligned on the decimal point, so
+    // the integer part is padded on the left and the fraction on the right.
+    let integer_padding = (4 - integer.len() % 4) % 4;
+    let mut groups: Vec<u16> = Vec::with_capacity(integer.len() / 4 + fraction.len() / 4 + 2);
+    let mut group = 0u16;
+    let mut digits_in_group = 0;
+    for _ in 0..integer_padding {
+        group *= 10;
+        digits_in_group += 1;
+    }
+    for byte in integer.bytes().chain(fraction.bytes()) {
+        group = group * 10 + u16::from(byte - b'0');
+        digits_in_group += 1;
+        if digits_in_group == 4 {
+            groups.push(group);
+            group = 0;
+            digits_in_group = 0;
+        }
+    }
+    if digits_in_group != 0 {
+        // The fraction was padded on the right, so fill the last group out with zeros.
+        for _ in digits_in_group..4 {
+            group *= 10;
+        }
+        groups.push(group);
+    }
+
+    let integer_groups = integer.len().div_ceil(4);
+    // `weight` counts from the most significant group, which is the last integer group.
+    let mut weight = integer_groups as i32 - 1;
+
+    let mut first = 0;
+    while first < groups.len() && groups[first] == 0 {
+        first += 1;
+    }
+    let mut end = groups.len();
+    while end > first && groups[end - 1] == 0 {
+        end -= 1;
+    }
+
+    let ndigits = (end - first) as i16;
+    weight -= first as i32;
+    let sign: u16 = if ndigits == 0 {
+        // Zero has no digits and no weight, whatever sign the text carried.
+        weight = 0;
+        0
+    } else if negative {
+        NUMERIC_SIGN_NEGATIVE
+    } else {
+        0
+    };
+    let dscale = i16::try_from(fraction.len()).map_err(|_| "the decimal scale is too large")?;
+
+    let mut out = Vec::with_capacity(8 + (end - first) * 2);
+    out.extend_from_slice(&ndigits.to_be_bytes());
+    out.extend_from_slice(&(weight as i16).to_be_bytes());
+    out.extend_from_slice(&sign.to_be_bytes());
+    out.extend_from_slice(&dscale.to_be_bytes());
+    for group in &groups[first..end] {
+        out.extend_from_slice(&group.to_be_bytes());
+    }
+    Ok(out)
+}
+
+/// A bound array, encoded into PostgreSQL's binary array format.
+///
+/// The parameter's declared type is OID 0, which tells the server to infer it from the
+/// statement — exactly as [`UntypedNull`] does. The array payload itself still carries the
+/// element OID, taken from the value's declared [`TypeDef`], and PostgreSQL's `array_recv`
+/// insists that it matches the type it inferred. Inferring rather than declaring is what lets
+/// one runtime encoder serve every element type without a type per generic instantiation.
+#[derive(Debug, Clone, Copy)]
+struct ArrayValue<'a> {
+    element: &'a besu_core::TypeDef,
+    values: &'a [Value],
+}
+
+impl sqlx::Type<SqlxPostgres> for ArrayValue<'_> {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for ArrayValue<'_> {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let element = element_oid(self.element).ok_or_else(|| {
+            <Sqlx as Driver>::error(Error::encode(
+                "array",
+                "this element type has no PostgreSQL binary representation Besu can write",
+            ))
+        })?;
+
+        let has_null = self.values.iter().any(Value::is_null);
+        // `ndim`, `has_null` and the element's OID make up the header, then one
+        // `(length, lower_bound)` pair per dimension. PostgreSQL's arrays are one-based.
+        buffer.extend_from_slice(&1_i32.to_be_bytes());
+        buffer.extend_from_slice(&i32::from(has_null).to_be_bytes());
+        buffer.extend_from_slice(&element.to_be_bytes());
+        buffer.extend_from_slice(
+            &i32::try_from(self.values.len())
+                .map_err(|_| <Sqlx as Driver>::error(Error::encode("array", "too many elements")))?
+                .to_be_bytes(),
+        );
+        buffer.extend_from_slice(&1_i32.to_be_bytes());
+
+        let mut payload = Vec::new();
+        for value in self.values {
+            if value.is_null() {
+                buffer.extend_from_slice(&(-1_i32).to_be_bytes());
+                continue;
+            }
+            payload.clear();
+            encode_element(self.element, value, &mut payload)
+                .map_err(|reason| <Sqlx as Driver>::error(Error::encode("array", reason)))?;
+            let length = i32::try_from(payload.len()).map_err(|_| {
+                <Sqlx as Driver>::error(Error::encode("array", "an element is too large"))
+            })?;
+            buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(&payload);
+        }
+
+        Ok(sqlx::encode::IsNull::No)
+    }
+}
+
+/// The OID of a type's PostgreSQL binary form, or `None` when Besu cannot write one.
+fn element_oid(ty: &besu_core::TypeDef) -> Option<u32> {
+    use besu_core::TypeDef;
+    Some(match ty {
+        TypeDef::Bool => 16,
+        TypeDef::Bytes => 17,
+        TypeDef::Int8 => 20,
+        TypeDef::Int2 => 21,
+        TypeDef::Int4 => 23,
+        TypeDef::Text => 25,
+        TypeDef::Char(_) => 1042,
+        TypeDef::VarChar(_) => 1043,
+        TypeDef::Float4 => 700,
+        TypeDef::Float8 => 701,
+        TypeDef::Date => 1082,
+        TypeDef::Time | TypeDef::TimeP(_) => 1083,
+        TypeDef::Timestamp | TypeDef::TimestampP(_) => 1114,
+        TypeDef::TimestampTz | TypeDef::TimestampTzP(_) => 1184,
+        TypeDef::TimeTz | TypeDef::TimeTzP(_) => 1266,
+        TypeDef::Json => 114,
+        TypeDef::Uuid => 2950,
+        TypeDef::Jsonb => 3802,
+        TypeDef::Bit(_) => 1560,
+        TypeDef::VarBit(_) => 1562,
+        // The unsigned markers are stored as the signed type the dialect declares, except
+        // that a 64- or 128-bit one lives in `NUMERIC`.
+        TypeDef::UInt(8) => 21,
+        TypeDef::UInt(16) => 23,
+        TypeDef::UInt(32) => 20,
+        TypeDef::UInt(_) | TypeDef::Decimal(_, _) => 1700,
+        TypeDef::Collated(inner, _) => return element_oid(inner),
+        // An enum, a domain or an array of an array is a type Besu has no binary encoder
+        // for, and guessing its OID would send bytes the server decodes as something else.
+        TypeDef::Custom(_) | TypeDef::Array(_) => return None,
+        _ => return None,
+    })
+}
+
+/// Write one array element in its PostgreSQL binary form.
+fn encode_element(
+    ty: &besu_core::TypeDef,
+    value: &Value,
+    out: &mut Vec<u8>,
+) -> Result<(), &'static str> {
+    use besu_core::TypeDef;
+    match (ty, value) {
+        (_, Value::Null) => return Err("a NULL element has no payload"),
+        (TypeDef::Bool, Value::Bool(v)) => out.push(u8::from(*v)),
+        (TypeDef::Int2 | TypeDef::UInt(8), _) => {
+            let v = element_integer(value)?;
+            let v = i16::try_from(v).map_err(|_| "an element does not fit in SMALLINT")?;
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        (TypeDef::Int4 | TypeDef::UInt(16), _) => {
+            let v = element_integer(value)?;
+            let v = i32::try_from(v).map_err(|_| "an element does not fit in INTEGER")?;
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        (TypeDef::Int8 | TypeDef::UInt(32), _) => {
+            let v = element_integer(value)?;
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        (TypeDef::UInt(64) | TypeDef::UInt(128), Value::UInt(v)) => {
+            out.extend_from_slice(&numeric_from_text(&v.to_string())?);
+        }
+        (TypeDef::Decimal(_, _), Value::Decimal(text)) => {
+            out.extend_from_slice(&numeric_from_text(text)?);
+        }
+        (TypeDef::Decimal(_, _), Value::Int(v)) => {
+            out.extend_from_slice(&numeric_from_text(&v.to_string())?);
+        }
+        (TypeDef::Float4, Value::Float(v)) => out.extend_from_slice(&(*v as f32).to_be_bytes()),
+        (TypeDef::Float8, Value::Float(v)) => out.extend_from_slice(&v.to_be_bytes()),
+        (TypeDef::Text | TypeDef::Char(_) | TypeDef::VarChar(_), Value::Text(v)) => {
+            out.extend_from_slice(v.as_bytes());
+        }
+        (TypeDef::Bytes, Value::Bytes(v)) => out.extend_from_slice(v),
+        (TypeDef::Uuid, Value::Uuid(v)) => out.extend_from_slice(v.as_bytes()),
+        (TypeDef::Json, Value::Json(v)) => out.extend_from_slice(v),
+        // The binary JSONB form is a one-byte version followed by the document.
+        (TypeDef::Jsonb, Value::Json(v)) => {
+            out.push(1);
+            out.extend_from_slice(v);
+        }
+        (TypeDef::Date, Value::Date(v)) => {
+            let days = v.signed_duration_since(postgres_epoch()).num_days();
+            let days = i32::try_from(days).map_err(|_| "the date is out of range")?;
+            out.extend_from_slice(&days.to_be_bytes());
+        }
+        (TypeDef::Time | TypeDef::TimeP(_), Value::Time(v)) => {
+            let micros = v.num_seconds_from_midnight() as i64 * 1_000_000
+                + i64::from(v.nanosecond() / 1_000);
+            out.extend_from_slice(&micros.to_be_bytes());
+        }
+        (
+            TypeDef::Timestamp
+            | TypeDef::TimestampP(_)
+            | TypeDef::TimestampTz
+            | TypeDef::TimestampTzP(_),
+            Value::Timestamp(v),
+        ) => out.extend_from_slice(&micros_since_epoch(*v)?.to_be_bytes()),
+        (
+            TypeDef::Timestamp
+            | TypeDef::TimestampP(_)
+            | TypeDef::TimestampTz
+            | TypeDef::TimestampTzP(_),
+            Value::TimestampTz(v),
+        ) => out.extend_from_slice(&micros_since_epoch(v.naive_utc())?.to_be_bytes()),
+        (TypeDef::Collated(inner, _), _) => return encode_element(inner, value, out),
+        (_, _) => return Err("this value does not match its declared element type"),
+    }
+    Ok(())
+}
+
+/// An integer value held by an element of a signed integer type.
+fn element_integer(value: &Value) -> Result<i64, &'static str> {
+    match value {
+        Value::Int(v) => Ok(*v),
+        Value::UInt(v) => i64::try_from(*v).map_err(|_| "an element does not fit in an integer"),
+        _ => Err("this value does not match its declared element type"),
+    }
+}
+
+/// PostgreSQL counts dates and timestamps from 2000-01-01, not from the Unix epoch.
+fn postgres_epoch() -> chrono::NaiveDate {
+    // 2000-01-01 is always representable, so the fallback is unreachable; returning the Unix
+    // epoch instead of panicking keeps the workspace's no-panic rule.
+    chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or_default()
+}
+
+/// A naive timestamp as whole microseconds since PostgreSQL's epoch.
+fn micros_since_epoch(value: chrono::NaiveDateTime) -> Result<i64, &'static str> {
+    value
+        .signed_duration_since(postgres_epoch().and_time(chrono::NaiveTime::MIN))
+        .num_microseconds()
+        .ok_or("the timestamp is out of range")
 }
 
 /// A bound `NULL` whose type PostgreSQL infers from context.
@@ -219,8 +542,36 @@ fn encoded_size(value: &Value) -> usize {
         Value::Timestamp(_) | Value::TimestampTz(_) => LENGTH_PREFIX + 8,
         // The JSONB form is a one-byte version plus the document.
         Value::Json(v) => LENGTH_PREFIX + 1 + v.len(),
+        // Header plus at most one two-byte digit per four characters of decimal text.
+        Value::Decimal(v) => LENGTH_PREFIX + 8 + v.len().div_ceil(4) * 2,
+        // The array header plus a four-byte length and a payload per element; the element
+        // sizes are estimated from the values themselves.
+        Value::Array { values, .. } => {
+            20 + values
+                .iter()
+                .map(|value| 4 + element_size(value))
+                .sum::<usize>()
+        }
         // `Value` is `#[non_exhaustive]`. An unknown variant fails to bind before this
         // estimate matters, so reserving nothing for it is harmless.
+        _ => 0,
+    }
+}
+
+/// A rough upper bound on an element's encoded size, for one reservation.
+fn element_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Int(_) | Value::Float(_) => 8,
+        Value::UInt(_) | Value::UInt128(_) | Value::Int128(_) | Value::Decimal(_) => 8 + 20,
+        Value::Text(v) => v.len(),
+        Value::Bytes(v) => v.len(),
+        Value::Uuid(_) => 16,
+        Value::Date(_) => 4,
+        Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 8,
+        Value::Json(v) => 1 + v.len(),
+        // An array of an array is not supported by the encoder, so it adds nothing.
         _ => 0,
     }
 }
@@ -248,6 +599,9 @@ pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Int128(v) => add(&mut arguments, Numeric::signed(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
+            // A `Decimal` column is `NUMERIC`, and PostgreSQL has no implicit `text` to
+            // `numeric` cast, so the digits are written in the binary format directly.
+            Value::Decimal(v) => add(&mut arguments, NumericText { text: v.as_str() })?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
             Value::Uuid(v) => add(&mut arguments, *v)?,
             Value::Date(v) => add(&mut arguments, *v)?,
@@ -266,6 +620,13 @@ pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
                     })?;
                 add(&mut arguments, sqlx::types::Json(json))?;
             }
+            Value::Array { element, values } => add(
+                &mut arguments,
+                ArrayValue {
+                    element,
+                    values: values.as_slice(),
+                },
+            )?,
             // `Value` is `#[non_exhaustive]`: a future variant must fail loudly rather than
             // silently bind `NULL`.
             other => {
@@ -424,7 +785,6 @@ impl_decode!(
     bool,
     i64,
     f64,
-    String,
     Vec<u8>,
     uuid::Uuid,
     chrono::NaiveDate,
@@ -432,6 +792,21 @@ impl_decode!(
     chrono::NaiveDateTime,
     chrono::DateTime<chrono::Utc>,
 );
+
+impl Decode<Sqlx> for String {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let value = row.try_get_raw(index)?;
+        // A `NUMERIC` column is the exact decimal text, and sqlx will not hand it to a
+        // `String` because the declared type is not a string type. Reading its wire format
+        // is what makes `Decimal` usable end to end.
+        if type_is(&value, NUMERIC_OID) {
+            *offset += 1;
+            return decode_numeric_text(value, index);
+        }
+        decode_via_sqlx(row, offset)
+    }
+}
 
 macro_rules! impl_decode_integer {
     ($($ty:ty),* $(,)?) => {
@@ -651,4 +1026,503 @@ impl Decode<Sqlx> for serde_json::Value {
         let value: sqlx::types::Json<serde_json::Value> = decode_via_sqlx(row, offset)?;
         Ok(value.0)
     }
+}
+
+/// Decode a `NUMERIC` as its exact decimal text.
+fn decode_numeric_text(value: PgValueRef<'_>, index: usize) -> Result<String, sqlx::Error> {
+    let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+    match value.format() {
+        PgValueFormat::Text => Ok(value
+            .as_str()
+            .map_err(|err| malformed(&err.to_string()))?
+            .trim()
+            .to_owned()),
+        PgValueFormat::Binary => {
+            let bytes = value
+                .as_bytes()
+                .map_err(|err| malformed(&err.to_string()))?;
+            decode_numeric_decimal(bytes).map_err(malformed)
+        }
+    }
+}
+
+/// Turn the binary `NUMERIC` wire format into its decimal text.
+///
+/// `dscale` is the number of digits the column displays after the point, so it is what makes
+/// `1.90` come back as `1.90` rather than `1.9`: the digits themselves are stored in groups
+/// of four and carry no trailing zeros.
+fn decode_numeric_decimal(bytes: &[u8]) -> Result<String, &'static str> {
+    let header = bytes.get(..8).ok_or("malformed NUMERIC value")?;
+    let ndigits = u16::from_be_bytes([header[0], header[1]]);
+    let weight = i16::from_be_bytes([header[2], header[3]]);
+    let sign = u16::from_be_bytes([header[4], header[5]]);
+    let dscale = i16::from_be_bytes([header[6], header[7]]);
+
+    match sign {
+        0x0000 | 0x4000 => {}
+        0xC000 => return Ok("NaN".to_owned()),
+        0xD000 => return Ok("Infinity".to_owned()),
+        0xF000 => return Ok("-Infinity".to_owned()),
+        _ => return Err("malformed NUMERIC value"),
+    }
+    if dscale < 0 {
+        return Err("malformed NUMERIC value");
+    }
+    if usize::from(ndigits) != (bytes.len() - 8) / 2 {
+        return Err("malformed NUMERIC value");
+    }
+
+    let groups: Vec<u16> = (0..usize::from(ndigits))
+        .map(|position| {
+            let offset = 8 + position * 2;
+            u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+        })
+        .collect();
+
+    // The group at exponent `e` is stored `weight - e` positions from the start.
+    let group_at = |exponent: i32| -> Option<u16> {
+        let position = i32::from(weight) - exponent;
+        if position < 0 {
+            return None;
+        }
+        groups.get(usize::try_from(position).ok()?).copied()
+    };
+
+    // The integer part runs from the most significant group down to exponent zero.
+    let mut integer = String::new();
+    if weight >= 0 {
+        for exponent in (0..=i32::from(weight)).rev() {
+            push_group(&mut integer, group_at(exponent).unwrap_or(0));
+        }
+        let trimmed = integer.trim_start_matches('0');
+        integer = if trimmed.is_empty() {
+            "0".to_owned()
+        } else {
+            trimmed.to_owned()
+        };
+    } else {
+        integer.push('0');
+    }
+
+    let scale = usize::try_from(dscale).unwrap_or(0);
+    let mut fraction = String::new();
+    let groups_needed = scale.div_ceil(4);
+    for index in 0..groups_needed {
+        let exponent = -(i32::try_from(index).unwrap_or(0)) - 1;
+        push_group(&mut fraction, group_at(exponent).unwrap_or(0));
+    }
+    fraction.truncate(scale);
+    while fraction.len() < scale {
+        fraction.push('0');
+    }
+
+    let negative = sign == 0x4000;
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push_str(&integer);
+    if !fraction.is_empty() {
+        out.push('.');
+        out.push_str(&fraction);
+    }
+    Ok(out)
+}
+
+fn push_group(out: &mut String, group: u16) {
+    for position in (0..4).rev() {
+        let digit = (group / 10_u16.pow(position)) % 10;
+        out.push(char::from(b'0' + digit as u8));
+    }
+}
+
+/// A type that can be read out of one element of a PostgreSQL array.
+trait ArrayElement: Sized {
+    /// Decode one element from its binary form, given the element OID in the header.
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str>;
+
+    /// Decode one element from the text form of an array literal.
+    ///
+    /// sqlx asks the server for a type it does not know in text form, which is how an array
+    /// column normally arrives; the Rust type is known here, so the element does not need the
+    /// header's OID.
+    fn decode_text(text: &str) -> Result<Self, &'static str>;
+}
+
+fn decode_array<T: ArrayElement>(row: &PgRow, offset: &mut usize) -> Result<Vec<T>, sqlx::Error> {
+    let index = *offset;
+    *offset += 1;
+    let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+    let value = row.try_get_raw(index)?;
+    if value.format() == PgValueFormat::Text {
+        let text = value.as_str().map_err(|err| malformed(&err.to_string()))?;
+        return decode_text_array::<T>(text).map_err(malformed);
+    }
+    let bytes = value
+        .as_bytes()
+        .map_err(|err| malformed(&err.to_string()))?;
+
+    let header = bytes
+        .get(..12)
+        .ok_or_else(|| malformed("malformed array value"))?;
+    let dimensions = i32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    // An empty array is written with no dimensions at all, not one dimension of length zero.
+    if dimensions == 0 {
+        return Ok(Vec::new());
+    }
+    if dimensions != 1 {
+        return Err(malformed(
+            "only one-dimensional arrays decode into a `Vec`; an array of arrays needs `sql!`",
+        ));
+    }
+    let element = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+
+    // One `(length, lower_bound)` pair per dimension, before the elements.
+    let dimension = bytes
+        .get(12..20)
+        .ok_or_else(|| malformed("malformed array value"))?;
+    let count = i32::from_be_bytes([dimension[0], dimension[1], dimension[2], dimension[3]]);
+    if count < 0 {
+        return Err(malformed("malformed array value"));
+    }
+
+    let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    let mut rest = &bytes[20..];
+    while !rest.is_empty() {
+        let length = rest
+            .get(..4)
+            .ok_or_else(|| malformed("malformed array value"))?;
+        let length = i32::from_be_bytes([length[0], length[1], length[2], length[3]]);
+        rest = &rest[4..];
+        if length < 0 {
+            return Err(malformed(
+                "the array contains a NULL element, which a `Vec<T>` cannot hold",
+            ));
+        }
+        let length = usize::try_from(length).map_err(|_| malformed("malformed array value"))?;
+        let (element_bytes, tail) = rest
+            .split_at_checked(length)
+            .ok_or_else(|| malformed("malformed array value"))?;
+        out.push(T::decode_element(element, element_bytes).map_err(malformed)?);
+        rest = tail;
+    }
+    Ok(out)
+}
+
+/// Read an integer element of a given width from the array's bytes.
+fn array_integer(element: u32, bytes: &[u8]) -> Result<i64, &'static str> {
+    match element {
+        21 => match bytes {
+            [a, b] => Ok(i64::from(i16::from_be_bytes([*a, *b]))),
+            _ => Err("malformed SMALLINT element"),
+        },
+        23 => match bytes {
+            [a, b, c, d] => Ok(i64::from(i32::from_be_bytes([*a, *b, *c, *d]))),
+            _ => Err("malformed INTEGER element"),
+        },
+        20 => match bytes {
+            [a, b, c, d, e, f, g, h] => Ok(i64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h])),
+            _ => Err("malformed BIGINT element"),
+        },
+        // An OID column is an unsigned 32-bit integer.
+        26 => match bytes {
+            [a, b, c, d] => Ok(i64::from(u32::from_be_bytes([*a, *b, *c, *d]))),
+            _ => Err("malformed OID element"),
+        },
+        _ => Err("this element is not an integer"),
+    }
+}
+
+fn array_float(element: u32, bytes: &[u8]) -> Result<f64, &'static str> {
+    match element {
+        700 => match bytes {
+            [a, b, c, d] => Ok(f64::from(f32::from_be_bytes([*a, *b, *c, *d]))),
+            _ => Err("malformed REAL element"),
+        },
+        701 => match bytes {
+            [a, b, c, d, e, f, g, h] => Ok(f64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h])),
+            _ => Err("malformed DOUBLE PRECISION element"),
+        },
+        _ => Err("this element is not a floating-point number"),
+    }
+}
+
+fn array_micros(bytes: &[u8]) -> Result<i64, &'static str> {
+    match bytes {
+        [a, b, c, d, e, f, g, h] => Ok(i64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h])),
+        _ => Err("malformed timestamp element"),
+    }
+}
+
+impl ArrayElement for bool {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        match (element, bytes) {
+            (16, [value]) => Ok(*value != 0),
+            _ => Err("this element is not a boolean"),
+        }
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        match text.trim() {
+            "t" | "true" | "TRUE" => Ok(true),
+            "f" | "false" | "FALSE" => Ok(false),
+            _ => Err("an array element is not a boolean"),
+        }
+    }
+}
+
+macro_rules! array_integer_element {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ArrayElement for $ty {
+                fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+                    let value = array_integer(element, bytes)?;
+                    <$ty>::try_from(value)
+                        .map_err(|_| "an array element is out of range for its Rust type")
+                }
+
+                fn decode_text(text: &str) -> Result<Self, &'static str> {
+                    text.trim()
+                        .parse()
+                        .map_err(|_| "an array element is not a valid integer")
+                }
+            }
+        )*
+    };
+}
+
+array_integer_element!(i8, i16, i32, i64, u16, u32, u64);
+
+impl ArrayElement for f32 {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        Ok(array_float(element, bytes)? as f32)
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        text.trim()
+            .parse()
+            .map_err(|_| "an array element is not a number")
+    }
+}
+
+impl ArrayElement for f64 {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        array_float(element, bytes)
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        text.trim()
+            .parse()
+            .map_err(|_| "an array element is not a number")
+    }
+}
+
+impl ArrayElement for String {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        match element {
+            19 | 25 | 1042 | 1043 => core::str::from_utf8(bytes)
+                .map(str::to_owned)
+                .map_err(|_| "a text array element is not valid UTF-8"),
+            // A decimal's Rust type is also `String`, so the element's OID decides which of
+            // the two a `Vec<String>` holds. One impl therefore serves both.
+            NUMERIC_OID => decode_numeric_decimal(bytes),
+            _ => Err("this element is not text"),
+        }
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        Ok(text.to_owned())
+    }
+}
+
+impl ArrayElement for uuid::Uuid {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != 2950 {
+            return Err("this element is not a UUID");
+        }
+        let bytes: [u8; 16] = bytes.try_into().map_err(|_| "malformed UUID element")?;
+        Ok(uuid::Uuid::from_bytes(bytes))
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        text.trim()
+            .parse()
+            .map_err(|_| "an array element is not a UUID")
+    }
+}
+
+impl ArrayElement for chrono::NaiveDate {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != 1082 {
+            return Err("this element is not a DATE");
+        }
+        let days = array_integer(23, bytes)?;
+        postgres_epoch()
+            .checked_add_signed(chrono::Duration::days(days))
+            .ok_or("the date is out of range")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d")
+            .map_err(|_| "an array element is not a date")
+    }
+}
+
+impl ArrayElement for chrono::NaiveTime {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != 1083 {
+            return Err("this element is not a TIME");
+        }
+        let micros = array_micros(bytes)?;
+        let micros = u32::try_from(micros).map_err(|_| "the time is out of range")?;
+        chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+            micros / 1_000_000,
+            (micros % 1_000_000) * 1_000,
+        )
+        .ok_or("the time is out of range")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        chrono::NaiveTime::parse_from_str(text.trim(), "%H:%M:%S%.f")
+            .map_err(|_| "an array element is not a time")
+    }
+}
+
+impl ArrayElement for chrono::NaiveDateTime {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != 1114 && element != 1184 {
+            return Err("this element is not a TIMESTAMP");
+        }
+        let micros = array_micros(bytes)?;
+        postgres_epoch()
+            .and_time(chrono::NaiveTime::MIN)
+            .checked_add_signed(chrono::Duration::microseconds(micros))
+            .ok_or("the timestamp is out of range")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f")
+            .map_err(|_| "an array element is not a timestamp")
+    }
+}
+
+impl ArrayElement for chrono::DateTime<chrono::Utc> {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        let naive = chrono::NaiveDateTime::decode_element(element, bytes)?;
+        Ok(naive.and_utc())
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        chrono::DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%:z")
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .map_err(|_| "an array element is not a timestamp with a time zone")
+    }
+}
+
+impl ArrayElement for serde_json::Value {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        let text = match element {
+            114 => bytes,
+            // The binary JSONB form is a one-byte version followed by the document.
+            3802 => match bytes.split_first() {
+                Some((1, rest)) => rest,
+                _ => return Err("malformed JSONB element"),
+            },
+            _ => return Err("this element is not JSON"),
+        };
+        serde_json::from_slice(text).map_err(|_| "a JSON array element is not valid JSON")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        serde_json::from_str(text).map_err(|_| "an array element is not valid JSON")
+    }
+}
+
+macro_rules! impl_decode_array {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl Decode<Sqlx> for Vec<$ty> {
+                fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+                    decode_array(row, offset)
+                }
+            }
+        )*
+    };
+}
+
+impl_decode_array!(
+    bool,
+    i8,
+    i16,
+    i32,
+    i64,
+    u16,
+    u32,
+    u64,
+    f32,
+    f64,
+    String,
+    uuid::Uuid,
+    chrono::NaiveDate,
+    chrono::NaiveTime,
+    chrono::NaiveDateTime,
+    chrono::DateTime<chrono::Utc>,
+    serde_json::Value,
+);
+
+/// Parse PostgreSQL's text array literal: `{a,"b,c",NULL}`.
+///
+/// A NULL element is an error because a `Vec<T>` cannot hold one, and a nested brace is an
+/// error because only one dimension decodes into a `Vec`.
+fn decode_text_array<T: ArrayElement>(text: &str) -> Result<Vec<T>, &'static str> {
+    let inner = text
+        .trim()
+        .strip_prefix('{')
+        .and_then(|text| text.strip_suffix('}'))
+        .ok_or("malformed array value")?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut element = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut quoted_any = false;
+    for ch in inner.chars() {
+        if escaped {
+            element.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => escaped = true,
+            '"' => {
+                quoted = !quoted;
+                quoted_any = true;
+            }
+            '{' | '}' => return Err("only one-dimensional arrays decode into a `Vec`"),
+            ',' if !quoted => {
+                out.push(text_element::<T>(&element, quoted_any)?);
+                element.clear();
+                quoted_any = false;
+            }
+            other => element.push(other),
+        }
+    }
+    if quoted {
+        return Err("malformed array value");
+    }
+    out.push(text_element::<T>(&element, quoted_any)?);
+    Ok(out)
+}
+
+/// One text element, where an unquoted `NULL` is the SQL `NULL`.
+fn text_element<T: ArrayElement>(text: &str, was_quoted: bool) -> Result<T, &'static str> {
+    if !was_quoted && text == "NULL" {
+        return Err("the array contains a NULL element, which a `Vec<T>` cannot hold");
+    }
+    T::decode_text(text)
 }

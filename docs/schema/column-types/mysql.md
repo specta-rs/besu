@@ -25,14 +25,14 @@ timestamps are `DATETIME(6)` rather than `TIMESTAMP`.
 | `Vec<u8>` | `Bytes` | `Bytes` | `BLOB` |
 | `uuid::Uuid` | `Uuid` | `Uuid` | `BINARY(16)` |
 | `chrono::NaiveDate` | `Date` | `Date` | `DATE` |
-| `chrono::NaiveTime` | `Time` | `Time` | `TIME` |
+| `chrono::NaiveTime` | `Time` | `Time` | `TIME(6)` |
 | `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `DATETIME(6)` |
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `DATETIME(6)` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>` | matching | `CHAR(n)`, `VARCHAR(n)`, `DECIMAL(p,s)` |
 
-Everything in the table round-trips through an insert and a `SELECT`, except a `Decimal`, which
-has no decoder into its `String` yet. The `Custom` types below round-trip through DDL only.
+Everything in the table round-trips through an insert and a `SELECT`. MySQL has no array type, so
+a `Vec<T>` field is not supported here; the `Custom` types below round-trip through DDL only.
 
 ## Integers
 
@@ -75,14 +75,21 @@ pub payload: Vec<u8>,
 
 ## Time
 
-`NaiveDateTime` and `DateTime<Utc>` are both `DATETIME(6)`. `DATETIME` is chosen over MySQL's
-`TIMESTAMP` because `TIMESTAMP` is range-limited to 2038 and converts through the session time
-zone on the way in and out.
+`NaiveDateTime` and `DateTime<Utc>` are both `DATETIME(6)`, and `NaiveTime` is `TIME(6)`. The
+fractional precision is part of the declaration so the nanoseconds a `chrono` value carries are
+not truncated to whole seconds on the way in. `DATETIME` is chosen over MySQL's `TIMESTAMP`
+because `TIMESTAMP` is range-limited to 2038 and converts through the session time zone on the
+way in and out.
 
 ```rust
+pub at: chrono::NaiveTime,                       // TIME(6)
 pub seen: chrono::NaiveDateTime,                 // DATETIME(6)
 pub recorded: chrono::DateTime<chrono::Utc>,     // DATETIME(6), no offset stored
 ```
+
+Introspection keeps a precision other than 6: a hand-created `TIME(3)` comes back as `TimeP(3)`
+and renders `TIME(3)` again. `TIME(6)` and `DATETIME(6)` fold onto the plain `Time` and
+`Timestamp` the derive declares, so a second push is a no-op.
 
 There is no timezone-aware column: the offset is dropped, and the driver relies on the session
 being pinned to UTC. `Sqlx::new` does that; `Sqlx::connect` does not.
@@ -118,9 +125,19 @@ reported as `Bytes`, so the declared length is what identifies the type.
 
 ## Decimal
 
-`Decimal<PRECISION, SCALE>` renders `DECIMAL(p,s)`. Its Rust type is `String`, and no driver
-decodes MySQL's `NEWDECIMAL` into a `String` yet, so use `sql!` with an explicit `CAST(... AS
-CHAR)` or keep the column out of the model. See the [roadmap](../../roadmap.md).
+`Decimal<PRECISION, SCALE>` renders `DECIMAL(p,s)` and its Rust type is `String` holding the
+exact text. A string parameter is coerced by the server into the column's type, so the digits
+never pass through a float; decoding reads the `NEWDECIMAL` text back, which keeps the column's
+scale (`0.00` stays `0.00`).
+
+```rust
+#[besu(sql_type = "besu::Decimal<10,2>")]
+pub amount: String,
+```
+
+`IntoSqlValue<Decimal<P, S>>` is implemented for `String`, `&str` and `Cow` at every precision
+and scale, so `amounts.amount.eq("1.23")` compiles. `sum_as`/`avg_as` (and the `SumAs`/`AvgAs`
+methods) give an exact aggregate without the `DOUBLE` cast that `sum` and `avg` apply.
 
 ## 128-bit integers
 
@@ -141,20 +158,31 @@ so a declared `u128` converges against the `DECIMAL(39,0)` reported back.
 | Native type | `TypeDef` |
 | --- | --- |
 | `tinyint(1)` | `Bool` (`UInt(8)` when `unsigned`) |
-| `tinyint` / `smallint` / `mediumint` / `int` / `bigint` | `Int2`, `Int2`, `Int4`, `Int4`, `Int8` |
-| any of those `UNSIGNED` | `UInt(8)`, `UInt(16)`, `UInt(32)`, `UInt(32)`, `UInt(64)` |
+| `tinyint`, `mediumint` | `Custom("tinyint")`, `Custom("mediumint")` |
+| `smallint`, `int`, `bigint` | `Int2`, `Int4`, `Int8` |
+| any integer `UNSIGNED` | `UInt(8)`, `UInt(16)`, `UInt(32)`, `UInt(32)`, `UInt(64)` |
 | `float` | `Float4` |
 | `double`, `real` | `Float8` |
 | `char(n)` | `Char(n)` |
 | `varchar(n)` | `VarChar(n)`; with no length, `Text` |
-| `tinytext`, `text`, `mediumtext`, `longtext` | `Text` |
+| `text` | `Text` |
+| `tinytext`, `mediumtext`, `longtext` | `Custom("tinytext")` and so on |
 | `binary(16)` | `Uuid` |
-| other `binary`, `varbinary`, `*blob` | `Bytes` |
+| `binary`, `varbinary`, `blob` | `Bytes` |
+| `tinyblob`, `mediumblob`, `longblob` | `Custom("tinyblob")` and so on |
 | `json` | `Json` |
-| `date`, `time`, `datetime`, `timestamp` | `Date`, `Time`, `Timestamp`, `TimestampTz` |
+| `date` | `Date` |
+| `time[(p)]`, `datetime[(p)]`, `timestamp[(p)]` | `Time`/`TimeP(p)`, `Timestamp`/`TimestampP(p)`, `TimestampTz`/`TimestampTzP(p)` |
 | `decimal(p,s)`, `numeric(p,s)` | `Decimal(p, s)` |
-| `year` | `Int2` |
+| `year` | `Custom("year")` |
+| a column whose collation differs from the table's | `Collated(inner, collation)` |
 | anything else | `Custom(column_type)` |
+
+The `Custom` names are deliberate: a signed `TINYINT`, a `MEDIUMINT`, a `YEAR`, a `LONGTEXT` and
+a `LONGBLOB` are narrower or wider than the canonical type they would otherwise flatten onto, so
+the snapshot recreates the column that really exists. The differ folds those names back —
+`tinyint` and `year` to `Int2`, `mediumint` to `Int4`, `*text` to `Text`, `*blob` to `Bytes` — so
+a declared `i8` or `String` still converges against them.
 
 ## Custom types
 
@@ -170,15 +198,19 @@ in [the scoreboard](../../parity.md).
 ## Gotchas
 
 - `BOOLEAN` is an alias for `TINYINT(1)`. A `tinyint(1)` column introspects as `Bool`, except
-  `tinyint(1) unsigned`, which is a `u8` and introspects as `UInt(8)`. A `tinyint` of another
-  width is `Int2`.
+  `tinyint(1) unsigned`, which is a `u8` and introspects as `UInt(8)`. A signed `tinyint` of
+  another width stays `Custom("tinyint")`, so a snapshot recreates `TINYINT` rather than the
+  wider `SMALLINT`.
 - A `UNIQUE` on a `String` is a prefix key over 255 characters. Two rows that agree in the first
   255 characters collide even when the full values differ.
 - A `UNIQUE` on a `JSON` column renders nothing, so the schema reports drift on every push.
 - `TIMESTAMP` columns introspect as `TimestampTz`, so a snapshot of one renders `DATETIME(6)`
   when it is used to create a fresh table. Keep the choice of column type in a migration rather
   than round-tripping it.
-- `DECIMAL` cannot be read back into the `String` that `Decimal` names yet; `sql!` with a cast
-  is the way through.
+- An `ON UPDATE CURRENT_TIMESTAMP` clause is reported as part of the column's default
+  (`DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`), which is the one place the IR can
+  carry it. A column with `ON UPDATE` and no default is reported without the clause.
+- MySQL has no array type. A `Vec<T>` field renders `TEXT` and binding an array is an error
+  before the statement is sent, so store a collection as `JSON` and use the JSON helpers.
 - A `BLOB` or `TEXT` index needs a prefix length, and `CREATE INDEX` cannot know the column's
   type, so the DDL generator writes indexes inside `CREATE TABLE`.

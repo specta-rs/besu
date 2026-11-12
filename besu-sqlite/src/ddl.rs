@@ -108,6 +108,16 @@ impl Ddl for SQLiteDdl {
             TypeDef::Char(_) | TypeDef::VarChar(_) | TypeDef::Decimal(_, _) => TypeDef::Text,
             TypeDef::Jsonb => TypeDef::Json,
             TypeDef::TimestampTz => TypeDef::Timestamp,
+            // SQLite keeps no precision in the declared type, so a snapshot that carries one
+            // has to compare equal to the plain type the database reports back.
+            TypeDef::TimeP(_) | TypeDef::TimeTz | TypeDef::TimeTzP(_) => TypeDef::Time,
+            TypeDef::TimestampP(_) | TypeDef::TimestampTzP(_) => TypeDef::Timestamp,
+            // A bit string is stored as an integer and an array as JSON text.
+            TypeDef::Bit(_) | TypeDef::VarBit(_) => TypeDef::Int8,
+            TypeDef::Array(_) => TypeDef::Json,
+            TypeDef::Collated(inner, collation) => {
+                TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
+            }
             other => other.clone(),
         }
     }
@@ -177,6 +187,14 @@ impl Ddl for SQLiteDdl {
             .iter()
             .filter_map(|change| match change {
                 Change::AlterColumn { table, .. } => Some(table.clone()),
+                // `ALTER TABLE ... ADD COLUMN ... STORED` is rejected by SQLite once the
+                // table has rows ("cannot add a STORED column"), and STORED is the default.
+                // A virtual one is legal, so only the stored case needs the rebuild.
+                Change::AddColumn { table, column }
+                    if column.generated.as_ref().is_some_and(|g| g.stored) =>
+                {
+                    Some(table.clone())
+                }
                 _ => None,
             })
             .collect();

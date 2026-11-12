@@ -46,6 +46,26 @@ pub enum Value {
     Timestamp(chrono::NaiveDateTime),
     /// A timestamp with a timezone.
     TimestampTz(chrono::DateTime<chrono::Utc>),
+    /// A fixed-precision decimal, as its exact decimal text.
+    ///
+    /// The text is the canonical spelling — an optional `-`, digits, an optional `.` and the
+    /// scale's digits — and is never parsed into a floating-point number, because the whole
+    /// point of a decimal column is that the value is exact. PostgreSQL encodes it into the
+    /// binary `NUMERIC` format; MySQL binds the text and lets the server coerce it.
+    Decimal(String),
+    /// An array of another type.
+    ///
+    /// The element's [`TypeDef`](crate::TypeDef) travels with the values because PostgreSQL's binary array
+    /// format carries the element's OID in its header, and the server rejects a parameter
+    /// whose element type does not match the column exactly. Encoding an `INTEGER[]` column
+    /// with an inferred `BIGINT` element is not a widening cast in that protocol; it is an
+    /// error. Carrying the declared type is what makes the encoder right the first time.
+    Array {
+        /// The declared type of every element.
+        element: crate::TypeDef,
+        /// The elements, in order.
+        values: Vec<Value>,
+    },
     /// JSON, kept as text so dialects can render it as `json` or `jsonb`.
     Json(Vec<u8>),
 }
@@ -84,6 +104,17 @@ impl Value {
                     Value::Time(v) => write!(f, "'{v}'"),
                     Value::Timestamp(v) => write!(f, "'{v}'"),
                     Value::TimestampTz(v) => write!(f, "'{v}'"),
+                    Value::Decimal(v) => write!(f, "{v}"),
+                    Value::Array { values, .. } => {
+                        f.write_str("ARRAY[")?;
+                        for (i, value) in values.iter().enumerate() {
+                            if i != 0 {
+                                f.write_str(", ")?;
+                            }
+                            write!(f, "{}", value.display())?;
+                        }
+                        f.write_str("]")
+                    }
                     Value::Json(v) => write!(f, "'{}'", String::from_utf8_lossy(v).escape_debug()),
                 }
             }
@@ -234,4 +265,50 @@ impl From<serde_json::Value> for Value {
     fn from(value: serde_json::Value) -> Self {
         Self::Json(value.to_string().into_bytes())
     }
+}
+
+/// A `Vec` of a scalar is an array of that scalar's canonical type.
+///
+/// The element type has to be recovered from the Rust type, because `From` is the only
+/// conversion `#[derive(Table)]` uses for a whole-model insert. `Vec<u8>` is deliberately
+/// absent: it is [`Value::Bytes`], and a byte vector means binary data rather than an array
+/// of one-byte integers. A column with a narrower declared element type — `VARCHAR(20)[]`
+/// whose Rust type is also `Vec<String>` — binds its elements as `TEXT[]` here; the typed
+/// expression path carries the declared element type instead.
+macro_rules! from_vec {
+    ($($ty:ty => $element:expr),* $(,)?) => {
+        $(
+            impl From<Vec<$ty>> for Value {
+                fn from(values: Vec<$ty>) -> Self {
+                    Self::Array {
+                        element: $element,
+                        values: values.into_iter().map(Value::from).collect(),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+from_vec! {
+    bool => crate::TypeDef::Bool,
+    i8 => crate::TypeDef::Int2,
+    i16 => crate::TypeDef::Int2,
+    i32 => crate::TypeDef::Int4,
+    i64 => crate::TypeDef::Int8,
+    u16 => crate::TypeDef::UInt(16),
+    u32 => crate::TypeDef::UInt(32),
+    u64 => crate::TypeDef::UInt(64),
+    u128 => crate::TypeDef::UInt(128),
+    i128 => crate::TypeDef::Decimal(39, 0),
+    f32 => crate::TypeDef::Float4,
+    f64 => crate::TypeDef::Float8,
+    String => crate::TypeDef::Text,
+    Vec<u8> => crate::TypeDef::Bytes,
+    uuid::Uuid => crate::TypeDef::Uuid,
+    chrono::NaiveDate => crate::TypeDef::Date,
+    chrono::NaiveTime => crate::TypeDef::Time,
+    chrono::NaiveDateTime => crate::TypeDef::Timestamp,
+    chrono::DateTime<chrono::Utc> => crate::TypeDef::TimestampTz,
+    serde_json::Value => crate::TypeDef::Json,
 }

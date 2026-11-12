@@ -35,6 +35,8 @@ impl Dialect for TestDialect {
     const SUPPORTS_RETURNING: bool = true;
     const SUPPORTS_ILIKE: bool = false;
     const SUPPORTS_FULL_JOIN: bool = true;
+    const SUPPORTS_ARRAYS: bool = true;
+    const JSON_PATH: besu_core::JsonPathStyle = besu_core::JsonPathStyle::Postgres;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
 
     fn bind(value: Value) -> Result<Self::Value, Error> {
@@ -1167,7 +1169,10 @@ fn aggregate_filters_and_windows_render() {
         .unwrap();
     assert_eq!(
         sql.sql(),
-        r#"SELECT (CAST(SUM("users"."age") AS TEXT) FILTER (WHERE ("users"."age" > $1))), ROW_NUMBER() OVER (PARTITION BY "users"."name" ORDER BY "users"."age" ASC) FROM "users""#
+        // `FILTER` attaches to the aggregate, so it belongs *inside* the cast. The first
+        // version of this rendered `CAST(SUM(..) AS ..) FILTER (..)`, which is a syntax error
+        // on every server; this assertion used to pin that broken string.
+        r#"SELECT CAST((SUM("users"."age") FILTER (WHERE ("users"."age" > $1))) AS TEXT), ROW_NUMBER() OVER (PARTITION BY "users"."name" ORDER BY "users"."age" ASC) FROM "users""#
     );
     assert!(sql.error().is_none());
 }
@@ -1213,4 +1218,103 @@ fn a_set_query_carries_its_comment() {
         .to_sql()
         .unwrap();
     assert!(sql.sql().ends_with("/* everyone */"), "{}", sql.sql());
+}
+
+// ---------------------------------------------------------------------------------------
+// Arrays and structured JSON paths
+// ---------------------------------------------------------------------------------------
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "tagged")]
+pub struct Tagged {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub tags: Vec<String>,
+    pub payload: serde_json::Value,
+}
+
+#[test]
+fn an_in_list_binds_one_array_parameter() {
+    use besu::expr::in_list;
+
+    // On PostgreSQL one array parameter replaces one parameter per value, which is what
+    // keeps a large list under the 65,535-parameter limit.
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(tagged)
+        .filter(in_list(tagged.id, [1_i64, 2, 3]))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains(" = ANY($1)"), "{}", sql.sql());
+    assert_eq!(sql.args().len(), 1);
+
+    // Every other dialect has no array type, so it keeps the plain `IN (...)`.
+    let db = dry::<BacktickDialect>();
+    let sql = db
+        .select(tagged)
+        .filter(in_list(tagged.id, [1_i64, 2]))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains(" IN (?, ?)"), "{}", sql.sql());
+}
+
+#[test]
+fn array_operators_are_postgres_only() {
+    use besu::expr::{array_contains, array_overlaps};
+
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(tagged)
+        .filter(array_contains(tagged.tags, vec!["rust".to_owned()]))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains(" @> "), "{}", sql.sql());
+
+    let sql = db
+        .select(tagged)
+        .filter(array_overlaps(tagged.tags, vec!["go".to_owned()]))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains(" && "), "{}", sql.sql());
+
+    // A dialect that has not said it has arrays records an error rather than emitting the
+    // operator.
+    let db = dry::<BacktickDialect>();
+    let sql = db
+        .select(tagged)
+        .filter(array_contains(tagged.tags, vec!["rust".to_owned()]))
+        .to_sql()
+        .unwrap();
+    assert!(sql.error().is_some());
+}
+
+#[test]
+fn a_json_path_escapes_each_dialect_correctly() {
+    use besu::expr::{JsonPath, json_at_text};
+
+    let path = JsonPath::root().key("a.b").key("c,d").index(0);
+
+    // PostgreSQL takes a `text[]`, so a key with a dot is written as one element and an
+    // element with a comma is quoted.
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(tagged)
+        .pick(json_at_text(tagged.payload, path.clone()))
+        .to_sql()
+        .unwrap();
+    assert!(sql.sql().contains("'{a.b,\"c,d\",0}'"), "{}", sql.sql());
+
+    // MySQL takes a JSON path, where a member with a dot is quoted with `"`.
+    let db = dry::<BacktickDialect>();
+    let sql = db
+        .select(tagged)
+        .pick(json_at_text(tagged.payload, path))
+        .to_sql()
+        .unwrap();
+    assert!(
+        sql.sql()
+            .contains(r#"JSON_EXTRACT(`tagged`.`payload`, '$."a.b"."c,d"[0]')"#),
+        "{}",
+        sql.sql()
+    );
 }

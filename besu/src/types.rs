@@ -5,6 +5,7 @@ use core::marker::PhantomData;
 use alloc::string::String;
 
 use besu_core::TypeDef;
+use besu_core::types::TypeRef;
 use besu_core::value::Value;
 
 /// A SQL column type, expressed as a Rust type.
@@ -245,4 +246,75 @@ pub struct Decimal<const PRECISION: u8, const SCALE: u8>;
 impl<const PRECISION: u8, const SCALE: u8> SqlType for Decimal<PRECISION, SCALE> {
     const DEF: TypeDef = TypeDef::Decimal(PRECISION, SCALE);
     type Rust = String;
+}
+
+/// SQL `<inner>[]`: an array whose elements are all of one SQL type.
+///
+/// The Rust type is `Vec<S::Rust>`, which is what makes an array column usable without a
+/// separate representation: `Array<Text>` is a `Vec<String>` and `Array<Int4>` a `Vec<i32>`.
+/// The derive maps a field of `Vec<T>` onto this type whenever `T` is a scalar, keeping
+/// `Vec<u8>` as [`Bytes`] because a byte vector is binary data rather than an array of
+/// one-byte integers.
+///
+/// Only PostgreSQL has a native array type. MySQL and SQLite reject a bound array with an
+/// `unsupported` error instead of silently storing a string.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
+pub struct Array<S: SqlType>(PhantomData<fn() -> S>);
+
+/// The scalar types an array can hold.
+///
+/// `SqlType::DEF` is a constant, and the type of `Array<S>` has to be one too, so each
+/// element type needs its own implementation: a `const` item cannot name a reference to a
+/// generic parameter's associated constant. The list is exactly the types a column can be
+/// declared with, which is also the set the derive can put inside a `Vec`.
+macro_rules! array_types {
+    ($($name:ty => $def:expr),* $(,)?) => {
+        $(
+            impl SqlType for Array<$name> {
+                const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&$def));
+                type Rust = alloc::vec::Vec<<$name as SqlType>::Rust>;
+            }
+        )*
+    };
+}
+
+array_types! {
+    Bool => TypeDef::Bool,
+    Int1 => TypeDef::Int2,
+    Int2 => TypeDef::Int2,
+    Int4 => TypeDef::Int4,
+    Int8 => TypeDef::Int8,
+    UInt1 => TypeDef::UInt(8),
+    UInt2 => TypeDef::UInt(16),
+    UInt4 => TypeDef::UInt(32),
+    UInt8 => TypeDef::UInt(64),
+    U128 => TypeDef::UInt(128),
+    I128 => TypeDef::Decimal(39, 0),
+    Float4 => TypeDef::Float4,
+    Float8 => TypeDef::Float8,
+    Text => TypeDef::Text,
+    Bytes => TypeDef::Bytes,
+    Json => TypeDef::Json,
+    Jsonb => TypeDef::Jsonb,
+    Uuid => TypeDef::Uuid,
+    Date => TypeDef::Date,
+    Time => TypeDef::Time,
+    Timestamp => TypeDef::Timestamp,
+    TimestampTz => TypeDef::TimestampTz,
+}
+
+impl<const N: u32> SqlType for Array<Char<N>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::Char(N)));
+    type Rust = alloc::vec::Vec<String>;
+}
+
+impl<const N: u32> SqlType for Array<VarChar<N>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::VarChar(N)));
+    type Rust = alloc::vec::Vec<String>;
+}
+
+impl<const PRECISION: u8, const SCALE: u8> SqlType for Array<Decimal<PRECISION, SCALE>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::Decimal(PRECISION, SCALE)));
+    type Rust = alloc::vec::Vec<String>;
 }

@@ -115,12 +115,32 @@ impl Dialect for MySql {
                 TypeDef::Uuid => "BINARY(16)",
                 TypeDef::Json | TypeDef::Jsonb => "JSON",
                 TypeDef::Date => "DATE",
-                TypeDef::Time => "TIME",
+                // `TIME(6)` keeps the nanoseconds a `Value::Time` carries; a bare `TIME`
+                // would silently truncate them to whole seconds. `TimeP` was added for a
+                // column that really has another precision.
+                TypeDef::Time => "TIME(6)",
+                TypeDef::TimeP(p) => return Cow::Owned(format!("TIME({p})")),
                 // MySQL has no timezone-aware time; the offset is dropped.
-                TypeDef::TimeTz => "TIME",
+                TypeDef::TimeTz => "TIME(6)",
+                TypeDef::TimeTzP(p) => return Cow::Owned(format!("TIME({p})")),
                 // `DATETIME` rather than `TIMESTAMP`: MySQL's `TIMESTAMP` is range-limited
                 // to 2038 and silently converts through the session time zone.
                 TypeDef::Timestamp | TypeDef::TimestampTz => "DATETIME(6)",
+                TypeDef::TimestampP(p) | TypeDef::TimestampTzP(p) => {
+                    return Cow::Owned(format!("DATETIME({p})"));
+                }
+                // MySQL's bit field tops out at 64 bits; a wider one keeps the width in the
+                // name so the server's own error says which column is at fault.
+                TypeDef::Bit(n) | TypeDef::VarBit(n) => {
+                    return Cow::Owned(format!("BIT({n})"));
+                }
+                TypeDef::Collated(inner, collation) => {
+                    return Cow::Owned(format!(
+                        "{} COLLATE {}",
+                        MySql::type_name(*inner),
+                        MySql::quote(&collation)
+                    ));
+                }
                 // Widened unsigned types, and anything Besu does not model yet, fall back
                 // to a type every MySQL understands.
                 _ => "TEXT",
@@ -228,15 +248,24 @@ impl Dialect for MySql {
             // MySQL has one JSON type, so the binary variant is the same aggregate.
             "jsonb_agg" => Named("JSON_ARRAYAGG"),
             "json_object" => Named("JSON_OBJECT"),
+            "json_array_agg" => Named("JSON_ARRAYAGG"),
+            "json_object_agg" => Named("JSON_OBJECTAGG"),
+            "json_merge_patch" => Named("JSON_MERGE_PATCH"),
+            // The path-taking functions, whose path argument is rendered in MySQL's grammar
+            // by the expression layer rather than being an ordinary argument here.
+            "json_set" => Named("JSON_SET"),
+            "json_remove" => Named("JSON_REMOVE"),
+            "json_value" => Named("JSON_VALUE"),
+            "json_query" => Named("JSON_QUERY"),
             // `MIN` and `MAX` over a boolean column return the column's own `TINYINT`, so
             // the value decodes as a boolean. The bitwise aggregates would return a
             // `BIGINT`, which does not.
             "bool_and" => Named("MIN"),
             "bool_or" => Named("MAX"),
             "every" => Named("MIN"),
-            "stddev" => Named("STDDEV"),
+            "stddev" => Named("STDDEV_SAMP"),
             "stddev_pop" => Named("STDDEV_POP"),
-            "variance" => Named("VARIANCE"),
+            "variance" => Named("VAR_SAMP"),
             "var_pop" => Named("VAR_POP"),
             "row_number" => Named("ROW_NUMBER"),
             "rank" => Named("RANK"),

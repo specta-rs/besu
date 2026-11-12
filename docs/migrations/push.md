@@ -81,17 +81,23 @@ The CLI's equivalent is `--destructive`; the library calls it `push_destructive`
 
 ## What it ignores
 
-`push` only manages tables, columns, indexes, uniques, foreign keys, checks and PostgreSQL
-enum types. Everything else the IR cannot express is left exactly as it is:
+`push` manages tables, columns, indexes, uniques, foreign keys, checks, PostgreSQL enum types
+and — when the declaration names them — views and sequences. Everything else the IR cannot
+express is left exactly as it is:
 
-- views, see [views](../schema/views.md);
 - row-level security policies, see [row-level security](../schema/rls.md);
 - extensions, see [extensions](../schema/extensions.md);
-- standalone sequences, see [sequences](../schema/sequences.md);
 - triggers, expression indexes, `INCLUDE` indexes and exclusion constraints.
 
-For each of those, `push` cannot create it and cannot drop it. It also means a `push` cannot
-report the difference between the snapshot and the database for them.
+**Views and sequences are opt-in**, and this is the one asymmetry worth memorising. A
+declaration that names *no* views cannot distinguish "I did not mention views" from "I want
+them all gone", and the first is the common case — `push(&[TableDef])` cannot express a view
+at all. So an empty list means "views are not mine", and an existing view is left alone. Name
+at least one view (or sequence) in the snapshot and the whole list is managed, including
+drops. This is the same shape as enums, which are only dropped when nothing declares them.
+
+Without that rule, adding a view as a migration would make every later `push(&[TableDef])`
+refuse the plan as destructive — which is exactly what happened before it was added.
 
 ## Gotchas
 

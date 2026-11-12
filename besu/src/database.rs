@@ -199,7 +199,11 @@ pub fn dry<D: Dialect>() -> Database<DryDriver<D>> {
 /// Borrowed from a [`Database`](Database), it runs every query on the same connection and
 /// is committed once you ask it to be. Dropping it without committing rolls back.
 pub struct Transaction<'a, Dr: TransactionDriver> {
-    inner: Dr::Transaction<'a>,
+    /// The driver's own transaction handle.
+    ///
+    /// `pub(crate)` so [`Database::batch`](crate::Database::batch) can run its statements
+    /// on the transaction it opened without duplicating the `Transaction` type.
+    pub(crate) inner: Dr::Transaction<'a>,
     /// The number of savepoints opened through [`Transaction::transaction`], so each gets a
     /// name of its own.
     savepoints: u32,

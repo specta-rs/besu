@@ -83,9 +83,25 @@ impl Dialect for SQLite {
             TypeDef::Json | TypeDef::Jsonb => "JSON",
             TypeDef::Date => "DATE",
             TypeDef::Time => "TIME",
+            // SQLite stores a time as text and has no fractional precision in the type name,
+            // so every precision collapses onto the same declared type.
+            TypeDef::TimeP(_) => "TIME",
             // SQLite has no timezone-aware time, so the offset is dropped.
-            TypeDef::TimeTz => "TIME",
-            TypeDef::Timestamp | TypeDef::TimestampTz => "TIMESTAMP",
+            TypeDef::TimeTz | TypeDef::TimeTzP(_) => "TIME",
+            TypeDef::Timestamp | TypeDef::TimestampP(_) => "TIMESTAMP",
+            TypeDef::TimestampTz | TypeDef::TimestampTzP(_) => "TIMESTAMP",
+            // SQLite has no bit string; an integer is the closest storage, and `BLOB` keeps
+            // no width. The value is the caller's to write with `sql!`.
+            TypeDef::Bit(_) | TypeDef::VarBit(_) => "INTEGER",
+            // An array is stored as its JSON text, which is the only collection SQLite has.
+            TypeDef::Array(_) => "JSON",
+            TypeDef::Collated(inner, collation) => {
+                return Cow::Owned(format!(
+                    "{} COLLATE {}",
+                    SQLite::type_name(*inner),
+                    SQLite::quote(&collation)
+                ));
+            }
             // A decimal in SQLite is text: `NUMERIC` affinity would try to turn the stored
             // string into a float and lose the exact value, which is the whole point of a
             // decimal. `Decimal`'s Rust type is a string, so text is the honest mapping.
@@ -125,6 +141,11 @@ impl Dialect for SQLite {
             // SQLite has one JSON type, so the binary variant is the same aggregate.
             "jsonb_agg" => Named("JSON_GROUP_ARRAY"),
             "json_object" => Named("JSON_OBJECT"),
+            "json_array_agg" => Named("JSON_GROUP_ARRAY"),
+            "json_object_agg" => Named("JSON_GROUP_OBJECT"),
+            "json_merge_patch" => Named("JSON_PATCH"),
+            "json_set" => Named("JSON_SET"),
+            "json_remove" => Named("JSON_REMOVE"),
             "bool_and" => Named("MIN"),
             "bool_or" => Named("MAX"),
             "every" => Named("MIN"),

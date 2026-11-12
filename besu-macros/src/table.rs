@@ -540,18 +540,28 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
             let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
                 return Err(Error::new(ty.span(), "unsupported"));
             };
-            let Some(syn::GenericArgument::Type(Type::Path(inner))) = args.args.first() else {
+            let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
                 return Err(Error::new(ty.span(), "unsupported"));
             };
-            if inner
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "u8")
+            if let Type::Path(inner) = inner
+                && inner
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "u8")
             {
                 (quote!(#besu::Bytes), quote!(#besu::TypeDef::Bytes))
             } else {
-                return Err(Error::new(ty.span(), "unsupported"));
+                // A `Vec` of a scalar is an array. The element's `SqlType` is resolved by the
+                // same mapping a bare field would use, so `Vec<i32>` is `Array<Int4>` and
+                // `Vec<String>` is `Array<Text>`.
+                let (element, element_def) = sql_type(inner, besu)?;
+                (
+                    quote!(#besu::Array<#element>),
+                    quote!(#besu::TypeDef::Array(#besu::besu_core::types::TypeRef::from_static(
+                        &#element_def
+                    ))),
+                )
             }
         }
         _ => return Err(Error::new(ty.span(), "unsupported")),
@@ -797,14 +807,20 @@ impl Codegen {
         let insert_columns = writable.iter().map(|column| &column.sql_name);
         let insert_values = writable.iter().map(|column| {
             let ident = &column.ident;
-            quote!(self.#ident.to_value())
+            let sql_ty = &column.sql_ty;
+            let ty = &column.ty;
+            // The column's SQL type is what decides how the Rust value is bound: `String`
+            // is `TEXT` in one column and `NUMERIC` in another.
+            quote!(#besu::expr::set_to_value::<#sql_ty, #ty>(&self.#ident))
         });
         // The same values, written straight into the statement's buffer. `self` is consumed
         // either way, so a derived row never materialises the intermediate `Vec` that
         // `into_values` returns.
         let insert_values_sink = writable.iter().map(|column| {
             let ident = &column.ident;
-            quote!(out.push(self.#ident.to_value());)
+            let sql_ty = &column.sql_ty;
+            let ty = &column.ty;
+            quote!(out.push(#besu::expr::set_to_value::<#sql_ty, #ty>(&self.#ident));)
         });
 
         let from_model = writable.iter().map(|column| {
@@ -825,7 +841,13 @@ impl Codegen {
 
         let model_values = columns.iter().map(|column| {
             let ident = &column.ident;
-            quote!(#besu::Value::from(model.#ident.clone()))
+            let sql_ty = &column.sql_ty;
+            let ty = &column.ty;
+            if column.nullable {
+                quote!(#besu::expr::option_to_value::<#sql_ty, #ty>(model.#ident.clone()))
+            } else {
+                quote!(#besu::expr::value_to_value::<#sql_ty, #ty>(model.#ident.clone()))
+            }
         });
 
         quote! {

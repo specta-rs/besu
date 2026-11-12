@@ -121,6 +121,15 @@ makes a decimal worth having. `u128` and `i128` are `TEXT` holding the decimal d
 The driver parses the digits back into `u128`/`i128`, so the full range round-trips. Comparisons
 and `ORDER BY` on such a column are lexicographic unless you cast it to a number in SQL.
 
+`Decimal<PRECISION, SCALE>` is the same `TEXT` storage, bound as the exact decimal text, so its
+`String` round-trips unchanged and `amount.eq("1.23")` works.
+
+## Arrays
+
+SQLite has no array type. A `Vec<T>` field renders `TEXT` and binding an array is an error before
+the statement is sent, rather than being silently stored as a string. Store a collection as
+`JSON` and query it with the JSON helpers.
+
 ## What introspection reports
 
 SQLite's catalogue reports the declared type name, which is mapped back as follows:
@@ -136,8 +145,9 @@ SQLite's catalogue reports the declared type name, which is mapped back as follo
 | anything else | `Custom(name)` |
 
 The differ folds the types SQLite cannot distinguish — every integer width to `Int8`, `UInt(128)`
-to `Text`, `Char`/`VarChar`/`Decimal` to `Text`, `Jsonb` to `Json`, `TimestampTz` to `Timestamp`
-— so a declared `i32` converges against the `INTEGER` that introspection reports. Without that
+to `Text`, `Char`/`VarChar`/`Decimal` to `Text`, `Jsonb` to `Json`, `TimestampTz` to `Timestamp`,
+a fractional-second precision to the plain time type, `Bit` to `Int8` and an array to `Json` — so
+a declared `i32` converges against the `INTEGER` that introspection reports. Without that
 folding, every push would report a column change that changes nothing.
 
 ## Custom types

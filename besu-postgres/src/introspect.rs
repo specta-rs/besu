@@ -305,48 +305,19 @@ async fn introspect_columns(
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    #[allow(clippy::type_complexity)]
     let rows = db
         .execute(besu::sql!(
-            "SELECT table_schema, table_name, column_name, data_type, udt_schema, udt_name, \
-                    is_nullable, column_default, is_identity, character_maximum_length, \
-                    numeric_precision, numeric_scale \
+            "SELECT table_schema, table_name, column_name, is_nullable, column_default, \
+                    is_identity \
              FROM information_schema.columns \
              WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
                AND table_schema NOT LIKE 'pg_toast%' \
              ORDER BY table_schema, table_name, ordinal_position"
         ))
-        .all::<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<i32>,
-            Option<i32>,
-            Option<i32>,
-        )>()
+        .all::<(String, String, String, String, Option<String>, String)>()
         .await?;
 
-    for (
-        schema,
-        table_name,
-        name,
-        data_type,
-        udt_schema,
-        udt_name,
-        is_nullable,
-        default,
-        is_identity,
-        character_length,
-        numeric_precision,
-        numeric_scale,
-    ) in rows
-    {
+    for (schema, table_name, name, is_nullable, default, is_identity) in rows {
         let Some(table) = tables.get_mut(&qualified(&schema, &table_name, current)) else {
             continue;
         };
@@ -360,24 +331,9 @@ async fn introspect_columns(
 
         table.columns.push(Column {
             name,
-            ty: {
-                let ty = parse_type(
-                    &data_type,
-                    &udt_name,
-                    character_length,
-                    numeric_precision,
-                    numeric_scale,
-                );
-                // An enum, domain or composite type that lives in another schema has to be
-                // named with that schema: an unqualified name would be resolved through
-                // `search_path` and could reach the wrong type.
-                match ty {
-                    TypeDef::Custom(name) if data_type == "USER-DEFINED" => {
-                        TypeDef::Custom(qualified(&udt_schema, name.as_ref(), current).into())
-                    }
-                    other => other,
-                }
-            },
+            // The type is filled in by `introspect_column_types`, which reads the catalogue
+            // fields `information_schema` does not expose.
+            ty: TypeDef::Text,
             nullable: is_nullable == "YES",
             auto_increment,
             primary_key: false,
@@ -394,7 +350,240 @@ async fn introspect_columns(
         });
     }
 
+    introspect_column_types(db, tables, current).await
+}
+
+/// Read each column's type from `pg_catalog`.
+///
+/// `information_schema` collapses three things Besu has to keep apart:
+///
+/// - a domain is reported by its base type, so a domain over `integer` looks like a plain
+///   `integer` and the next `push` would `ALTER ... TYPE` it out of existence;
+/// - a type modifier is dropped, so `timestamp(3)` looks like `timestamp` and `bit(5)` like
+///   `bit(1)`;
+/// - an array is reported under its element type's internal name (`_int4`), which is a type
+///   no one wrote.
+///
+/// `format_type(oid, atttypmod)` spells the whole declaration, including the modifier, and the
+/// catalogue columns beside it say whether the type is a domain, an enum or an array. Nothing
+/// here strips a leading underscore: an array is recognised by `typelem` and `typlen`, and
+/// its element is read through the same catalogue fields.
+async fn introspect_column_types(
+    db: &besu::Database<Sqlx>,
+    tables: &mut BTreeMap<String, Table>,
+    current: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    #[allow(clippy::type_complexity)]
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT n.nspname, c.relname, a.attname, \
+                    format_type(a.atttypid, a.atttypmod), \
+                    t.typtype::text, t.typname, tn.nspname, \
+                    (t.typelem <> 0 AND t.typlen = -1), \
+                    et.typtype::text, et.typname, etn.nspname, \
+                    CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation \
+                         THEN co.collname END \
+             FROM pg_attribute a \
+             JOIN pg_class c ON c.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_namespace tn ON tn.oid = t.typnamespace \
+             LEFT JOIN pg_type et ON et.oid = t.typelem \
+             LEFT JOIN pg_namespace etn ON etn.oid = et.typnamespace \
+             LEFT JOIN pg_collation co ON co.oid = a.attcollation \
+             WHERE a.attnum > 0 \
+               AND NOT a.attisdropped \
+               AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+               AND n.nspname NOT LIKE 'pg_temp%' \
+             ORDER BY n.nspname, c.relname, a.attnum"
+        ))
+        .all::<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>()
+        .await?;
+
+    for (
+        schema,
+        table_name,
+        column_name,
+        formatted,
+        typtype,
+        typname,
+        typnamespace,
+        is_array,
+        element_typtype,
+        element_typname,
+        element_typnamespace,
+        collation,
+    ) in rows
+    {
+        let Some(table) = tables.get_mut(&qualified(&schema, &table_name, current)) else {
+            continue;
+        };
+        let Some(column) = table
+            .columns
+            .iter_mut()
+            .find(|column| column.name == column_name)
+        else {
+            continue;
+        };
+
+        let mut ty = column_type(
+            &formatted,
+            &typtype,
+            &typname,
+            &typnamespace,
+            is_array,
+            element_typtype.as_deref(),
+            element_typname.as_deref(),
+            element_typnamespace.as_deref(),
+            current,
+        );
+        if let Some(collation) = collation {
+            ty = TypeDef::Collated(Box::new(ty), collation.into());
+        }
+        column.ty = ty;
+    }
+
     Ok(())
+}
+
+/// Turn the catalogue's description of one column into a [`TypeDef`].
+#[allow(clippy::too_many_arguments)]
+fn column_type(
+    formatted: &str,
+    typtype: &str,
+    typname: &str,
+    typnamespace: &str,
+    is_array: bool,
+    element_typtype: Option<&str>,
+    element_typname: Option<&str>,
+    element_typnamespace: Option<&str>,
+    current: Option<&str>,
+) -> TypeDef {
+    // A domain is a named type in its own right: reporting its base type would lose the
+    // domain, and a later `push` would then alter the column to the base type.
+    if typtype == "d" {
+        return TypeDef::Custom(qualified(typnamespace, typname, current).into());
+    }
+    // An enum is likewise a named type; it is also listed in `Schema::enums`.
+    if typtype == "e" {
+        return TypeDef::Custom(qualified(typnamespace, typname, current).into());
+    }
+    if is_array {
+        // The element's own kind decides whether it is a name that has to be qualified. The
+        // `[]` suffix `format_type` writes is only used for a type Besu models directly.
+        if let (Some(element), Some(element_typname), Some(element_typnamespace)) =
+            (element_typtype, element_typname, element_typnamespace)
+            && matches!(element, "d" | "e" | "c" | "r")
+        {
+            return TypeDef::Array(besu_core::types::TypeRef::owned(TypeDef::Custom(
+                qualified(element_typnamespace, element_typname, current).into(),
+            )));
+        }
+        let element = formatted.strip_suffix("[]").unwrap_or(formatted);
+        return TypeDef::Array(besu_core::types::TypeRef::owned(parse_type_name(element)));
+    }
+    parse_type_name(formatted)
+}
+
+/// Map a `format_type` spelling, which may carry a modifier, onto a canonical type.
+fn parse_type_name(formatted: &str) -> TypeDef {
+    let (base, modifier) = split_modifier(formatted);
+    match base.as_str() {
+        "boolean" => TypeDef::Bool,
+        "smallint" => TypeDef::Int2,
+        "integer" => TypeDef::Int4,
+        "bigint" => TypeDef::Int8,
+        "real" => TypeDef::Float4,
+        "double precision" => TypeDef::Float8,
+        "text" => TypeDef::Text,
+        "character varying" => match number(modifier) {
+            Some(length) => TypeDef::VarChar(length),
+            // `VARCHAR` with no limit is `TEXT` with a different name.
+            None => TypeDef::Text,
+        },
+        // A `CHAR` with no modifier is `CHAR(1)`, which is what PostgreSQL stores.
+        "character" => TypeDef::Char(number(modifier).unwrap_or(1)),
+        "bytea" => TypeDef::Bytes,
+        "uuid" => TypeDef::Uuid,
+        "json" => TypeDef::Json,
+        "jsonb" => TypeDef::Jsonb,
+        "date" => TypeDef::Date,
+        "time without time zone" => match number(modifier) {
+            Some(precision) => TypeDef::TimeP(narrow(precision)),
+            None => TypeDef::Time,
+        },
+        "time with time zone" => match number(modifier) {
+            Some(precision) => TypeDef::TimeTzP(narrow(precision)),
+            None => TypeDef::TimeTz,
+        },
+        "timestamp without time zone" => match number(modifier) {
+            Some(precision) => TypeDef::TimestampP(narrow(precision)),
+            None => TypeDef::Timestamp,
+        },
+        "timestamp with time zone" => match number(modifier) {
+            Some(precision) => TypeDef::TimestampTzP(narrow(precision)),
+            None => TypeDef::TimestampTz,
+        },
+        "numeric" | "decimal" => match modifier.and_then(decimal_parts) {
+            Some((precision, scale)) => TypeDef::Decimal(precision, scale),
+            // A `NUMERIC` with no modifier has no fixed precision, which `Decimal` cannot
+            // express; its name is kept and DDL names it again.
+            None => TypeDef::Custom("numeric".into()),
+        },
+        "bit" => TypeDef::Bit(number(modifier).unwrap_or(1)),
+        // `BIT VARYING` with no modifier is unlimited, which `VarBit(0)` records.
+        "bit varying" => TypeDef::VarBit(number(modifier).unwrap_or(0)),
+        // An enum, a composite, a range, `inet`, `interval`, `tsvector` and every extension
+        // type keep their native spelling, so generated DDL names the same type.
+        _ => TypeDef::Custom(formatted.to_owned().into()),
+    }
+}
+
+/// Split `timestamp(3) without time zone` into `timestamp without time zone` and `3`.
+fn split_modifier(formatted: &str) -> (String, Option<&str>) {
+    let Some(open) = formatted.find('(') else {
+        return (formatted.to_owned(), None);
+    };
+    let Some(close) = formatted[open..].find(')').map(|close| close + open) else {
+        return (formatted.to_owned(), None);
+    };
+    let base = format!("{}{}", &formatted[..open], &formatted[close + 1..]);
+    (base.trim().to_owned(), Some(&formatted[open + 1..close]))
+}
+
+/// Narrow a parsed precision to the `u8` a [`TypeDef`] carries.
+fn narrow(precision: u32) -> u8 {
+    u8::try_from(precision).unwrap_or(u8::MAX)
+}
+
+/// The single number in a modifier such as `3`.
+fn number(modifier: Option<&str>) -> Option<u32> {
+    modifier?.trim().parse().ok()
+}
+
+/// The `(precision, scale)` in a `numeric` modifier such as `10,2`.
+fn decimal_parts(modifier: &str) -> Option<(u8, u8)> {
+    let mut parts = modifier.split(',');
+    let precision = parts.next()?.trim().parse().ok()?;
+    let scale = parts
+        .next()
+        .map_or(0, |part| part.trim().parse().unwrap_or_default());
+    Some((precision, scale))
 }
 
 /// Read the expression of every generated column.
@@ -791,62 +980,6 @@ async fn introspect_foreign_keys(
     }
 
     Ok(())
-}
-
-/// Map a native PostgreSQL type back onto Besu's canonical types.
-fn parse_type(
-    data_type: &str,
-    udt_name: &str,
-    character_length: Option<i32>,
-    numeric_precision: Option<i32>,
-    numeric_scale: Option<i32>,
-) -> TypeDef {
-    match data_type {
-        "boolean" => TypeDef::Bool,
-        "smallint" => TypeDef::Int2,
-        "integer" => TypeDef::Int4,
-        "bigint" => TypeDef::Int8,
-        "real" => TypeDef::Float4,
-        "double precision" => TypeDef::Float8,
-        "text" => TypeDef::Text,
-        "character varying" => match character_length {
-            Some(length) => TypeDef::VarChar(length_of(length)),
-            // `VARCHAR` with no limit is `TEXT` with a different name.
-            None => TypeDef::Text,
-        },
-        "character" => TypeDef::Char(length_of(character_length.unwrap_or(1))),
-        "bytea" => TypeDef::Bytes,
-        "uuid" => TypeDef::Uuid,
-        "json" => TypeDef::Json,
-        "jsonb" => TypeDef::Jsonb,
-        "date" => TypeDef::Date,
-        "time without time zone" => TypeDef::Time,
-        "time with time zone" => TypeDef::TimeTz,
-        "timestamp without time zone" => TypeDef::Timestamp,
-        "timestamp with time zone" => TypeDef::TimestampTz,
-        "numeric" | "decimal" => match (numeric_precision, numeric_scale) {
-            // This is how `u64` is spelled, and there is no way to tell the two apart.
-            (Some(20), Some(0)) => TypeDef::UInt(64),
-            // The same for `u128`, and for an `i128` declared as `Decimal(39, 0)`.
-            (Some(39), Some(0)) => TypeDef::UInt(128),
-            (Some(precision), Some(scale)) => TypeDef::Decimal(narrow(precision), narrow(scale)),
-            (Some(precision), None) => TypeDef::Decimal(narrow(precision), 0),
-            _ => TypeDef::Custom("numeric".into()),
-        },
-        // An enum, a domain, or any other type Besu does not model keeps its name, so it
-        // round-trips and generated DDL names the same type. Enumerations are additionally
-        // listed in `Schema::enums`.
-        "USER-DEFINED" | "ARRAY" => TypeDef::Custom(udt_name.to_owned().into()),
-        other => TypeDef::Custom(other.to_owned().into()),
-    }
-}
-
-fn narrow(value: i32) -> u8 {
-    u8::try_from(value).unwrap_or(u8::MAX)
-}
-
-fn length_of(value: i32) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Map PostgreSQL's `confdeltype` / `confupdtype` codes onto an action.

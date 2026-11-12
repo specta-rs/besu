@@ -35,8 +35,16 @@ enum Uniqueness {
     Unsupported,
 }
 
-fn uniqueness(ty: &TypeDef) -> Uniqueness {
+/// The type under any collation, which never changes how a column is indexed.
+fn bare_type(ty: &TypeDef) -> &TypeDef {
     match ty {
+        TypeDef::Collated(inner, _) => bare_type(inner),
+        other => other,
+    }
+}
+
+fn uniqueness(ty: &TypeDef) -> Uniqueness {
+    match bare_type(ty) {
         TypeDef::Text | TypeDef::Bytes => Uniqueness::Prefix(INDEX_PREFIX),
         // A string type is indexable only while its worst-case byte length fits. `utf8mb4`
         // uses up to four bytes per character, so anything wider than 768 characters needs
@@ -62,7 +70,7 @@ impl MySqlDdl {
     /// before 8.0.13.
     fn default_needs_expression(ty: &TypeDef) -> bool {
         matches!(
-            ty,
+            bare_type(ty),
             TypeDef::Text | TypeDef::Bytes | TypeDef::Json | TypeDef::Jsonb
         )
     }
@@ -139,13 +147,44 @@ impl Ddl for MySqlDdl {
         // declaring `TIMETZ` must compare equal to the `TIME` the database reports back.
         match ty {
             TypeDef::TimeTz => TypeDef::Time,
+            // A precision is part of the type, and `TIME(6)` is exactly what the declared
+            // `Time` renders, so folding the two keeps `push` a no-op. Any other precision
+            // is a different column and keeps its modifier.
+            TypeDef::TimeTzP(6) | TypeDef::TimeP(6) => TypeDef::Time,
+            TypeDef::TimeTzP(p) => TypeDef::TimeP(*p),
             // MySQL has no column type that stores an offset: `DATETIME` is the same column
             // for both, so a declared `TimestampTz` must compare equal to the `Timestamp`
             // introspection reports — otherwise every `push` sees a type change.
-            TypeDef::TimestampTz => TypeDef::Timestamp,
+            TypeDef::TimestampTz | TypeDef::TimestampP(6) | TypeDef::TimestampTzP(6) => {
+                TypeDef::Timestamp
+            }
+            TypeDef::TimestampTzP(p) => TypeDef::TimestampP(*p),
             // `u128` is `DECIMAL(39,0)`, which is indistinguishable from a
             // `Decimal(39, 0)`; an `i128` is declared as that already.
             TypeDef::UInt(128) => TypeDef::Decimal(39, 0),
+            // MySQL has no array type; the declared DDL falls back to `TEXT`, so a declared
+            // array has to fold onto the text column introspection reports.
+            TypeDef::Array(_) => TypeDef::Text,
+            // A collation does not change the type under it, so the fold is applied to the
+            // inner type and the name is kept.
+            TypeDef::Collated(inner, collation) => {
+                TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
+            }
+            // MySQL has finer storage widths than the canonical types: a signed `TINYINT`
+            // is narrower than `SMALLINT`, and `LONGTEXT` holds more than `TEXT`. Their
+            // native names are kept for fidelity, and folded here so a declared `i8` or
+            // `String` converges against the column the database reports.
+            TypeDef::Custom(name) => {
+                let lower = name.to_ascii_lowercase();
+                // An older server writes `tinyint(4)`, so the display width is ignored.
+                match lower.split('(').next().unwrap_or(lower.as_str()) {
+                    "tinyint" | "year" => TypeDef::Int2,
+                    "mediumint" => TypeDef::Int4,
+                    "tinytext" | "mediumtext" | "longtext" => TypeDef::Text,
+                    "tinyblob" | "mediumblob" | "longblob" => TypeDef::Bytes,
+                    _ => TypeDef::Custom(name.clone()),
+                }
+            }
             other => other.clone(),
         }
     }
@@ -198,7 +237,9 @@ impl Ddl for MySqlDdl {
             && let Some(default) = &column.default
         {
             sql.push_str(" DEFAULT ");
-            if Self::default_needs_expression(&column.ty) {
+            // An `ON UPDATE` clause is never an expression, even on a type that otherwise
+            // needs the parenthesised form.
+            if Self::default_needs_expression(&column.ty) && !default.contains(" ON UPDATE ") {
                 sql.push('(');
                 sql.push_str(default);
                 sql.push(')');

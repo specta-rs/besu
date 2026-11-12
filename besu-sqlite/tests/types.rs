@@ -271,3 +271,59 @@ async fn explicit_sql_types_are_declared_and_converge() {
     let second = db.push([prices.def()]).await.unwrap();
     assert!(second.is_empty(), "got {:?}", second.changes);
 }
+
+// ---------------------------------------------------------------------------------------
+// Exact decimals
+// ---------------------------------------------------------------------------------------
+
+/// SQLite has no decimal type, so a `Decimal` is stored as its exact text.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "money")]
+pub struct Money {
+    #[besu(primary_key)]
+    pub id: i64,
+    #[besu(sql_type = "besu::Decimal<10,2>")]
+    pub amount: String,
+}
+
+#[tokio::test]
+async fn a_decimal_is_stored_as_exact_text() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.push([money.def()]).await.unwrap();
+    let second = db.push([money.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+
+    for (id, amount) in [(1_i64, "0.10"), (2, "0.20")] {
+        db.insert(money)
+            .value(money.insert(id, amount.to_owned()))
+            .await
+            .unwrap();
+    }
+
+    let stored: Vec<Money> = db.select(money).order_by(money.id.asc()).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|row| row.amount.as_str())
+            .collect::<Vec<_>>(),
+        ["0.10", "0.20"]
+    );
+}
+
+/// SQLite has no array type, so binding one fails before the statement is sent.
+#[tokio::test]
+async fn an_array_is_rejected_before_it_reaches_the_server() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let statement = besu::Fragment::with_args(
+        "SELECT ?",
+        vec![Value::Array {
+            element: TypeDef::Text,
+            values: vec![Value::Text("a".into())],
+        }],
+    );
+    let error = db.execute(statement).await.unwrap_err();
+    assert!(
+        error.to_string().contains("no array type"),
+        "unexpected error: {error}"
+    );
+}

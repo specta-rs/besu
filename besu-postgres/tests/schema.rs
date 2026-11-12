@@ -215,7 +215,7 @@ async fn enum_types_are_created_diffed_and_dropped() {
         first.statements,
         [
             r#"CREATE TYPE "mood" AS ENUM ('sad', 'ok', 'happy')"#,
-            r#"CREATE TABLE "reviews" ("id" BIGINT PRIMARY KEY, "mood" mood NOT NULL)"#,
+            r#"CREATE TABLE "reviews" ("id" BIGINT PRIMARY KEY, "mood" "mood" NOT NULL)"#,
         ]
     );
 
@@ -1084,5 +1084,129 @@ async fn generated_columns_round_trip() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Introspection fidelity
+// ---------------------------------------------------------------------------------------
+
+/// A domain is a named type, not its base type. Reading it as `integer` would make the next
+/// push `ALTER ... TYPE` the column and destroy the domain.
+#[tokio::test]
+async fn a_domain_round_trips_as_its_own_name() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(besu::Fragment::new(
+        "DROP DOMAIN IF EXISTS positive_integer CASCADE".to_owned(),
+    ))
+    .await
+    .unwrap();
+    db.execute(besu::Fragment::new(
+        "CREATE DOMAIN positive_integer AS integer CHECK (VALUE > 0)".to_owned(),
+    ))
+    .await
+    .unwrap();
+    db.execute(besu::Fragment::new(
+        "CREATE TABLE domain_holder (value positive_integer NOT NULL)".to_owned(),
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(
+        introspected
+            .table("domain_holder")
+            .unwrap()
+            .column("value")
+            .unwrap()
+            .ty,
+        TypeDef::Custom("positive_integer".into())
+    );
+
+    // The snapshot replays to the schema that already exists: the base type is never named.
+    let pushed = db.push_schema(&introspected).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+
+    db.execute(besu::Fragment::new("DROP TABLE domain_holder".to_owned()))
+        .await
+        .unwrap();
+    db.execute(besu::Fragment::new(
+        "DROP DOMAIN positive_integer CASCADE".to_owned(),
+    ))
+    .await
+    .unwrap();
+}
+
+/// `format_type` is what carries the modifier, so `timestamp(3)` and `bit(5)` survive a pull.
+#[tokio::test]
+async fn type_modifiers_are_kept() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(besu::Fragment::new(
+        "CREATE TABLE typed (\
+             at TIMESTAMP(3) NOT NULL, \
+             tod TIME(2) NOT NULL, \
+             flags BIT(5) NOT NULL, \
+             code VARCHAR(10) NOT NULL, \
+             amount NUMERIC(10,2) NOT NULL)"
+            .to_owned(),
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    let table = introspected.table("typed").unwrap();
+    assert_eq!(table.column("at").unwrap().ty, TypeDef::TimestampP(3));
+    assert_eq!(table.column("tod").unwrap().ty, TypeDef::TimeP(2));
+    assert_eq!(table.column("flags").unwrap().ty, TypeDef::Bit(5));
+    assert_eq!(table.column("code").unwrap().ty, TypeDef::VarChar(10));
+    assert_eq!(table.column("amount").unwrap().ty, TypeDef::Decimal(10, 2));
+
+    // A push that dropped a modifier would change the column's precision silently.
+    let pushed = db.push_schema(&introspected).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+}
+
+/// A column collation is part of the column, so a pull has to keep it.
+#[tokio::test]
+async fn a_column_collation_round_trips() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(besu::Fragment::new(
+        "CREATE TABLE sorted (name text COLLATE \"C\" NOT NULL)".to_owned(),
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(
+        introspected
+            .table("sorted")
+            .unwrap()
+            .column("name")
+            .unwrap()
+            .ty,
+        TypeDef::Collated(Box::new(TypeDef::Text), "C".into())
+    );
+
+    let pushed = db.push_schema(&introspected).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+}
+
+/// A custom type name is quoted part by part, so its case reaches the server.
+#[test]
+fn a_custom_type_name_is_quoted() {
+    use besu_core::Dialect;
+    use besu_postgres::Postgres;
+
+    assert_eq!(
+        Postgres::type_name(TypeDef::Custom("MySchema.Mood".into())),
+        r#""MySchema"."Mood""#
+    );
+    // A name the server accepts verbatim, such as an inline enum, is not mangled.
+    assert_eq!(
+        Postgres::type_name(TypeDef::Custom("enum('a','b')".into())),
+        "enum('a','b')"
     );
 }

@@ -9,6 +9,35 @@ use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Postgres;
 
+/// Quote each dotted part of a type name, when every part is a plain identifier.
+///
+/// A `Custom` type is resolved through `search_path` when it is unquoted, so a name such as
+/// `mySchema.Mood` would fold to lowercase and reach a type that does not exist. Quoting
+/// each part preserves the case, which is the whole point of storing the name exactly.
+///
+/// A name that is not a chain of identifiers — an inline `enum('a','b')` from another
+/// dialect, or a type with arguments — is returned verbatim, because quoting it would turn
+/// something the server accepts into a syntax error.
+fn quote_type_name(name: &str) -> Cow<'static, str> {
+    let plain = |part: &str| {
+        part.chars()
+            .next()
+            .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
+            && part
+                .chars()
+                .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
+    };
+    if name.is_empty() || !name.split('.').all(plain) {
+        return Cow::Owned(name.to_owned());
+    }
+    Cow::Owned(
+        name.split('.')
+            .map(Postgres::quote)
+            .collect::<Vec<_>>()
+            .join("."),
+    )
+}
+
 impl Dialect for Postgres {
     type Value = Value;
 
@@ -16,6 +45,7 @@ impl Dialect for Postgres {
     const PLACEHOLDER: Placeholder = Placeholder::Dollar;
     const SUPPORTS_RETURNING: bool = true;
     const SUPPORTS_ILIKE: bool = true;
+    const SUPPORTS_ARRAYS: bool = true;
     const SUPPORTS_FULL_JOIN: bool = true;
     const SUPPORTS_RIGHT_JOIN: bool = true;
     const SUPPORTS_ROW_LOCKING: bool = true;
@@ -30,6 +60,7 @@ impl Dialect for Postgres {
     /// search configuration so the document and the query are normalised identically.
     const FULL_TEXT: FullTextStyle = FullTextStyle::Postgres;
     const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
+    const ROUND_TO_NEEDS_NUMERIC: bool = true;
 
     /// Encode the bound values' shapes so the prepared-statement cache cannot confuse two
     /// statements that share text but not parameter types.
@@ -61,6 +92,8 @@ impl Dialect for Postgres {
                 Value::Timestamp(_) => 's',
                 Value::TimestampTz(_) => 'z',
                 Value::Json(_) => 'j',
+                Value::Decimal(_) => 'D',
+                Value::Array { .. } => 'A',
                 _ => '?',
             });
         }
@@ -103,11 +136,32 @@ impl Dialect for Postgres {
             TypeDef::Jsonb => Cow::Borrowed("JSONB"),
             TypeDef::Date => Cow::Borrowed("DATE"),
             TypeDef::Time => Cow::Borrowed("TIME"),
+            TypeDef::TimeP(p) => Cow::Owned(format!("TIME({p})")),
             TypeDef::TimeTz => Cow::Borrowed("TIMETZ"),
+            TypeDef::TimeTzP(p) => Cow::Owned(format!("TIMETZ({p})")),
             TypeDef::Timestamp => Cow::Borrowed("TIMESTAMP"),
+            TypeDef::TimestampP(p) => Cow::Owned(format!("TIMESTAMP({p})")),
             TypeDef::TimestampTz => Cow::Borrowed("TIMESTAMPTZ"),
+            TypeDef::TimestampTzP(p) => Cow::Owned(format!("TIMESTAMPTZ({p})")),
             TypeDef::Decimal(p, s) => Cow::Owned(format!("NUMERIC({p},{s})")),
-            TypeDef::Custom(name) => name,
+            TypeDef::Bit(n) => Cow::Owned(format!("BIT({n})")),
+            // A bare `BIT VARYING` has no limit, which is what `VarBit(0)` records.
+            TypeDef::VarBit(0) => Cow::Borrowed("BIT VARYING"),
+            TypeDef::VarBit(n) => Cow::Owned(format!("BIT VARYING({n})")),
+            // An array is spelled by appending `[]` to the element type, which is exactly
+            // how `format_type` reports it back.
+            TypeDef::Array(inner) => Cow::Owned(format!(
+                "{}[]",
+                Postgres::type_name(inner.as_type().clone())
+            )),
+            // A collation is written after the type it applies to, which is legal both in
+            // `CREATE TABLE` and after `ALTER COLUMN ... TYPE`.
+            TypeDef::Collated(inner, collation) => Cow::Owned(format!(
+                "{} COLLATE {}",
+                Postgres::type_name(*inner),
+                Postgres::quote(&collation)
+            )),
+            TypeDef::Custom(name) => quote_type_name(&name),
             _ => Cow::Borrowed("TEXT"),
         }
     }
@@ -158,6 +212,22 @@ impl Dialect for Postgres {
             "json_agg" => Named("JSON_AGG"),
             "jsonb_agg" => Named("JSONB_AGG"),
             "json_object" => Named("JSONB_BUILD_OBJECT"),
+            "json_array_agg" => Named("JSON_AGG"),
+            "json_object_agg" => Named("JSONB_OBJECT_AGG"),
+            // Arrays. PostgreSQL is the only supported database with a real array type, so
+            // these are exactly the spellings and every other dialect reports the function
+            // as missing instead of inventing one.
+            "array_length" => Named("ARRAY_LENGTH"),
+            "cardinality" => Named("CARDINALITY"),
+            "array_append" => Named("ARRAY_APPEND"),
+            "array_prepend" => Named("ARRAY_PREPEND"),
+            "array_cat" => Named("ARRAY_CAT"),
+            "array_position" => Named("ARRAY_POSITION"),
+            "array_remove" => Named("ARRAY_REMOVE"),
+            "array_replace" => Named("ARRAY_REPLACE"),
+            "array_to_string" => Named("ARRAY_TO_STRING"),
+            "string_to_array" => Named("STRING_TO_ARRAY"),
+            "array_agg" => Named("ARRAY_AGG"),
             "bool_and" => Named("BOOL_AND"),
             "bool_or" => Named("BOOL_OR"),
             "every" => Named("EVERY"),
