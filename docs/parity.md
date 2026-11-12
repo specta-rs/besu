@@ -21,7 +21,7 @@ not implemented. **N/A** — no meaning in a Rust library.
 
 | Drizzle | Besu | Notes |
 | --- | --- | --- |
-| Column types | **Partial** | Every primitive round-trips. `INTERVAL`, `INET`/`CIDR`, `BIT`, arrays, ranges, spatial and `pgvector` are database-native only |
+| Column types | **Partial** | Every primitive round-trips, plus exact `DECIMAL`, PostgreSQL arrays, timestamps with precision, collations and domains. `INTERVAL`, `INET`/`CIDR`, `BIT`, ranges, spatial and `pgvector` are database-native only |
 | Indexes | **Partial** | Single-column indexes and uniques are declarable, and the IR carries the access method (`GIN`, `GiST`, `BRIN`, `FULLTEXT`, `SPATIAL`), which round-trips and is diffed. Composite indexes, expression indexes and operator classes are snapshot-only or not modelled |
 | Constraints | **Partial** | Foreign keys, single and composite `UNIQUE`, and `CHECK` round-trip. A check cannot be declared from the derive yet |
 | Sequences | **Yes** | `Schema::sequences`, created and diffed on PostgreSQL; SQLite and MySQL have none |
@@ -39,7 +39,7 @@ not implemented. **N/A** — no meaning in a Rust library.
 | Select | **Yes** | Filter, order, group, having, limit/offset, distinct, row locks, joins |
 | Insert | **Yes** | `value`/`values`, `RETURNING`, `ON CONFLICT`, chunked and bulk |
 | Update / delete | **Yes** | Type-state guard against a `WHERE`-less write |
-| Operators | **Partial** | Comparison, `LIKE`/`ILIKE`, `BETWEEN`, `IN`, null-safe `IS DISTINCT FROM`, regex, arithmetic, `COALESCE`/`NULLIF`/`GREATEST`/`LEAST`, `CASE`, `CAST`, JSON paths, full text. Missing: array operators and `ANY`/`ALL` over arrays — [#89](https://github.com/specta-rs/besu/issues/89) |
+| Operators | **Yes** | Comparison, `LIKE`/`ILIKE`, `BETWEEN`, `IN`, null-safe `IS DISTINCT FROM`, regex, arithmetic, `COALESCE`/`NULLIF`/`GREATEST`/`LEAST`, `CASE`, `CAST`, JSON paths and operators, full text, and PostgreSQL array operators including `= ANY` |
 | Joins | **Yes** | Inner, left, right, full, cross; outer joins widen the projection to `Option` |
 | Aliases | **No** | A self-join needs one, and is the clearest gap against Drizzle. Use `sql!` for now — [#77](https://github.com/specta-rs/besu/issues/77) |
 | `sql` operator | **Yes** | `sql!`, with compile-time arity checking |
@@ -49,7 +49,7 @@ not implemented. **N/A** — no meaning in a Rust library.
 | Subqueries | **Partial** | `EXISTS`, `NOT EXISTS` and `IN (SELECT …)`, correlated with `correlate(..)`. No derived table in `FROM`, no scalar subquery in a projection, and a set operation cannot be used as a subquery — [#79](https://github.com/specta-rs/besu/issues/79) |
 | CTEs | **Partial** | `Select::cte` / `with_cte`, including `WITH RECURSIVE`; a handle exists for a whole-row select over one table |
 | Transactions | **Yes** | `begin`/`commit`/`rollback`, `transaction()`, savepoints |
-| Batch API | **No** | Await each statement, or use one transaction — [#84](https://github.com/specta-rs/besu/issues/84) |
+| Batch API | **Partial** | `db.batch((..))` runs up to eight writes in one transaction with a typed tuple of outputs. Selects are not batched yet |
 | Dynamic query building | **Partial** | A query is a value, so it can be stored, passed and composed; there is no `$dynamic` mutation handle |
 | Prepared statements | **Partial** | The drivers cache prepared statements per SQL string. There is no explicit `prepare` handle |
 | Custom types | **Yes** | `#[besu(sql_type = "..")]` plus your own `SqlType` marker |
