@@ -7,11 +7,10 @@ would actually require. The order is a judgement about impact versus cost, not a
 | --- | --- | --- | --- |
 | 1 | A native database backend | sqlx is three dependencies deep in the driver crates | Large |
 | 2 | [Table aliases and self-joins](https://github.com/specta-rs/besu/issues/77) | A self-join is impossible today | Medium |
-| 3 | [Derived tables and scalar subqueries](https://github.com/specta-rs/besu/issues/79) | Aggregating a subquery is not expressible | Medium |
-| 4 | [Seeding](https://github.com/specta-rs/besu/issues/85) | No deterministic data generator | Large |
-| 5 | [Decode without materialising](https://github.com/specta-rs/besu/issues/96) | A select allocates a copy of every column | Large |
-| 6 | [Custom column types](#custom-column-types) | `INTERVAL`, `INET` and the rest are DDL-only | Medium |
-| 7 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
+| 3 | [Seeding](https://github.com/specta-rs/besu/issues/85) | No deterministic data generator | Large |
+| 4 | [Decode without materialising](https://github.com/specta-rs/besu/issues/96) | A select allocates a copy of every column | Large |
+| 5 | [Custom column types](#custom-column-types) | `INTERVAL`, `INET` and the rest are DDL-only | Medium |
+| 6 | [wasm support](#wasm-support) | The builder compiles for wasm32; execution needs a browser driver | Large |
 
 The complete picture, including what is deliberately not planned, is on the
 [Drizzle parity](parity.md) page.
