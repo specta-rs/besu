@@ -185,7 +185,8 @@ db.migrate(&Migrator::from_dir("migrations")?).await?;
 
 ## Documentation
 
-The README is an overview. The full documentation lives in [`docs/`](docs/README.md).
+The README is an overview. The full documentation lives in [`docs/`](docs/README.md), and is
+published at [specta.dev/docs/besu](https://specta.dev/docs/besu).
 
 - [Get started with SQLite](docs/get-started/sqlite.md) · [PostgreSQL](docs/get-started/postgresql.md) · [MySQL](docs/get-started/mysql.md)
 - [Schema declaration](docs/schema/declaration.md) and [column types](docs/schema/column-types/postgresql.md)
