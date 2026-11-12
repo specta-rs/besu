@@ -108,6 +108,27 @@ besu-cli, besu-studio
 `cargo publish --workspace` works out the order from the dependency graph, so the list does not
 have to be kept sorted by hand. The examples are `publish = false` and are skipped.
 
+### The first release of a crate
+
+A trusted publisher is a setting on a crate that already exists, so a crate cannot be published
+for the first time through this workflow. The first version has to go up with an API token — a
+scoped token from **Account Settings → API Tokens**, used once and then revoked:
+
+```sh
+CARGO_REGISTRY_TOKEN=... cargo publish --workspace --locked
+```
+
+`--workspace` publishes in dependency order, so one command releases every crate including the new
+ones. Afterwards, add the trusted publisher above to each crate that just appeared and enable
+**Require trusted publishing**; from then on the token is refused and only `release.yml` can
+publish.
+
+`besu`, `besu-macros`, `besu-sqlite`, `besu-postgres` and `besu-mysql` were published before this
+repository adopted trusted publishing, so they are already configured. `besu-core`,
+`besu-schema`, `besu-any`, `besu-cli` and `besu-studio` are not on crates.io yet: they need the
+token publish above, and the four fields configured, before the tag-driven workflow can release
+them.
+
 **Cutting a release:**
 
 1. Bump the `version` of every workspace crate and merge to `main`. The tag names the `besu`
@@ -135,7 +156,8 @@ suites need a live server — publishes every crate in dependency order, and cre
 release.
 
 If the token exchange fails, the four fields above do not match the trusted publisher for one
-of the crates, or that crate has not been given one yet.
+of the crates, or that crate has not been given one yet — crates.io reports which one refused the
+exchange.
 
 ## Adding a driver
 

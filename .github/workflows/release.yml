@@ -6,7 +6,9 @@ name: release
 # one-time crates.io configuration.
 #
 # These four values must match the trusted publisher configured on crates.io for
-# *every* published crate, or the token exchange is refused:
+# *every* published crate, or the token exchange is refused. A crate that has never
+# been published cannot carry the setting, so its first version goes up with a
+# one-off API token; see `CONTRIBUTING.md` → "The first release of a crate".
 #   owner        specta-rs
 #   repository   besu
 #   workflow     release.yml
