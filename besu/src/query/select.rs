@@ -8,7 +8,7 @@ use crate::types::Bool;
 use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
 
 use crate::expr::{Expr, IntoCondition, IntoOrder};
-use crate::query::{JoinClause, JoinKind, SelectQuery, SetOp, SetQuery};
+use crate::query::{Cte, JoinClause, JoinKind, SelectQuery, SetOp, SetQuery, set::SetParts};
 use crate::selection::Selection;
 use crate::table::Table;
 
@@ -29,6 +29,30 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
             query: SelectQuery::new(table),
             phantom: PhantomData,
         }
+    }
+
+    /// Define `cte` before this statement, so the statement may refer to it.
+    ///
+    /// A statement that reads from the expression, or joins it, already carries its
+    /// definition; calling this is harmless then, because an entry is kept only once per
+    /// name. It is the way to define an expression the statement only mentions in a
+    /// subquery.
+    ///
+    /// This is `with_cte` rather than `with` because [`Select::with`] already means eager
+    /// loading a relation, and Rust has no overloading.
+    ///
+    /// ```ignore
+    /// let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    /// let rows: Vec<User> = db
+    ///     .select(posts)
+    ///     .with_cte(&adults)
+    ///     .filter(exists(db.from(&adults).correlate(posts).filter(..)))
+    ///     .all()
+    ///     .await?;
+    /// ```
+    pub fn with_cte<T: Table>(mut self, cte: &Cte<T>) -> Self {
+        self.query.push_with(cte.entries());
+        self
     }
 
     /// Add a `WHERE` condition. Repeated calls are combined with `AND`.
@@ -84,6 +108,23 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// `SELECT DISTINCT`.
     pub fn distinct(mut self) -> Self {
         self.query.distinct = true;
+        self
+    }
+
+    /// Label the statement with a comment, rendered as a trailing `/* ... */`.
+    ///
+    /// The label carries no meaning to the database, so it is only there for a human: a
+    /// slow-query log, a `pg_stat_statements` row or a `Logged` event names the code that
+    /// ran the statement instead of showing an anonymous `SELECT`.
+    ///
+    /// ```ignore
+    /// db.select(users).comment("feed page").all().await?;
+    /// ```
+    ///
+    /// A `*/` inside the label is written as `* /`, because otherwise the label would end the
+    /// comment early and the rest of it would be parsed as SQL.
+    pub fn comment(mut self, comment: impl Into<alloc::string::String>) -> Self {
+        self.query.comment = Some(comment.into());
         self
     }
 
@@ -286,6 +327,41 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 }
 
+impl<'a, E: Executor, T: Table> Select<'a, E, (T,), T::Model> {
+    /// Name this query as a common table expression.
+    ///
+    /// The returned handle can be selected from with
+    /// [`Database::from`](crate::Database::from), joined with
+    /// [`inner_join_cte`](Self::inner_join_cte) and [`left_join_cte`](Self::left_join_cte),
+    /// and extended into a recursive definition with [`Cte::union_all`](crate::Cte::union_all).
+    /// The statement that uses it renders `WITH "name" AS (...)` itself, so the expression is
+    /// defined exactly where it is used and never runs on its own.
+    ///
+    /// ```ignore
+    /// let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    /// let rows: Vec<User> = db.from(&adults).filter(adults.column(users.age).lt(65)).all().await?;
+    /// ```
+    ///
+    /// ```sql
+    /// WITH "adults" AS (SELECT ... FROM "users" WHERE ("users"."age" >= $1))
+    /// SELECT "adults"."id", ... FROM "adults" WHERE ("adults"."age" < $2)
+    /// ```
+    ///
+    /// Only a whole-row `SELECT` over one table can be named this way. That is what lets the
+    /// handle know its columns — they are the source table's — and therefore what lets
+    /// [`Cte::column`](crate::Cte::column) type-check against the schema. A query that
+    /// projects a subset needs a different shape of handle, which does not exist yet.
+    ///
+    /// The name is used verbatim inside double quotes, so it may be any identifier, but it
+    /// is written into the SQL rather than bound; passing a value from another source would
+    /// be an injection.
+    pub fn cte(self, name: &'static str) -> Cte<T> {
+        let mut query = self.query;
+        let prerequisites = query.with.take();
+        Cte::new(name, SetParts::new(query), prerequisites)
+    }
+}
+
 impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// An `INNER JOIN`. Rows must match on both sides.
     pub fn inner_join<T: Table>(
@@ -295,7 +371,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     ) -> Select<'a, E, (M, T), (R, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Inner,
-            table: T::DEF,
+            source: crate::query::From::Table(T::DEF),
             on: Some(on.into_kind()),
         });
         Select {
@@ -313,7 +389,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     ) -> Select<'a, E, (M, Option<T>), (R, Option<T::Model>)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Left,
-            table: T::DEF,
+            source: crate::query::From::Table(T::DEF),
             on: Some(on.into_kind()),
         });
         Select {
@@ -331,7 +407,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     ) -> Select<'a, E, (M, T), (Option<R>, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Right,
-            table: T::DEF,
+            source: crate::query::From::Table(T::DEF),
             on: Some(on.into_kind()),
         });
         Select {
@@ -350,7 +426,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     ) -> Select<'a, E, (M, Option<T>), (Option<R>, Option<T::Model>)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Full,
-            table: T::DEF,
+            source: crate::query::From::Table(T::DEF),
             on: Some(on.into_kind()),
         });
         Select {
@@ -364,8 +440,57 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     pub fn cross_join<T: Table>(mut self, _table: T) -> Select<'a, E, (M, T), (R, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Cross,
-            table: T::DEF,
+            source: crate::query::From::Table(T::DEF),
             on: None,
+        });
+        Select {
+            exec: self.exec,
+            query: self.query,
+            phantom: PhantomData,
+        }
+    }
+
+    /// An `INNER JOIN` against a common table expression.
+    ///
+    /// Reading the expression from a join adds its definition to the statement, so the
+    /// `WITH` clause is rendered without a separate call.
+    ///
+    /// ```ignore
+    /// let tree = db.select(nodes).filter(nodes.parent_id.is_null()).cte("tree");
+    /// db.select(nodes)
+    ///     .inner_join_cte(&tree, nodes.parent_id.eq(tree.column(nodes.id)))
+    /// ```
+    pub fn inner_join_cte<T: Table>(
+        mut self,
+        cte: &Cte<T>,
+        on: Expr<(M, Cte<T>), Bool>,
+    ) -> Select<'a, E, (M, Cte<T>), (R, T::Model)> {
+        self.query.push_with(cte.entries());
+        self.query.joins.push(JoinClause {
+            kind: JoinKind::Inner,
+            source: cte.source(),
+            on: Some(on.into_kind()),
+        });
+        Select {
+            exec: self.exec,
+            query: self.query,
+            phantom: PhantomData,
+        }
+    }
+
+    /// A `LEFT JOIN` against a common table expression.
+    ///
+    /// The joined row becomes `Option<T>`, exactly as a left join against a table does.
+    pub fn left_join_cte<T: Table>(
+        mut self,
+        cte: &Cte<T>,
+        on: Expr<(M, Option<Cte<T>>), Bool>,
+    ) -> Select<'a, E, (M, Option<Cte<T>>), (R, Option<T::Model>)> {
+        self.query.push_with(cte.entries());
+        self.query.joins.push(JoinClause {
+            kind: JoinKind::Left,
+            source: cte.source(),
+            on: Some(on.into_kind()),
         });
         Select {
             exec: self.exec,

@@ -56,6 +56,7 @@ async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::
             Some(View {
                 name,
                 definition: definition?,
+                materialised: false,
             })
         })
         .collect())
@@ -66,10 +67,13 @@ async fn introspect_table(
     name: String,
     create_sql: Option<String>,
 ) -> Result<Table, sqlx::Error> {
-    let pragma = format!("PRAGMA table_info({})", quote_literal(&name));
+    // `table_xinfo` is `table_info` plus the `hidden` column, which is the only way to see
+    // a generated column: `table_info` omits them entirely, exactly as if they did not
+    // exist.
+    let pragma = format!("PRAGMA table_xinfo({})", quote_literal(&name));
     let columns = db
         .execute(besu::Fragment::new(pragma))
-        .all::<(i64, String, String, i64, Option<String>, i64)>()
+        .all::<(i64, String, String, i64, Option<String>, i64, i64)>()
         .await?;
 
     let auto_increment = create_sql
@@ -82,16 +86,32 @@ async fn introspect_table(
         columns: columns
             .into_iter()
             .map(
-                |(_, column_name, ty, not_null, default, primary_key)| Column {
-                    name: column_name,
-                    ty: parse_type(&ty),
-                    nullable: not_null == 0 && primary_key == 0,
-                    auto_increment: auto_increment && primary_key != 0,
-                    primary_key: primary_key != 0,
-                    unique: false,
-                    default: default.map(normalise_default),
-                    comment: None,
-                    renamed_from: None,
+                |(_, column_name, ty, not_null, default, primary_key, hidden)| {
+                    // `hidden` is 0 for an ordinary column, 1 for a hidden virtual-table
+                    // column (never reported for a normal table), 2 for `VIRTUAL` and 3 for
+                    // `STORED` generated columns.
+                    let generated = match hidden {
+                        2 | 3 => Some(besu_schema::Generated {
+                            expression: create_sql
+                                .as_deref()
+                                .and_then(|sql| generated_expression(sql, &column_name))
+                                .unwrap_or_default(),
+                            stored: hidden == 3,
+                        }),
+                        _ => None,
+                    };
+                    Column {
+                        name: column_name,
+                        ty: parse_type(&ty),
+                        nullable: not_null == 0 && primary_key == 0,
+                        auto_increment: auto_increment && primary_key != 0,
+                        primary_key: primary_key != 0,
+                        unique: false,
+                        default: default.map(normalise_default),
+                        generated,
+                        comment: None,
+                        renamed_from: None,
+                    }
                 },
             )
             .collect(),
@@ -104,11 +124,113 @@ async fn introspect_table(
         // reported as a guess. The cost is that a table rebuild loses one.
         checks: Vec::new(),
         comment: None,
+        rls: false,
     };
 
     introspect_indexes(db, &mut table).await?;
     introspect_foreign_keys(db, &mut table).await?;
     Ok(table)
+}
+
+/// The expression of a generated column, read out of the `CREATE TABLE` text.
+///
+/// SQLite has no catalogue view of the expression: it exists only in `sqlite_master.sql`.
+/// The definition of the wanted column is found by splitting the table body at top-level
+/// commas, and the expression is the parenthesised group after its `GENERATED ALWAYS AS`.
+fn generated_expression(create_sql: &str, column: &str) -> Option<String> {
+    let start = create_sql.find('(')? + 1;
+    let body = &create_sql[start..];
+    let mut depth = 1usize;
+    let mut quote = 0u8;
+    let mut segment_start = 0usize;
+    let mut segments: Vec<&str> = Vec::new();
+    for (index, byte) in body.bytes().enumerate() {
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => quote = byte,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    segments.push(&body[segment_start..index]);
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                segments.push(&body[segment_start..index]);
+                segment_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    for segment in segments {
+        let trimmed = segment.trim_start();
+        // The first token of a column definition is its name, quoted or bare.
+        let (name, rest) = if let Some(quoted) = trimmed.strip_prefix('"') {
+            let (name, rest) = quoted.split_once('"')?;
+            (name, rest)
+        } else if let Some(quoted) = trimmed.strip_prefix('`') {
+            let (name, rest) = quoted.split_once('`')?;
+            (name, rest)
+        } else {
+            let end = trimmed
+                .find(|ch: char| ch.is_whitespace() || ch == '(')
+                .unwrap_or(trimmed.len());
+            (&trimmed[..end], &trimmed[end..])
+        };
+        if !name.eq_ignore_ascii_case(column) {
+            continue;
+        }
+
+        let lower = rest.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        let mut as_at = None;
+        for index in 0..bytes.len().saturating_sub(1) {
+            if &bytes[index..index + 2] != b"as" {
+                continue;
+            }
+            let previous_ok = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+            let next_ok = bytes
+                .get(index + 2)
+                .is_some_and(|next| next.is_ascii_whitespace() || *next == b'(');
+            if previous_ok && next_ok {
+                as_at = Some(index);
+                break;
+            }
+        }
+        let expression = rest[as_at? + 2..].trim_start();
+        let expression = expression.strip_prefix('(')?;
+        let mut depth = 1usize;
+        let mut quote: Option<char> = None;
+        for (index, ch) in expression.char_indices() {
+            if let Some(open) = quote {
+                if ch == open {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' | '`' => quote = Some(ch),
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(expression[..index].trim().to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+
+    None
 }
 
 async fn introspect_indexes(
@@ -169,6 +291,8 @@ async fn introspect_indexes(
                 name,
                 columns,
                 unique: unique != 0,
+                // SQLite has one access method; everything it creates is a b-tree.
+                kind: besu_schema::IndexKind::Btree,
                 predicate: None,
             }),
         }

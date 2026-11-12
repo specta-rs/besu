@@ -54,6 +54,15 @@ The two `ALL` forms are capability constants, so SQLite records
 `Error::unsupported` rather than emitting SQL it will reject. `INTERSECT` and `EXCEPT`
 themselves are available everywhere; MySQL gained them in 8.0.31.
 
+## A set query as a common table expression
+
+`Cte::union_all` builds a `WITH RECURSIVE` clause out of an anchor and a recursive term, with
+the statement reading the name back out; see [common table expressions](ctes.md).
+
+`SetQuery` itself has no `cte` method yet. A named expression's columns are the source table's,
+which a compound does not carry, so there is no handle to type against. A compound can still
+be read from a common table expression, and a recursive definition is exactly that.
+
 ## Rules the builder enforces
 
 A branch may not carry its own `ORDER BY`, `LIMIT`, `OFFSET` or row lock. On PostgreSQL and

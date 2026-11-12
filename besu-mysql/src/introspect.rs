@@ -1,5 +1,5 @@
-use besu_core::{TypeDef, schema::ReferenceAction};
-use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique, View};
+use besu_core::{TypeDef, schema::IndexKind, schema::ReferenceAction};
+use besu_schema::{Column, ForeignKey, Generated, Index, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
@@ -12,8 +12,8 @@ use crate::Sqlx;
 /// columns and reporting the remaining key parts would describe an index that does not
 /// exist. `CHECK` constraints are skipped too: MySQL reports them in a form it will not
 /// accept back (see the field comment in `introspect_table`). Views are read into
-/// [`Schema::views`] for `besu pull`; the differ ignores them, so `push` never creates or
-/// drops one. Triggers are not read at all.
+/// [`Schema::views`] for `besu pull`; MySQL has no materialised views and no sequences.
+/// Triggers are not read at all.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let tables = db
         .execute(besu::sql!(
@@ -50,6 +50,7 @@ async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::
             Some(View {
                 name,
                 definition: definition?,
+                materialised: false,
             })
         })
         .collect())
@@ -65,6 +66,8 @@ struct RawIndex {
     name: String,
     columns: Vec<String>,
     unique: bool,
+    /// The access method, or `None` when the IR has no name for it.
+    kind: Option<IndexKind>,
     /// Whether any key part is an expression rather than a column.
     expression: bool,
 }
@@ -74,7 +77,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     let columns = db
         .execute(table_query(
             "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, \
-             COLUMN_KEY \
+             COLUMN_KEY, GENERATION_EXPRESSION \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
              ORDER BY ORDINAL_POSITION",
@@ -88,18 +91,19 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
             Option<String>,
             String,
             String,
+            String,
         )>()
         .await?;
 
     let statistics = db
         .execute(table_query(
-            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
+            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_TYPE \
              FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY' \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             &name,
         ))
-        .all::<(String, Option<String>, u64)>()
+        .all::<(String, Option<String>, u64, String)>()
         .await?;
 
     let foreign_keys = db
@@ -124,16 +128,40 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         columns: columns
             .into_iter()
             .map(
-                |(column_name, data_type, column_type, is_nullable, default, extra, column_key)| {
+                |(
+                    column_name,
+                    data_type,
+                    column_type,
+                    is_nullable,
+                    default,
+                    extra,
+                    column_key,
+                    generation_expression,
+                )| {
+                    let extra_lower = extra.to_ascii_lowercase();
+                    // `EXTRA` is the only place MySQL says a column is generated; a
+                    // `DEFAULT_GENERATED` marker means an expression default, not a
+                    // generated column.
+                    let stored = extra_lower.contains("stored generated");
+                    let generated = (stored || extra_lower.contains("virtual generated"))
+                        .then_some(generation_expression)
+                        .filter(|expression| !expression.trim().is_empty())
+                        .map(|expression| Generated {
+                            expression: besu_schema::normalise_generated_expression(&expression),
+                            stored,
+                        });
                     Column {
                         name: column_name,
                         ty: parse_type(&data_type, &column_type),
                         nullable: is_nullable.eq_ignore_ascii_case("YES"),
-                        auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
+                        // A generated column owns its value, so it is not an
+                        // `AUTO_INCREMENT` column.
+                        auto_increment: extra_lower.contains("auto_increment"),
                         primary_key: column_key.eq_ignore_ascii_case("PRI"),
                         // Filled in from `STATISTICS` below.
                         unique: false,
                         default: parse_default(default.as_deref(), &extra),
+                        generated,
                         comment: None,
                         renamed_from: None,
                     }
@@ -150,13 +178,15 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         // leaves them: `push` neither sees nor drops one.
         checks: Vec::new(),
         comment: None,
+        rls: false,
     };
 
     table.foreign_keys = group_foreign_keys(foreign_keys);
 
     let mut indexes: Vec<RawIndex> = Vec::new();
-    for (index_name, column_name, non_unique) in statistics {
+    for (index_name, column_name, non_unique, index_type) in statistics {
         let expression = column_name.is_none();
+        let kind = parse_index_type(&index_type);
         match indexes.iter_mut().find(|index| index.name == index_name) {
             Some(index) => match column_name {
                 Some(column_name) => index.columns.push(column_name),
@@ -166,6 +196,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
                 columns: column_name.into_iter().collect(),
                 name: index_name,
                 unique: non_unique == 0,
+                kind,
                 expression,
             }),
         }
@@ -194,6 +225,13 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         if index.expression {
             continue;
         }
+
+        // An access method the IR has no name for (`HASH`, which only the memory engine
+        // uses) is skipped for the same reason: reporting it as a b-tree would say an index
+        // exists that does not.
+        let Some(kind) = index.kind else {
+            continue;
+        };
 
         if index.unique && index.columns.len() == 1 && index.name == index.columns[0] {
             continue;
@@ -226,12 +264,28 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
             name: index.name,
             columns: index.columns,
             unique: index.unique,
+            kind,
             // MySQL has no partial indexes.
             predicate: None,
         });
     }
 
     Ok(table)
+}
+
+/// Map `information_schema.STATISTICS.INDEX_TYPE` onto an [`IndexKind`].
+///
+/// `None` means the IR has no name for the method, so the index is skipped rather than
+/// reported as a plain b-tree.
+fn parse_index_type(index_type: &str) -> Option<IndexKind> {
+    match index_type.to_ascii_uppercase().as_str() {
+        "BTREE" => Some(IndexKind::Btree),
+        "FULLTEXT" => Some(IndexKind::FullText),
+        "SPATIAL" => Some(IndexKind::Spatial),
+        // `RTREE` is the storage engine's own name for a spatial index.
+        "RTREE" => Some(IndexKind::Spatial),
+        _ => None,
+    }
 }
 
 fn group_foreign_keys(

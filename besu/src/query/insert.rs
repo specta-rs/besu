@@ -75,6 +75,8 @@ pub(crate) struct InsertQuery {
     /// MySQL's name for the incoming row, written only when the conflict clause reads it.
     pub(crate) row_alias: &'static str,
     pub(crate) returning: Option<Vec<ExprKind>>,
+    /// An application-level label, rendered as a trailing `/* ... */`.
+    pub(crate) comment: Option<alloc::string::String>,
 }
 
 impl InsertQuery {
@@ -85,6 +87,7 @@ impl InsertQuery {
             conflict: None,
             row_alias: "new",
             returning: None,
+            comment: None,
         }
     }
 
@@ -236,7 +239,9 @@ impl InsertQuery {
 
         // Sealed in the builder, like every other statement, so the text `to_sql` shows and
         // the text the driver caches are the same string.
-        out.seal()
+        let mut out = out.seal();
+        crate::query::render_comment(&mut out, self.comment.as_deref());
+        out
     }
 }
 
@@ -607,6 +612,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
             let mut query = InsertQuery::new(self.query.table);
             query.conflict = self.query.conflict.clone();
             query.row_alias = self.query.row_alias;
+            query.comment = self.query.comment.clone();
             query.values.reserve(per_statement);
             for _ in 0..per_statement {
                 match pending.next() {
@@ -651,6 +657,14 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         Ok(self.query.clone().build(self.exec.table_prefix()))
     }
 
+    /// Label the statement with a comment, rendered as a trailing `/* ... */`.
+    ///
+    /// See [`Select::comment`](crate::Select::comment) for what the label is for.
+    pub fn comment(mut self, comment: impl Into<alloc::string::String>) -> Self {
+        self.query.comment = Some(comment.into());
+        self
+    }
+
     fn into_parts(self) -> (E, InsertQuery) {
         (self.exec, self.query)
     }
@@ -683,6 +697,21 @@ pub struct InsertReturning<'a, E: Executor, M, I, R> {
     exec: E,
     query: InsertQuery,
     phantom: PhantomData<(&'a (), fn() -> (M, I, R))>,
+}
+
+impl<'a, E: Executor, M, I, R> InsertReturning<'a, E, M, I, R> {
+    /// Label the statement with a comment, rendered as a trailing `/* ... */`.
+    ///
+    /// See [`Select::comment`](crate::Select::comment) for what the label is for.
+    pub fn comment(mut self, comment: impl Into<alloc::string::String>) -> Self {
+        self.query.comment = Some(comment.into());
+        self
+    }
+
+    /// Render the exact SQL this query will run.
+    pub fn to_sql(&self) -> Result<besu_core::Sql<DialectOf<E>>, Error> {
+        Ok(self.query.clone().build(self.exec.table_prefix()))
+    }
 }
 
 impl<'a, E, M, I, R> IntoFuture for InsertReturning<'a, E, M, I, R>

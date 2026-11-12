@@ -29,12 +29,12 @@ impl SQLiteDdl {
 
         // Only the columns present in both definitions are copied. A dropped column is
         // therefore not selected, and a column added by the same push keeps the default
-        // that `CREATE TABLE` gave it. A rename is not an `AlterColumn` in this codebase
-        // (issue #54), so there is nothing to guess; a renamed column is simply a dropped
-        // one plus an added one.
+        // that `CREATE TABLE` gave it. A generated column is never written: the database
+        // computes it, and SQLite rejects an `INSERT` into one.
         let columns: Vec<String> = desired
             .columns
             .iter()
+            .filter(|column| column.generated.is_none())
             .filter(|column| current.column(&column.name).is_some())
             .map(|column| self.quote(&column.name))
             .collect();
@@ -126,6 +126,18 @@ impl Ddl for SQLiteDdl {
             return sql;
         }
 
+        if let Some(generated) = &column.generated {
+            // SQLite implements both spellings; only `STORED` occupies space and may be
+            // indexed.
+            sql.push_str(" GENERATED ALWAYS AS (");
+            sql.push_str(&generated.expression);
+            sql.push_str(if generated.stored {
+                ") STORED"
+            } else {
+                ") VIRTUAL"
+            });
+        }
+
         if inline_pk && column.primary_key {
             sql.push_str(" PRIMARY KEY");
         }
@@ -134,11 +146,15 @@ impl Ddl for SQLiteDdl {
             sql.push_str(" NOT NULL");
         }
 
-        if column.unique {
+        if column.unique && column.generated.is_none() {
             sql.push_str(" UNIQUE");
         }
 
-        if let Some(default) = &column.default {
+        // A generated column is computed from its expression and SQLite rejects a default
+        // beside one.
+        if column.generated.is_none()
+            && let Some(default) = &column.default
+        {
             sql.push_str(" DEFAULT ");
             sql.push_str(default);
         }
@@ -193,6 +209,66 @@ impl Ddl for SQLiteDdl {
 
     fn drop_index(&self, _table: &str, index: &besu_schema::Index) -> String {
         format!("DROP INDEX {}", self.quote(&index.name))
+    }
+
+    /// `CREATE INDEX`.
+    ///
+    /// SQLite has no access methods: every index is a b-tree, whatever kind a shared
+    /// snapshot declares. It also has no partial-index predicate in the IR, so a `WHERE`
+    /// clause is never rendered on an index SQLite created.
+    fn create_index(&self, table: &str, index: &besu_schema::Index) -> String {
+        let mut sql = String::from("CREATE ");
+        if index.unique {
+            sql.push_str("UNIQUE ");
+        }
+        sql.push_str("INDEX ");
+        sql.push_str(&self.quote(&index.name));
+        sql.push_str(" ON ");
+        sql.push_str(&self.quote_table(table));
+        sql.push_str(" (");
+        for (i, column) in index.columns.iter().enumerate() {
+            if i != 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&self.quote(column));
+        }
+        sql.push(')');
+        sql
+    }
+
+    /// `CREATE VIEW`.
+    ///
+    /// SQLite has no materialised views, so a snapshot that declares one is created as an
+    /// ordinary view. That is documented drift: introspection reports it as plain.
+    fn create_view(&self, view: &besu_schema::View) -> Vec<String> {
+        vec![format!(
+            "CREATE VIEW {} AS {}",
+            self.quote_table(&view.name),
+            besu_schema::view_body(&view.definition)
+        )]
+    }
+
+    /// Replace a view by dropping and creating it.
+    ///
+    /// SQLite has no `CREATE OR REPLACE VIEW`, so a changed definition is two statements.
+    /// Dropping the view cannot lose data: the rows are read from the tables it names.
+    fn replace_view(&self, view: &besu_schema::View) -> Vec<String> {
+        vec![
+            format!("DROP VIEW IF EXISTS {}", self.quote_table(&view.name)),
+            format!(
+                "CREATE VIEW {} AS {}",
+                self.quote_table(&view.name),
+                besu_schema::view_body(&view.definition)
+            ),
+        ]
+    }
+
+    /// `DROP VIEW`.
+    ///
+    /// SQLite has no materialised views, so the flag is ignored and the statement SQLite
+    /// accepts is always a plain drop.
+    fn drop_view(&self, name: &str, _materialised: bool) -> Vec<String> {
+        vec![format!("DROP VIEW {}", self.quote_table(name))]
     }
 
     fn add_foreign_key(&self, _table: &str, _fk: &besu_schema::ForeignKey) -> String {
@@ -254,6 +330,7 @@ mod tests {
                 primary_key: false,
                 unique: false,
                 default: None,
+                generated: None,
                 comment: None,
                 renamed_from: None,
             }],
@@ -265,6 +342,7 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
+            rls: false,
         }
     }
 

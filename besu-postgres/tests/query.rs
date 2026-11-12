@@ -1084,3 +1084,500 @@ async fn typed_json_paths_render_and_execute() {
         .unwrap();
     assert_eq!(value[0], serde_json::json!({ "name": "Oscar", "age": 21 }));
 }
+
+// ---------------------------------------------------------------------------------------
+// Comments, operators, functions and common table expressions
+// ---------------------------------------------------------------------------------------
+
+/// A table with dates and a boolean, so the date and aggregate functions have something to
+/// work on that `users` and `posts` do not provide.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "notes")]
+pub struct Note {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub body: String,
+    pub created: chrono::NaiveDate,
+    pub stamp: chrono::NaiveDateTime,
+    pub active: bool,
+}
+
+/// A self-referencing table, so a recursive expression has something to walk.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "nodes")]
+pub struct Node {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+}
+
+async fn setup_notes(db: &besu::Database<Sqlx>) {
+    // Pushing on its own would drop every table it is not told about, so the reference
+    // tables go into the same declaration.
+    db.push([users.def(), posts.def(), notes.def(), nodes.def()])
+        .await
+        .unwrap();
+}
+
+fn date(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+fn stamp(year: i32, month: u32, day: u32) -> chrono::NaiveDateTime {
+    date(year, month, day).and_hms_opt(12, 0, 0).unwrap()
+}
+
+/// A constant date written into the statement. The arguments are integers chosen in the
+/// test, never user input.
+fn date_literal(year: i32, month: u32, day: u32) -> Expr<(NoteTable,), besu::Date> {
+    Expr::raw(format!("DATE '{year:04}-{month:02}-{day:02}'"))
+}
+
+#[tokio::test]
+async fn comments_are_part_of_the_statement() {
+    let db = setup().await;
+
+    let sql = db.select(users).comment("feed page").to_sql().unwrap();
+    assert!(sql.sql().ends_with("/* feed page */"), "{}", sql.sql());
+
+    let rows: Vec<User> = db.select(users).comment("feed page").all().await.unwrap();
+    assert!(rows.is_empty());
+}
+
+/// PostgreSQL is the dialect that spells the null-safe comparison as a keyword, and the one
+/// with the whole family of regular-expression operators.
+#[tokio::test]
+async fn null_safe_comparisons_and_regexes_run() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 20))
+        .await
+        .unwrap();
+    db.insert(users)
+        .value(
+            users
+                .insert("b@example.com", "alice", 30)
+                .bio("hello".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let differing: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_distinct_from("hello"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(differing.len(), 1);
+    assert_eq!(differing[0].name, "Alice");
+
+    let same: Vec<User> = db
+        .select(users)
+        .filter(users.bio.is_not_distinct_from(Option::<String>::None))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(same.len(), 1);
+    assert_eq!(same[0].name, "Alice");
+
+    let matched: Vec<User> = db
+        .select(users)
+        .filter(users.name.regex_match("^A"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(matched.len(), 1);
+
+    // `~*` is the case-insensitive form, so it also finds the lowercased name.
+    let insensitive: Vec<User> = db
+        .select(users)
+        .filter(users.name.regex_match_ci("^A"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(insensitive.len(), 2);
+
+    let negated: Vec<User> = db
+        .select(users)
+        .filter(users.name.not_regex_match_ci("^A"))
+        .all()
+        .await
+        .unwrap();
+    assert!(negated.is_empty());
+
+    let negated_sensitive: Vec<User> = db
+        .select(users)
+        .filter(not_regex_match(users.name, "^A"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(negated_sensitive.len(), 1);
+    assert_eq!(negated_sensitive[0].name, "alice");
+}
+
+/// The string helpers, one call of each family, against the server that spells them the SQL
+/// standard way.
+#[tokio::test]
+async fn string_functions_run() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 20))
+        .await
+        .unwrap();
+
+    let rows: Vec<(i64, i64, String, String, String, String, String)> = db
+        .select(users)
+        .pick((
+            char_length(users.name),
+            octet_length(users.name),
+            substr(users.name, 2, 3),
+            replace(users.name, "Ali", "X"),
+            left(users.name, 2),
+            right(users.name, 2),
+            lpad(users.name, 7, "."),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        (
+            5,
+            5,
+            "lic".to_string(),
+            "Xce".to_string(),
+            "Al".to_string(),
+            "ce".to_string(),
+            "..Alice".to_string(),
+        )
+    );
+
+    let rows: Vec<(String, String, String, i64, String, String)> = db
+        .select(users)
+        .pick((
+            rpad(users.name, 7, "."),
+            btrim(users.email),
+            initcap("hello world"),
+            strpos(users.name, "ice"),
+            split_part("a,b,c", ",", 2),
+            translate(users.name, "Al", "Ol"),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        (
+            "Alice..".to_string(),
+            "a@example.com".to_string(),
+            "Hello World".to_string(),
+            3,
+            "b".to_string(),
+            "Olice".to_string(),
+        )
+    );
+
+    let rows: Vec<(String, String, String, String)> = db
+        .select(users)
+        .pick((
+            repeat("ab", 2),
+            concat_ws("-", users.name, "x"),
+            md5(users.name),
+            regexp_replace(users.name, "A", "O"),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        (
+            "abab".to_string(),
+            "Alice-x".to_string(),
+            "64489c85dc2fe0787b85cd87214b3810".to_string(),
+            "Olice".to_string(),
+        )
+    );
+
+    // PostgreSQL's `sha256` returns `bytea` rather than the hexadecimal text the other
+    // databases return, so it is refused rather than silently decoding as bytes.
+    let error = db
+        .select(users)
+        .pick(sha256(users.name))
+        .all()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("sha256"), "{error}");
+}
+
+/// The date helpers: a truncation, an extraction, a difference and an interval shift.
+#[tokio::test]
+async fn date_functions_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+    db.insert(notes)
+        .value(notes.insert(
+            "first".to_string(),
+            date(2024, 3, 15),
+            stamp(2024, 3, 15),
+            true,
+        ))
+        .await
+        .unwrap();
+
+    let rows: Vec<(i64, i64, i64, String)> = db
+        .select(notes)
+        .pick((
+            extract(DateField::Year, notes.created),
+            extract(DateField::Month, notes.created),
+            datediff(notes.created, date_literal(2024, 3, 10)),
+            to_text(date_trunc(DateField::Month, notes.stamp)),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 2024);
+    assert_eq!(rows[0].1, 3);
+    assert_eq!(rows[0].2, 5);
+    assert_eq!(rows[0].3, "2024-03-01 00:00:00");
+
+    let shifted: Vec<chrono::NaiveDateTime> = db
+        .select(notes)
+        .pick(date_add(notes.stamp, Interval::new().months(1).days(2)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(shifted, [stamp(2024, 4, 17)]);
+
+    let back: Vec<chrono::NaiveDateTime> = db
+        .select(notes)
+        .pick(date_sub(notes.stamp, Interval::new().days(15)))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(back, [stamp(2024, 2, 29)]);
+
+    let today: Vec<chrono::NaiveDate> = db.select(notes).pick(current_date()).all().await.unwrap();
+    assert_eq!(today.len(), 1);
+}
+
+/// The aggregate helpers, including the ones PostgreSQL alone has.
+#[tokio::test]
+async fn aggregate_functions_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+    db.insert(notes)
+        .values([
+            notes.insert("a".to_string(), date(2024, 1, 1), stamp(2024, 1, 1), true),
+            notes.insert("b".to_string(), date(2024, 1, 2), stamp(2024, 1, 2), false),
+        ])
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, String, bool, bool)> = db
+        .select(notes)
+        .pick((
+            string_agg(notes.body, ","),
+            to_text(json_agg(notes.body)),
+            bool_and(notes.active),
+            every(notes.active),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        [("a,b".to_string(), r#"["a", "b"]"#.to_string(), false, false)]
+    );
+
+    // `bool_or` and the statistical aggregates over the whole group.
+    let rows: Vec<(bool, f64, f64, String)> = db
+        .select(notes)
+        .pick((
+            bool_or(notes.active),
+            stddev(notes.id),
+            variance(notes.id),
+            to_text(jsonb_agg(notes.body)),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(rows[0].0);
+    assert!(rows[0].1 > 0.0);
+    assert!(rows[0].2 > 0.0);
+    assert_eq!(rows[0].3, r#"["a", "b"]"#);
+
+    let objects: Vec<serde_json::Value> = db
+        .select(notes)
+        .pick(json_object("body", notes.body))
+        .limit(1)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(objects, [serde_json::json!({ "body": "a" })]);
+}
+
+/// A window numbers the partition, and `FILTER` narrows an aggregate to some of its rows.
+#[tokio::test]
+async fn windows_and_filters_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+    db.insert(notes)
+        .values([
+            notes.insert("a".to_string(), date(2024, 1, 1), stamp(2024, 1, 1), true),
+            notes.insert("b".to_string(), date(2024, 1, 2), stamp(2024, 1, 2), false),
+            notes.insert("c".to_string(), date(2024, 1, 3), stamp(2024, 1, 3), true),
+        ])
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, i64, i64)> = db
+        .select(notes)
+        .pick((
+            notes.body,
+            row_number().over(Window::new().order_by(notes.id.asc())),
+            rank().over(Window::new().order_by(notes.active.asc())),
+        ))
+        .order_by(notes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], ("a".to_string(), 1, 2));
+    assert_eq!(rows[1], ("b".to_string(), 2, 1));
+    assert_eq!(rows[2].1, 3);
+
+    let counted: Vec<i64> = db
+        .select(notes)
+        .pick(count_all().filter(notes.active))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(counted, [2]);
+}
+
+/// An expression is defined where it is used, and a recursive one walks the tree it defines.
+#[tokio::test]
+async fn common_table_expressions_run() {
+    let db = setup().await;
+    setup_notes(&db).await;
+
+    db.insert(users)
+        .values([
+            users.insert("a@example.com", "A", 20),
+            users.insert("b@example.com", "B", 30),
+            users.insert("c@example.com", "C", 10),
+        ])
+        .await
+        .unwrap();
+
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    let rows: Vec<User> = db
+        .from(&adults)
+        .filter(adults.column(users.age).lt(25))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "A");
+
+    db.insert(nodes)
+        .value(nodes.insert(1, "root".to_string()))
+        .await
+        .unwrap();
+    db.insert(nodes)
+        .value(nodes.insert(2, "child".to_string()).parent_id(Some(1_i64)))
+        .await
+        .unwrap();
+    db.insert(nodes)
+        .value(
+            nodes
+                .insert(3, "grandchild".to_string())
+                .parent_id(Some(2_i64)),
+        )
+        .await
+        .unwrap();
+
+    let tree = db
+        .select(nodes)
+        .filter(nodes.parent_id.is_null())
+        .cte("tree");
+    let rows: Vec<Node> = tree
+        .clone()
+        .union_all(
+            db.select(nodes)
+                .inner_join_cte(&tree, nodes.parent_id.eq(tree.column(nodes.id)))
+                .pick(nodes),
+        )
+        .order_by(nodes.id.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>(),
+        ["root", "child", "grandchild"]
+    );
+}
+
+/// Render any expression as text, so a value of a type the test does not decode can still be
+/// checked exactly.
+fn to_text<T, S: SqlType>(expr: Expr<T, S>) -> Expr<T, besu::Text> {
+    expr.cast::<besu::Text>()
+}
+
+/// The numeric helpers, including the mathematical functions PostgreSQL spells directly.
+#[tokio::test]
+async fn numeric_functions_run() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "A", 20))
+        .await
+        .unwrap();
+
+    let double = || users.age.as_expr().cast::<besu::Float8>();
+    let rows: Vec<(f64, f64, f64, f64, f64, f64)> = db
+        .select(users)
+        .pick((
+            sqrt(double()),
+            power(double(), 2),
+            ln(double()),
+            log10(double()),
+            exp(ln(double())),
+            log(2.0, double()),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0, 20.0_f64.sqrt());
+    assert_eq!(rows[0].1, 400.0);
+    assert!((rows[0].2 - 20.0_f64.ln()).abs() < 1e-9);
+    assert!((rows[0].3 - 20.0_f64.log10()).abs() < 1e-9);
+    assert!((rows[0].4 - 20.0).abs() < 1e-9);
+    assert!((rows[0].5 - 20.0_f64.log2()).abs() < 1e-9);
+
+    let rows: Vec<(f64, f64, f64, i64)> = db
+        .select(users)
+        .pick((
+            ceil(double()),
+            floor(double()),
+            trunc(double()),
+            sign(double()),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], (20.0, 20.0, 20.0, 1));
+
+    let rows: Vec<(i64, i64, i64)> = db
+        .select(users)
+        .pick((
+            greatest(users.age.as_expr().cast::<besu::Int8>(), 25_i64),
+            least(users.age.as_expr().cast::<besu::Int8>(), 25_i64),
+            nullif(users.age.as_expr().cast::<besu::Int8>(), 99_i64),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows[0], (25, 20, 20));
+}

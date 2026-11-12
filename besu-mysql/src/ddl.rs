@@ -1,5 +1,5 @@
 use besu_core::{Dialect, TypeDef};
-use besu_schema::{Change, Column, Ddl, Table};
+use besu_schema::{Change, Column, Ddl, Index, IndexKind, Schema, Table, View, view_body};
 
 use crate::MySql;
 
@@ -7,12 +7,21 @@ use crate::MySql;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MySqlDdl;
 
-/// The prefix length used when `UNIQUE` has to index a `TEXT` or `BLOB` column.
+/// The prefix length used when the index has to cover part of a `TEXT` or `BLOB` column.
 ///
 /// MySQL cannot index those types without a prefix. 255 characters is under the 3072-byte
 /// key limit for `utf8mb4` with InnoDB's default row format, and is what MySQL itself
 /// suggests for a unique short-string key.
 const INDEX_PREFIX: u32 = 255;
+
+/// The widest key, in bytes, InnoDB accepts.
+const MAX_KEY_BYTES: usize = 3072;
+
+/// How many `utf8mb4` characters fit in [`MAX_KEY_BYTES`].
+///
+/// A `VARCHAR(1000)` is four bytes per character at worst, so a full key is impossible; the
+/// prefix keeps the most of the value that fits.
+const MAX_PREFIX_CHARS: u32 = (MAX_KEY_BYTES / 4) as u32;
 
 /// How a `UNIQUE` constraint can be attached to a column of a given type.
 enum Uniqueness {
@@ -29,6 +38,17 @@ enum Uniqueness {
 fn uniqueness(ty: &TypeDef) -> Uniqueness {
     match ty {
         TypeDef::Text | TypeDef::Bytes => Uniqueness::Prefix(INDEX_PREFIX),
+        // A string type is indexable only while its worst-case byte length fits. `utf8mb4`
+        // uses up to four bytes per character, so anything wider than 768 characters needs
+        // a prefix or InnoDB rejects the key with "Specified key was too long".
+        TypeDef::VarChar(length) | TypeDef::Char(length) => {
+            let characters = usize::try_from(*length).unwrap_or(usize::MAX);
+            if characters.saturating_mul(4) > MAX_KEY_BYTES {
+                Uniqueness::Prefix(MAX_PREFIX_CHARS.min(*length))
+            } else {
+                Uniqueness::Inline
+            }
+        }
         TypeDef::Json | TypeDef::Jsonb => Uniqueness::Unsupported,
         _ => Uniqueness::Inline,
     }
@@ -45,6 +65,55 @@ impl MySqlDdl {
             ty,
             TypeDef::Text | TypeDef::Bytes | TypeDef::Json | TypeDef::Jsonb
         )
+    }
+
+    /// Render a column list with the key lengths MySQL needs, using the table's types.
+    ///
+    /// `create_index` only sees the index, and an `AddIndex` change is rendered from a
+    /// `CREATE INDEX` statement that cannot look the column up on its own; both paths go
+    /// through here so a `TEXT` or oversized `VARCHAR` column gets the same prefix either
+    /// way. Without it, adding an index to an existing `String` column fails with error 1170.
+    fn key_columns(&self, table: Option<&Table>, columns: &[String]) -> String {
+        let mut out = String::new();
+        for (i, name) in columns.iter().enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&self.quote(name));
+            if let Some(column) = table.and_then(|table| table.column(name))
+                && let Uniqueness::Prefix(prefix) = uniqueness(&column.ty)
+            {
+                out.push_str(&format!("({prefix})"));
+            }
+        }
+        out
+    }
+
+    /// `CREATE [FULLTEXT|SPATIAL] INDEX`, which knows the table's column types.
+    fn add_index(&self, table: &str, index: &Index, definition: Option<&Table>) -> Vec<String> {
+        let name = self.quote(&index.name);
+        let table = self.quote_table(table);
+        let columns = self.key_columns(definition, &index.columns);
+        match index.kind {
+            // A full-text or spatial index takes no prefix and no `UNIQUE`: MySQL indexes
+            // the whole value and has no unique full-text index.
+            IndexKind::FullText => vec![format!(
+                "CREATE FULLTEXT INDEX {name} ON {table} ({})",
+                self.key_columns(None, &index.columns)
+            )],
+            IndexKind::Spatial => vec![format!(
+                "CREATE SPATIAL INDEX {name} ON {table} ({})",
+                self.key_columns(None, &index.columns)
+            )],
+            // MySQL has no GIN, GiST or BRIN. The closest thing it has is a plain key, and
+            // reporting the drift on every push is better than dropping the column's index.
+            _ => {
+                let unique = if index.unique { "UNIQUE " } else { "" };
+                vec![format!(
+                    "CREATE {unique}INDEX {name} ON {table} ({columns})"
+                )]
+            }
+        }
     }
 }
 
@@ -88,6 +157,18 @@ impl Ddl for MySqlDdl {
             self.type_name(&column.ty)
         );
 
+        if let Some(generated) = &column.generated {
+            // MySQL implements both spellings. A stored column occupies space and can be
+            // indexed; a virtual one is computed when read.
+            sql.push_str(" GENERATED ALWAYS AS (");
+            sql.push_str(&generated.expression);
+            sql.push_str(if generated.stored {
+                ") STORED"
+            } else {
+                ") VIRTUAL"
+            });
+        }
+
         // MySQL makes primary key columns `NOT NULL` implicitly, but spelling it out keeps
         // the generated `CREATE TABLE` readable and matches `SHOW CREATE TABLE`.
         if !column.nullable && (!column.primary_key || column.auto_increment) {
@@ -95,8 +176,8 @@ impl Ddl for MySqlDdl {
         }
 
         // `AUTO_INCREMENT` requires the column to be a key, which the inline `PRIMARY KEY`
-        // below provides.
-        if column.auto_increment {
+        // below provides. A generated column owns its value, so it can never have one.
+        if column.auto_increment && column.generated.is_none() {
             sql.push_str(" AUTO_INCREMENT");
         }
 
@@ -104,11 +185,18 @@ impl Ddl for MySqlDdl {
             sql.push_str(" PRIMARY KEY");
         }
 
-        if column.unique && matches!(uniqueness(&column.ty), Uniqueness::Inline) {
+        if column.unique
+            && column.generated.is_none()
+            && matches!(uniqueness(&column.ty), Uniqueness::Inline)
+        {
             sql.push_str(" UNIQUE");
         }
 
-        if let Some(default) = &column.default {
+        // A generated column is computed from its expression and MySQL rejects a default
+        // beside one.
+        if column.generated.is_none()
+            && let Some(default) = &column.default
+        {
             sql.push_str(" DEFAULT ");
             if Self::default_needs_expression(&column.ty) {
                 sql.push('(');
@@ -122,7 +210,18 @@ impl Ddl for MySqlDdl {
         sql
     }
 
-    fn alter_column(&self, table: &str, _from: &Column, to: &Column) -> Vec<String> {
+    fn alter_column(&self, table: &str, from: &Column, to: &Column) -> Vec<String> {
+        // Changing a generated column's expression, or turning a plain column into a
+        // generated one, is not something `MODIFY COLUMN` promises to do (the stored/virtual
+        // kind in particular cannot change). A generated column holds no data of its own, so
+        // dropping and adding is lossless.
+        if from.generated != to.generated {
+            return vec![
+                self.drop_column(table, &from.name),
+                self.add_column(table, to),
+            ];
+        }
+
         // MySQL has no `ALTER COLUMN ... TYPE`: `MODIFY COLUMN` replaces the whole
         // definition, so the new column is rendered exactly as it would be in
         // `CREATE TABLE`. `inline_pk` is false because indexes (including the primary key)
@@ -218,25 +317,34 @@ impl Ddl for MySqlDdl {
         // ignored; introspection never produces one.
         for index in &table.indexes {
             sql.push_str(", ");
-            if index.unique {
-                sql.push_str("UNIQUE ");
-            }
-            sql.push_str("KEY ");
-            sql.push_str(&self.quote(&index.name));
-            sql.push_str(" (");
-            for (i, name) in index.columns.iter().enumerate() {
-                if i != 0 {
-                    sql.push_str(", ");
+            let name = self.quote(&index.name);
+            match index.kind {
+                // `FULLTEXT` and `SPATIAL` take no prefix and no `UNIQUE`.
+                IndexKind::FullText => {
+                    sql.push_str("FULLTEXT KEY ");
+                    sql.push_str(&name);
+                    sql.push_str(" (");
+                    sql.push_str(&self.key_columns(None, &index.columns));
+                    sql.push(')');
                 }
-                sql.push_str(&self.quote(name));
-                // The key length of a `TEXT`/`BLOB` column is not known until its type is.
-                if let Some(column) = table.column(name) {
-                    if let Uniqueness::Prefix(prefix) = uniqueness(&column.ty) {
-                        sql.push_str(&format!("({prefix})"));
+                IndexKind::Spatial => {
+                    sql.push_str("SPATIAL KEY ");
+                    sql.push_str(&name);
+                    sql.push_str(" (");
+                    sql.push_str(&self.key_columns(None, &index.columns));
+                    sql.push(')');
+                }
+                _ => {
+                    if index.unique {
+                        sql.push_str("UNIQUE ");
                     }
+                    sql.push_str("KEY ");
+                    sql.push_str(&name);
+                    sql.push_str(" (");
+                    sql.push_str(&self.key_columns(Some(table), &index.columns));
+                    sql.push(')');
                 }
             }
-            sql.push(')');
         }
 
         for fk in &table.foreign_keys {
@@ -250,13 +358,54 @@ impl Ddl for MySqlDdl {
         sql
     }
 
+    /// `CREATE [FULLTEXT|SPATIAL] INDEX`.
+    ///
+    /// This spelling is used when the table's column types are not in reach. The
+    /// `AddIndex` path goes through [`Ddl::apply_with`], which looks the table up and
+    /// renders the prefixes a `TEXT` or oversized `VARCHAR` column needs.
+    fn create_index(&self, table: &str, index: &Index) -> String {
+        self.add_index(table, index, None)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// `CREATE [OR REPLACE] VIEW`.
+    ///
+    /// MySQL has no materialised views. A snapshot that declares one is created as an
+    /// ordinary view, which is documented drift: introspection reports it as plain.
+    fn create_view(&self, view: &View) -> Vec<String> {
+        vec![format!(
+            "CREATE VIEW {} AS {}",
+            self.quote_table(&view.name),
+            view_body(&view.definition)
+        )]
+    }
+
+    /// `CREATE OR REPLACE VIEW`.
+    fn replace_view(&self, view: &View) -> Vec<String> {
+        vec![format!(
+            "CREATE OR REPLACE VIEW {} AS {}",
+            self.quote_table(&view.name),
+            view_body(&view.definition)
+        )]
+    }
+
+    /// `DROP VIEW`.
+    ///
+    /// MySQL has no materialised views, so the flag is ignored and the statement it accepts
+    /// is always a plain drop.
+    fn drop_view(&self, name: &str, _materialised: bool) -> Vec<String> {
+        vec![format!("DROP VIEW {}", self.quote_table(name))]
+    }
+
     fn change(&self, change: &Change) -> Vec<String> {
         match change {
             // `ALTER TABLE ... ADD COLUMN` cannot add an index, so a unique column whose
             // type needs a prefix is followed by a separate `CREATE UNIQUE INDEX`.
             Change::AddColumn { table, column } => {
                 let mut statements = vec![self.add_column(table, column)];
-                if column.unique {
+                if column.unique && column.generated.is_none() {
                     if let Uniqueness::Prefix(prefix) = uniqueness(&column.ty) {
                         statements.push(format!(
                             "CREATE UNIQUE INDEX {} ON {} ({}({}))",
@@ -288,10 +437,42 @@ impl Ddl for MySqlDdl {
             }
             Change::AddCheck { table, check } => vec![self.add_check(table, check)],
             Change::DropCheck { table, check } => vec![self.drop_check(table, check)],
-            // MySQL has no named enum types (an enum is spelled inline in the column) and
-            // SQLite has none either, so the enum changes render as nothing.
+            Change::CreateView(view) => self.create_view(view),
+            Change::ReplaceView(view) => self.replace_view(view),
+            Change::DropView { name, materialised } => self.drop_view(name, *materialised),
+            // MySQL has no named enum types (an enum is spelled inline in the column), no
+            // sequences and no row-level security, so those render as nothing.
+            Change::CreateEnum(_)
+            | Change::DropEnum { .. }
+            | Change::AddEnumValue { .. }
+            | Change::RemoveEnumValue { .. }
+            | Change::CreateSequence(_)
+            | Change::AlterSequence { .. }
+            | Change::DropSequence { .. }
+            | Change::EnableRls { .. } => Vec::new(),
+            // `Change` is non-exhaustive: a change added later renders as nothing rather
+            // than failing to compile, which keeps a schema shared across dialects usable.
             _ => Vec::new(),
         }
+    }
+
+    /// Render a diff as statements, with the schemas it was computed from in reach.
+    ///
+    /// MySQL needs the table definition for an added index, because a `TEXT` or an oversized
+    /// `VARCHAR` column can only be keyed with a prefix length, and the index alone does not
+    /// carry the column types.
+    fn apply_with(&self, changes: &[Change], current: &Schema, desired: &Schema) -> Vec<String> {
+        let mut statements = Vec::new();
+        for change in changes {
+            match change {
+                Change::AddIndex { table, index } => {
+                    let definition = desired.get(table).or_else(|| current.get(table));
+                    statements.extend(self.add_index(table, index, definition));
+                }
+                other => statements.extend(self.change(other)),
+            }
+        }
+        statements
     }
 }
 
@@ -327,6 +508,7 @@ mod tests {
                 primary_key: false,
                 unique: false,
                 default: None,
+                generated: None,
                 comment: None,
                 renamed_from: None,
             }],
@@ -338,6 +520,7 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
+            rls: false,
         }
     }
 
@@ -361,6 +544,114 @@ mod tests {
         assert_eq!(
             MySqlDdl.drop_unique("memberships", unique),
             "ALTER TABLE `memberships` DROP CONSTRAINT `memberships_user_key`"
+        );
+    }
+
+    fn indexed(name: &str, ty: TypeDef, kind: IndexKind, unique: bool) -> (Table, Index) {
+        let mut table = Table {
+            name: "events".into(),
+            schema: None,
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    ty: TypeDef::Int8,
+                    nullable: false,
+                    auto_increment: false,
+                    primary_key: true,
+                    unique: false,
+                    default: None,
+                    generated: None,
+                    comment: None,
+                    renamed_from: None,
+                },
+                Column {
+                    name: name.into(),
+                    ty,
+                    nullable: false,
+                    auto_increment: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    generated: None,
+                    comment: None,
+                    renamed_from: None,
+                },
+            ],
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            comment: None,
+            rls: false,
+        };
+        let index = Index {
+            name: "events_kind_idx".into(),
+            columns: vec![name.into()],
+            unique,
+            kind,
+            predicate: None,
+        };
+        table.indexes.push(index.clone());
+        (table, index)
+    }
+
+    #[test]
+    fn a_fulltext_key_takes_no_prefix_and_no_unique() {
+        // MySQL indexes the whole value for `FULLTEXT`, and has no unique full-text index.
+        let (table, _) = indexed("title", TypeDef::Text, IndexKind::FullText, true);
+        let sql = MySqlDdl.create_table(&table);
+        assert!(
+            sql.contains("FULLTEXT KEY `events_kind_idx` (`title`)"),
+            "{sql}"
+        );
+        assert!(!sql.contains("UNIQUE KEY `events_kind_idx`"), "{sql}");
+        assert!(!sql.contains("`title`(255)"), "{sql}");
+    }
+
+    #[test]
+    fn a_spatial_key_is_its_own_spelling() {
+        let (table, _) = indexed(
+            "at",
+            TypeDef::Custom("point".into()),
+            IndexKind::Spatial,
+            false,
+        );
+        let sql = MySqlDdl.create_table(&table);
+        assert!(
+            sql.contains("SPATIAL KEY `events_kind_idx` (`at`)"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn a_wide_varchar_unique_is_prefixed() {
+        // `VARCHAR(1000)` in `utf8mb4` is 4000 bytes at worst, over InnoDB's 3072-byte key
+        // limit. 768 characters is the most that fits.
+        let (table, _) = indexed("email", TypeDef::VarChar(1000), IndexKind::Btree, true);
+        let sql = MySqlDdl.create_table(&table);
+        assert!(sql.contains("`email` VARCHAR(1000) NOT NULL"), "{sql}");
+        assert!(
+            sql.contains("UNIQUE KEY `events_kind_idx` (`email`(768))"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn an_added_index_looks_its_columns_up() {
+        // `ApplyWith` is what `push` calls; unlike `create_index` it has the table, which is
+        // what makes a `TEXT` key legal.
+        let (table, index) = indexed("title", TypeDef::Text, IndexKind::Btree, false);
+        let desired = Schema {
+            tables: vec![table],
+            ..Schema::default()
+        };
+        let changes = [Change::AddIndex {
+            table: "events".into(),
+            index,
+        }];
+        assert_eq!(
+            MySqlDdl.apply_with(&changes, &Schema::new(), &desired),
+            ["CREATE INDEX `events_kind_idx` ON `events` (`title`(255))"]
         );
     }
 }

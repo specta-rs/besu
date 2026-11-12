@@ -89,6 +89,59 @@ The pattern is bound as a parameter, so `%` and `_` are SQL wildcards without an
 interpolation. `ILIKE` is PostgreSQL-only: elsewhere the statement builds and records
 ``unsupported: `sqlite` has no `ILIKE`; use `LIKE` with a lowercased column instead``.
 
+## Null-safe comparison
+
+`=` and `<>` are `UNKNOWN` when either side is `NULL`, so a comparison against a nullable
+column silently matches nothing. `IS DISTINCT FROM` treats `NULL` as a value.
+
+```rust
+db.select(users).filter(users.bio.is_distinct_from("hello")).await?;
+db.select(users).filter(users.bio.is_not_distinct_from(Option::<String>::None)).await?;
+```
+
+```sql
+-- PostgreSQL and SQLite
+SELECT ... FROM "users" WHERE ("users"."bio" IS DISTINCT FROM $1)
+SELECT ... FROM "users" WHERE ("users"."bio" IS NOT DISTINCT FROM $1)
+```
+
+```sql
+-- MySQL, where `<=>` is null-safe equality
+SELECT ... FROM `users` WHERE (NOT (`users`.`bio` <=> ?))
+SELECT ... FROM `users` WHERE (`users`.`bio` <=> ?)
+```
+
+`is_distinct_from`, `is_not_distinct_from` exist both as column methods and as free
+functions. The two sides must have the same SQL type, exactly as `eq` requires.
+
+## Regular expressions
+
+`regex_match`, `regex_match_ci`, `not_regex_match` and `not_regex_match_ci` are the four
+forms: match or no match, case sensitive or not. The pattern is a bound parameter.
+
+```rust
+db.select(users).filter(users.name.regex_match_ci("^o")).await?;
+```
+
+```sql
+-- PostgreSQL
+SELECT ... FROM "users" WHERE ("users"."name" ~* $1)
+-- MySQL
+SELECT ... FROM `users` WHERE (REGEXP_LIKE(`users`.`name`, ?, 'i'))
+```
+
+| Form | PostgreSQL | MySQL | SQLite |
+| --- | --- | --- | --- |
+| case-sensitive match | `a ~ b` | `a REGEXP b` | unsupported |
+| case-insensitive match | `a ~* b` | `REGEXP_LIKE(a, b, 'i')` | unsupported |
+| negated match | `a !~ b` | `NOT (a REGEXP b)` | unsupported |
+| negated, case-insensitive | `a !~* b` | `NOT REGEXP_LIKE(a, b, 'i')` | unsupported |
+
+SQLite has no regular-expression support unless an extension is loaded, so a regex there
+records `Error::unsupported` instead of emitting PostgreSQL's operator. MySQL's `REGEXP`
+follows the column's collation: under the default `utf8mb4_unicode_ci`, even the nominally
+case-sensitive form is case-insensitive.
+
 ## Ranges
 
 ```rust
@@ -200,10 +253,141 @@ SELECT CONCAT("users"."name", "users"."email"), COUNT(*), COUNT(DISTINCT "users"
        CAST(SUM("users"."age") AS REAL), CAST(AVG("users"."age") AS REAL) FROM "users"
 ```
 
+`concat` takes two to eight arguments and every one may be a literal, so
+`concat(users.first, " ")` compiles; Rust has no variadic functions, so the wider forms are
+`concat3` to `concat8`, and `concat_ws` joins with a separator.
+
+MySQL's `CONCAT` returns `NULL` when any argument is `NULL`, while PostgreSQL and SQLite skip
+the missing ones. `concat_ws` skips `NULL` arguments on all three, which makes it the
+portable choice when a column may be missing.
+
 `lower`, `upper`, `length`, `trim`, `abs`, `round`, `ceil`, `floor`, `min` and `max` are the
-rest; `min` and `max` keep the argument's type. `sum` and `avg` are widened to `f64` and cast in
-the database (`REAL` on SQLite, `DOUBLE PRECISION` on PostgreSQL), because a sum of integers can
-overflow and PostgreSQL and MySQL return `NUMERIC` for one. `count(expr)` counts non-`NULL`.
+rest; `min` and `max` keep the argument's type. `sum`, `avg`, `stddev` and `variance` are
+widened to `f64` and cast in the database (`REAL` on SQLite, `DOUBLE PRECISION` on
+PostgreSQL), because a sum of integers can overflow and PostgreSQL and MySQL return `NUMERIC`
+for an aggregate. `count(expr)` counts non-`NULL`.
+
+### The whole function surface
+
+Every helper names one canonical function and the dialect decides what reaches the server. A
+function the dialect has no spelling for records `Error::unsupported`; it never emits another
+database's syntax.
+
+| Family | Helpers |
+| --- | --- |
+| Strings | `char_length`, `octet_length`, `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `btrim`, `initcap`, `reverse`, `substr`, `substring`, `replace`, `left`, `right`, `lpad`, `rpad`, `repeat`, `strpos`, `split_part`, `translate`, `concat`, `concat3`–`concat8`, `concat_ws`, `md5`, `sha256`, `to_base64`, `from_base64`, `regexp_replace`, `regexp_substr`, `date_format` |
+| Numbers | `abs`, `round`, `round_to`, `ceil`, `floor`, `trunc`, `sign`, `sqrt`, `power`, `exp`, `ln`, `log10`, `log`, `nullif`, `greatest`, `least`, `coalesce`, `coalesce3`–`coalesce5` |
+| Dates | `current_date`, `now`, `date_trunc`, `extract`, `datediff`, `date_add`, `date_sub`, `unix_timestamp`, `from_unixtime` |
+| Aggregates | `count`, `count_all`, `count_distinct`, `sum`, `avg`, `min`, `max`, `string_agg`, `bool_and`, `bool_or`, `every`, `stddev`, `stddev_pop`, `variance`, `var_pop`, `json_agg`, `jsonb_agg`, `json_object` |
+| Windows | `row_number`, `rank`, `dense_rank`, `lag`, `lag_by`, `lead`, `lead_by` |
+
+Which of them a database actually has is in the table below. A blank cell is a function the
+database does not have, and using it records `unsupported`.
+
+| Helper | PostgreSQL | MySQL 8.4 | SQLite |
+| --- | --- | --- | --- |
+| `char_length` | `CHAR_LENGTH` | `CHAR_LENGTH` | `LENGTH` |
+| `octet_length` | `OCTET_LENGTH` | `LENGTH` | — |
+| `initcap` | `INITCAP` | — | — |
+| `reverse` | `REVERSE` | `REVERSE` | — |
+| `left`, `right` | `LEFT`, `RIGHT` | `LEFT`, `RIGHT` | — |
+| `lpad`, `rpad` | `LPAD`, `RPAD` | `LPAD`, `RPAD` | — |
+| `btrim` | `BTRIM` | `TRIM` | `TRIM` |
+| `strpos` | `STRPOS` | `INSTR` | `INSTR` |
+| `split_part` | `SPLIT_PART` | — | — |
+| `translate` | `TRANSLATE` | — | — |
+| `concat`, `concat_ws` | `CONCAT`, `CONCAT_WS` | `CONCAT`, `CONCAT_WS` | `CONCAT`, `CONCAT_WS` |
+| `md5` | `MD5` | `MD5` | — |
+| `sha256` | — | `SHA2(x, 256)` | — |
+| `to_base64`, `from_base64` | — | `TO_BASE64`, `FROM_BASE64` | — |
+| `regexp_replace` | `REGEXP_REPLACE` | `REGEXP_REPLACE` | — |
+| `regexp_substr` | — | `REGEXP_SUBSTR` | — |
+| `date_format` | — | `DATE_FORMAT` | — |
+| `date_trunc` | `DATE_TRUNC` | — | — |
+| `extract` | `EXTRACT(.. FROM ..)` | `EXTRACT(.. FROM ..)` | `strftime` |
+| `datediff` | date subtraction | `DATEDIFF` | `julianday` |
+| `date_add`, `date_sub` | `make_interval` | `DATE_ADD`/`DATE_SUB` | `date`/`datetime` |
+| `unix_timestamp`, `from_unixtime` | — | `UNIX_TIMESTAMP`, `FROM_UNIXTIME` | — |
+| `string_agg` | `STRING_AGG` | `GROUP_CONCAT(x SEPARATOR y)` | `GROUP_CONCAT` |
+| `bool_and`, `bool_or` | `BOOL_AND`, `BOOL_OR` | `MIN`, `MAX` | `MIN`, `MAX` |
+| `stddev`, `variance` | `STDDEV`, `VARIANCE` | `STDDEV`, `VARIANCE` | — |
+| `json_agg` | `JSON_AGG` | `JSON_ARRAYAGG` | `JSON_GROUP_ARRAY` |
+| `jsonb_agg` | `JSONB_AGG` | `JSON_ARRAYAGG` | `JSON_GROUP_ARRAY` |
+| `json_object` | `JSONB_BUILD_OBJECT` | `JSON_OBJECT` | `JSON_OBJECT` |
+| `greatest`, `least` | `GREATEST`, `LEAST` | `GREATEST`, `LEAST` | `MAX`, `MIN` |
+| `round_to` | `ROUND` | `ROUND` | `ROUND` |
+| `ceil`, `floor` | `CEIL`, `FLOOR` | `CEIL`, `FLOOR` | — |
+| `trunc` | `TRUNC` | `TRUNCATE(x, 0)` | — |
+| `sign` | `SIGN` | `SIGN` | — |
+| `log(base, value)` | `LN(value) / LN(base)`, on every dialect | | |
+
+SQLite's mathematical functions — `sqrt`, `power`, `exp`, `ln`, `log10`, `sign`, `trunc`,
+`ceil` and `floor` — need `SQLITE_ENABLE_MATH_FUNCTIONS`, which the amalgamation `sqlx`
+builds does not set. They are unavailable there and record `unsupported`; `abs`, `round` and
+`round_to` are part of SQLite's core and work.
+
+`log(base, value)` is written as `LN(value) / LN(base)` rather than calling `LOG`, because
+there is no portable spelling: PostgreSQL's two-argument `log` wants `numeric`, MySQL's
+`LOG(b, x)` wants doubles, and the one-argument form means base 10 on PostgreSQL and the
+natural logarithm on MySQL.
+
+`round_to` needs a `NUMERIC` argument on PostgreSQL — a two-argument `round` over a double is
+not a function PostgreSQL has. Use it on a `Decimal` column, or `cast` the result.
+
+`sign` returns a whole number on every dialect, because MySQL's `SIGN` returns a `BIGINT`
+whatever the argument is; the helpers cast it so one Rust type decodes all three. `trunc`
+returns a double for the mirror-image reason.
+
+### `FILTER`
+
+`FILTER (WHERE ...)` restricts an aggregate to some of the rows without changing which rows
+the rest of the `SELECT` sees.
+
+```rust
+db.select(orders)
+    .pick((orders.customer_id, sum(orders.total).filter(orders.paid)))
+    .group_by(orders.customer_id)
+    .await?;
+```
+
+```sql
+SELECT "orders"."customer_id", (CAST(SUM("orders"."total") AS DOUBLE PRECISION)
+       FILTER (WHERE "orders"."paid")) FROM "orders" GROUP BY "orders"."customer_id"
+```
+
+PostgreSQL and SQLite have `FILTER`; MySQL does not, so it records `unsupported` with the
+equivalent spelled out — a `case` expression inside the aggregate.
+
+### Windows
+
+`.over(Window::new()..)` turns any aggregate or window function into one that looks at a
+window of rows rather than at the whole result.
+
+```rust
+db.select(users)
+    .pick((
+        users.name,
+        row_number().over(
+            Window::new()
+                .partition_by(users.team)
+                .order_by(users.age.asc())
+                .rows_between(FrameBound::UnboundedPreceding, FrameBound::CurrentRow),
+        ),
+    ))
+    .await?;
+```
+
+```sql
+SELECT "users"."name", ROW_NUMBER() OVER (PARTITION BY "users"."team"
+       ORDER BY "users"."age" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+FROM "users"
+```
+
+`Window` takes `partition_by`, `order_by`, `rows_between`, `range_between` and `rows_from`;
+`FrameBound` is `UnboundedPreceding`, `Preceding(n)`, `CurrentRow`, `Following(n)` or
+`UnboundedFollowing`. A window with no frame uses the database's default, which is the whole
+partition for an `ORDER BY`-less window and the rows up to the current one otherwise.
+
 
 `now()` renders `CURRENT_TIMESTAMP`. `json_get` and `json_text` take a dotted key path into a
 JSON column — here `events.payload` — and render `->` / `->>` (PostgreSQL `#>` / `#>>`);
@@ -227,13 +411,11 @@ where the table has to be an FTS5 virtual table.
 
 ## What is missing
 
-Compared with Drizzle's operators, none of the following exist yet — see
-[Drizzle parity](../parity.md) and [#86](https://github.com/specta-rs/besu/issues/86):
-
-- `IS DISTINCT FROM` / `IS NOT DISTINCT FROM`, so a `NULL`-safe inequality is `raw` for now.
-- Array operators: `@>`, `<@`, `&&`, `||` and the rest.
-- Regex operators: `~`, `~*`, `!~`, `SIMILAR TO`.
-- `ANY` / `ALL` over an array or a subquery.
+- **Array operators** — `@>`, `<@`, `&&`, `||`, `ANY`/`ALL` over an array. They need a
+  `TypeDef::Array` to describe the column, which the type layer does not have yet, so for now
+  they can only be written as `sql!` fragments.
+- **`SIMILAR TO`** — reachable through `raw`, because no dialect here implements it and it is
+  not the same thing as a regular expression.
 
 ## What is checked
 
@@ -241,14 +423,18 @@ Compared with Drizzle's operators, none of the following exist yet — see
 | --- | --- |
 | A literal or column of another SQL type | Compile error |
 | A table that was not joined | Compile error |
-| `ILIKE` on SQLite or MySQL, or too many `IN` values | Build error |
+| `ILIKE`, a regex or a function the dialect has no spelling for | Build error |
+| Too many `IN` values for the dialect's parameter limit | Build error |
 
 ## Gotchas
 
 - **`between` is not type-checked against the column.** It takes two values of one type, but
   not the column's type, so a mismatched pair fails in the database.
 - **`not_between`, `is_true` and `is_false` are functions, not column methods.**
-- **`concat` takes typed expressions, not literals.** Literal text has no `SqlType`; pass a
-  column, or `Expr::<_, besu::Text>::raw("'!'")` when it must be a constant.
+- **`concat` stops at eight arguments.** Rust has no variadic functions; nest a call or use
+  `concat_ws` instead.
+- **A function the dialect lacks is a build error, not a server error.** That is deliberate:
+  the message names the helper and the dialect, where the server would only say "no such
+  function".
 - **`sum` and `avg` return `f64`.** Annotate `Vec<f64>` when you pick one, and note that
   `json_get` paths use dots — a key containing one cannot be expressed, so write it with `raw`.

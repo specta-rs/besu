@@ -1,4 +1,4 @@
-use crate::{Check, Column, Enum, ForeignKey, Index, Schema, Table, Unique};
+use crate::{Check, Column, Enum, ForeignKey, Index, Schema, Sequence, Table, Unique, View};
 
 /// How much damage applying a [`Change`] can do.
 ///
@@ -142,18 +142,61 @@ pub enum Change {
         /// The constraint.
         check: Check,
     },
+    /// A view exists only in the desired schema.
+    CreateView(View),
+    /// A view exists on both sides but its definition changed.
+    ///
+    /// Creating the view again is a `Risky` change rather than a destructive one: the
+    /// existing view is replaced, so nothing it reads is lost. Replacing a materialised view
+    /// re-runs its query, which can be expensive but is still not destructive.
+    ReplaceView(View),
+    /// A view exists only in the current schema.
+    DropView {
+        /// The view's (possibly qualified) name.
+        name: String,
+        /// Whether it was a materialised view, which needs its own `DROP` spelling.
+        materialised: bool,
+    },
+    /// A standalone sequence exists only in the desired schema.
+    CreateSequence(Sequence),
+    /// A sequence exists on both sides but one of its options changed.
+    AlterSequence {
+        /// The qualified sequence name.
+        name: String,
+        /// The sequence as it exists now.
+        from: Sequence,
+        /// The sequence as it should be.
+        to: Sequence,
+    },
+    /// A sequence exists only in the current schema.
+    DropSequence {
+        /// The qualified sequence name.
+        name: String,
+    },
+    /// Row-level security should be enabled on a table.
+    ///
+    /// There is deliberately no inverse: disabling RLS silently removes the guarantee every
+    /// policy on the table depends on, so it is left to an explicit migration.
+    EnableRls {
+        /// The table.
+        table: String,
+    },
 }
 
 impl Change {
     /// How dangerous this change is.
     pub fn safety(&self) -> Safety {
         match self {
-            Self::CreateTable(_) | Self::CreateEnum(_) => Safety::Safe,
+            Self::CreateTable(_) | Self::CreateEnum(_) | Self::CreateSequence(_) => Safety::Safe,
+            // A view is only a stored query, so creating one cannot touch a row.
+            Self::CreateView(_) | Self::EnableRls { .. } => Safety::Safe,
             // A rename rewrites metadata, and can break views or code that named the old
             // column. It never loses the column's data, so it is not destructive.
             Self::RenameColumn { .. } => Safety::Risky,
             Self::AddColumn { column, .. } => {
-                if column.nullable || column.default.is_some() {
+                if column.nullable || column.default.is_some() || column.generated.is_some() {
+                    // A generated column has no value of its own to invent, so adding one
+                    // cannot fail the way a `NOT NULL` column with no default does.
                     Safety::Safe
                 } else {
                     // Adding a NOT NULL column without a default fails on a non-empty table.
@@ -166,11 +209,18 @@ impl Change {
             | Self::AddCheck { .. }
             // Appending an enum value cannot break an existing row; it can only be slow.
             | Self::AddEnumValue { .. } => Safety::Risky,
+            // Replacing a view re-runs its query, and for a materialised view that query
+            // runs immediately.
+            Self::ReplaceView(_) => Safety::Risky,
+            // Changing a sequence's bounds or type can make `nextval` fail for values that
+            // are already handed out, and rewrites the catalogue.
+            Self::AlterSequence { .. } => Safety::Risky,
             Self::AlterColumn { from, to, .. } => {
                 if from.ty == to.ty
                     && from.nullable == to.nullable
                     && from.default == to.default
                     && from.auto_increment == to.auto_increment
+                    && from.generated == to.generated
                 {
                     Safety::Safe
                 } else {
@@ -188,6 +238,10 @@ impl Change {
             | Self::DropCheck { .. }
             // Rows that still hold an enum value no longer in the type are unreadable.
             | Self::DropEnum { .. }
+            // A view that something else reads from stops resolving, and a sequence that
+            // another default calls starts failing.
+            | Self::DropView { .. }
+            | Self::DropSequence { .. }
             | Self::RemoveEnumValue { .. } => Safety::Destructive,
             Self::DropForeignKey { .. } => Safety::Risky,
         }
@@ -202,6 +256,14 @@ impl Change {
             | Self::DropEnum { .. }
             | Self::AddEnumValue { .. }
             | Self::RemoveEnumValue { .. } => None,
+            // A view or sequence is not a table: it has no columns to rebuild and SQLite's
+            // table-rebuilding path must not treat it as one.
+            Self::CreateView(_)
+            | Self::ReplaceView(_)
+            | Self::DropView { .. }
+            | Self::CreateSequence(_)
+            | Self::AlterSequence { .. }
+            | Self::DropSequence { .. } => None,
             Self::AddColumn { table, .. }
             | Self::DropColumn { table, .. }
             | Self::AlterColumn { table, .. }
@@ -213,7 +275,8 @@ impl Change {
             | Self::AddForeignKey { table, .. }
             | Self::DropForeignKey { table, .. }
             | Self::AddCheck { table, .. }
-            | Self::DropCheck { table, .. } => Some(table.clone()),
+            | Self::DropCheck { table, .. }
+            | Self::EnableRls { table } => Some(table.clone()),
         }
     }
 }
@@ -255,16 +318,27 @@ impl core::fmt::Display for Change {
             }
             Self::AddCheck { table, check } => write!(f, "add check {} on {table}", check.name),
             Self::DropCheck { table, check } => write!(f, "drop check {} on {table}", check.name),
+            Self::CreateView(view) => write!(f, "create view {}", view.name),
+            Self::ReplaceView(view) => write!(f, "replace view {}", view.name),
+            Self::DropView { name, .. } => write!(f, "drop view {name}"),
+            Self::CreateSequence(sequence) => {
+                write!(f, "create sequence {}", sequence.qualified_name())
+            }
+            Self::AlterSequence { name, .. } => write!(f, "alter sequence {name}"),
+            Self::DropSequence { name } => write!(f, "drop sequence {name}"),
+            Self::EnableRls { table } => write!(f, "enable row-level security on {table}"),
         }
     }
 }
 
 /// Compute the changes needed to turn `current` into `desired`.
 ///
-/// The returned list is already in a safe application order: tables are created
-/// parents-first, and dropped children-first. Nothing is ever renamed automatically —
-/// a rename looks exactly like a drop plus an add, so Besu refuses to guess. Declare the
-/// rename explicitly with a migration if you want to keep the data.
+/// The returned list is already in a safe application order: sequences and enums are created
+/// before the tables that use them, tables are created parents-first and views after the
+/// tables they read; on the way out, views are dropped before their tables and sequences
+/// after them. Nothing is ever renamed automatically — a rename looks exactly like a drop
+/// plus an add, so Besu refuses to guess. Declare the rename explicitly with a migration if
+/// you want to keep the data.
 pub fn diff(current: &Schema, desired: &Schema) -> Vec<Change> {
     diff_with(current, desired, &|ty| ty.clone())
 }
@@ -290,6 +364,22 @@ pub fn diff_with(
     let mut managed: Vec<Option<&str>> = vec![None];
     for table in &desired.tables {
         if let Some(schema) = table.schema.as_deref()
+            && !managed.contains(&Some(schema))
+        {
+            managed.push(Some(schema));
+        }
+    }
+    // A view and a sequence can name a schema no table does, and the declaration is then
+    // the thing that says the schema belongs to this application.
+    for view in &desired.views {
+        if let Some(schema) = view.schema()
+            && !managed.contains(&Some(schema))
+        {
+            managed.push(Some(schema));
+        }
+    }
+    for sequence in &desired.sequences {
+        if let Some(schema) = sequence.schema.as_deref()
             && !managed.contains(&Some(schema))
         {
             managed.push(Some(schema));
@@ -349,12 +439,74 @@ pub fn diff_with(
         }
     }
 
+    // Sequences: created before the tables that might default to them, altered in place,
+    // and dropped after the tables that use them.
+    for sequence in &desired.sequences {
+        match current.find_sequence(sequence.schema.as_deref(), &sequence.name) {
+            None => changes.push(Change::CreateSequence(sequence.clone())),
+            Some(existing) if existing.normalised() != sequence.normalised() => {
+                changes.push(Change::AlterSequence {
+                    name: sequence.qualified_name(),
+                    from: existing.clone(),
+                    to: sequence.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    // Views: a view over a table created in this same run is safe because every
+    // `CreateView` sorts after every `CreateTable`. The order among the views themselves
+    // follows their dependencies.
+    for view in desired.ordered_views() {
+        match current.view(&view.name) {
+            None => changes.push(Change::CreateView(view.clone())),
+            Some(existing)
+                if existing.materialised != view.materialised
+                    || crate::normalise_view_definition(&existing.definition)
+                        != crate::normalise_view_definition(&view.definition) =>
+            {
+                changes.push(Change::ReplaceView(view.clone()));
+            }
+            Some(_) => {}
+        }
+    }
+
     // Modify tables that exist on both sides.
     for table in &desired.tables {
         let Some(existing) = current.find(table.schema.as_deref(), &table.name) else {
             continue;
         };
         diff_table(existing, table, normalise, &mut changes);
+    }
+
+    // Row-level security can be turned on but never off: see [`Change::EnableRls`].
+    for table in &desired.tables {
+        let Some(existing) = current.find(table.schema.as_deref(), &table.name) else {
+            continue;
+        };
+        if table.rls && !existing.rls {
+            changes.push(Change::EnableRls {
+                table: table.qualified_name(),
+            });
+        }
+    }
+
+    // Drop views that are no longer wanted, before the tables they might read from.
+    for view in current.ordered_views().into_iter().rev() {
+        let managed_here = match view.schema() {
+            Some(schema) => managed.contains(&Some(schema)),
+            None => managed.contains(&None),
+        };
+        if !managed_here {
+            continue;
+        }
+        if desired.view(&view.name).is_none() {
+            changes.push(Change::DropView {
+                name: view.name.clone(),
+                materialised: view.materialised,
+            });
+        }
     }
 
     // Drop tables that are no longer wanted, children first.
@@ -366,6 +518,21 @@ pub fn diff_with(
         if desired.find(table.schema.as_deref(), &table.name).is_none() {
             changes.push(Change::DropTable {
                 name: table.qualified_name(),
+            });
+        }
+    }
+
+    // Sequences last: a table that defaults to one is already gone by this point.
+    for sequence in &current.sequences {
+        if !managed.contains(&sequence.schema.as_deref()) {
+            continue;
+        }
+        if desired
+            .find_sequence(sequence.schema.as_deref(), &sequence.name)
+            .is_none()
+        {
+            changes.push(Change::DropSequence {
+                name: sequence.qualified_name(),
             });
         }
     }
@@ -396,27 +563,43 @@ pub fn diff_with(
     // database rejects a second object with it, so the drops of those objects are keyed
     // before their adds.
     changes.sort_by_key(|change| match change {
-        Change::CreateEnum(_) => 0,
-        Change::CreateTable(_) => 1,
-        Change::AddColumn { .. } => 2,
-        Change::RenameColumn { .. } => 3,
-        Change::AlterColumn { .. } => 4,
-        Change::AddEnumValue { .. } => 5,
-        Change::DropForeignKey { .. } => 6,
+        // A view that is going away must go before its columns change or disappear, and
+        // before a table rebuild drops and recreates them.
+        Change::DropView { .. } => 0,
+        // Sequences next: a column default may call one.
+        Change::CreateSequence(_) => 1,
+        Change::CreateEnum(_) => 2,
+        Change::CreateTable(_) => 3,
+        Change::AddColumn { .. } => 4,
+        Change::RenameColumn { .. } => 5,
+        Change::AlterColumn { .. } => 6,
+        Change::AddEnumValue { .. } => 7,
+        Change::AlterSequence { .. } => 8,
+        Change::DropForeignKey { .. } => 9,
         // Dropping a check before the column it names avoids "constraint does not exist":
         // the database drops a constraint of its own when its last column goes.
-        Change::DropCheck { .. } => 7,
-        Change::DropUnique { .. } => 8,
-        Change::DropIndex { .. } => 9,
-        Change::AddIndex { .. } => 10,
-        Change::AddUnique { .. } => 11,
-        Change::AddForeignKey { .. } => 12,
+        Change::DropCheck { .. } => 10,
+        Change::DropUnique { .. } => 11,
+        Change::DropIndex { .. } => 12,
+        Change::AddIndex { .. } => 13,
+        Change::AddUnique { .. } => 14,
+        Change::AddForeignKey { .. } => 15,
         // A check may name a column added above, so it comes after every additive change.
-        Change::AddCheck { .. } => 13,
-        Change::DropColumn { .. } => 14,
-        Change::DropTable { .. } => 15,
-        Change::RemoveEnumValue { .. } => 16,
-        Change::DropEnum { .. } => 17,
+        Change::AddCheck { .. } => 16,
+        // A replaced view may name a column added above, and must stop naming one that is
+        // about to be dropped, so it sits between the additive and destructive tails.
+        Change::ReplaceView(_) => 17,
+        // A new view needs every table it reads, and their indexes, to exist first. The
+        // relative order among the views comes from `ordered_views` and is preserved by the
+        // stable sort.
+        Change::CreateView(_) => 18,
+        Change::EnableRls { .. } => 19,
+        Change::DropColumn { .. } => 20,
+        Change::DropTable { .. } => 21,
+        Change::RemoveEnumValue { .. } => 22,
+        Change::DropEnum { .. } => 23,
+        // A table that defaults to a sequence has to be gone before the sequence is.
+        Change::DropSequence { .. } => 24,
     });
 
     changes
@@ -654,6 +837,7 @@ mod tests {
             primary_key: false,
             unique: false,
             default: None,
+            generated: None,
             comment: None,
             renamed_from: None,
         }
@@ -669,6 +853,7 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
+            rls: false,
         }
     }
 
@@ -677,6 +862,7 @@ mod tests {
             tables,
             enums: Vec::new(),
             views: Vec::new(),
+            ..Schema::default()
         }
     }
 
@@ -748,6 +934,7 @@ mod tests {
             tables: vec![reviews],
             enums: vec![mood(&["sad", "happy"])],
             views: Vec::new(),
+            ..Schema::default()
         };
 
         let changes = diff(&Schema::new(), &desired);
@@ -761,11 +948,13 @@ mod tests {
             tables: Vec::new(),
             enums: vec![mood(&["sad", "happy"])],
             views: Vec::new(),
+            ..Schema::default()
         };
         let desired = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad", "happy", "ecstatic"])],
             views: Vec::new(),
+            ..Schema::default()
         };
 
         let changes = diff(&current, &desired);
@@ -785,11 +974,13 @@ mod tests {
             tables: Vec::new(),
             enums: vec![mood(&["sad", "happy"])],
             views: Vec::new(),
+            ..Schema::default()
         };
         let desired = Schema {
             tables: Vec::new(),
             enums: vec![mood(&["sad"])],
             views: Vec::new(),
+            ..Schema::default()
         };
 
         let changes = diff(&current, &desired);
@@ -812,6 +1003,7 @@ mod tests {
             )],
             enums: vec![mood(&["sad"])],
             views: Vec::new(),
+            ..Schema::default()
         };
 
         let changes = diff(&current, &Schema::new());
@@ -827,6 +1019,7 @@ mod tests {
             tables: Vec::new(),
             enums: vec![mood(&["sad"])],
             views: Vec::new(),
+            ..Schema::default()
         };
         assert!(diff(&current, &Schema::new()).is_empty());
     }
@@ -985,6 +1178,7 @@ mod tests {
             name: "events_kind_idx".into(),
             columns: vec!["kind".into()],
             unique: false,
+            kind: crate::IndexKind::Btree,
             predicate: None,
         });
         let mut after = before.clone();
@@ -999,16 +1193,225 @@ mod tests {
     }
 
     #[test]
-    fn views_are_never_diffed() {
-        let current = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
-        let mut desired = current.clone();
-        desired.views.push(crate::View {
-            name: "active_users".into(),
-            definition: "SELECT * FROM users WHERE active".into(),
-        });
+    fn a_view_is_created_after_its_table_and_dropped_before_it() {
+        let mut desired = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        desired.add_view(crate::View::new(
+            "active_users",
+            "SELECT id FROM users WHERE active",
+        ));
 
-        // Neither creating nor dropping a view is a change `push` can make.
+        let changes = diff(&Schema::new(), &desired);
+        assert!(matches!(&changes[0], Change::CreateTable(table) if table.name == "users"));
+        assert!(matches!(&changes[1], Change::CreateView(view) if view.name == "active_users"));
+        assert_eq!(worst_safety(&changes), Safety::Safe);
+
+        // A view is dropped before the table it reads.
+        let dropped = diff(&desired, &Schema::new());
+        assert!(matches!(&dropped[0], Change::DropView { name, .. } if name == "active_users"));
+        assert!(matches!(&dropped[1], Change::DropTable { name } if name == "users"));
+        assert_eq!(worst_safety(&dropped), Safety::Destructive);
+
+        // And an identical view is nothing.
+        assert!(diff(&desired, &desired).is_empty());
+    }
+
+    #[test]
+    fn a_changed_view_is_replaced_risky() {
+        let mut before = schema(Vec::new());
+        before.add_view(crate::View::new("active_users", "SELECT id FROM users"));
+        let mut after = before.clone();
+        after.views[0].definition = "SELECT id FROM users WHERE active".into();
+
+        let changes = diff(&before, &after);
+        assert_eq!(
+            changes,
+            [Change::ReplaceView(crate::View::new(
+                "active_users",
+                "SELECT id FROM users WHERE active"
+            ))]
+        );
+        assert_eq!(changes[0].safety(), Safety::Risky);
+    }
+
+    #[test]
+    fn a_view_definition_the_database_rewrites_still_converges() {
+        // PostgreSQL qualifies every column; MySQL backticks every identifier; SQLite
+        // repeats the `CREATE VIEW` header. None of that is a change.
+        let mut current = schema(Vec::new());
+        current.add_view(crate::View::new(
+            "active_users",
+            " SELECT users.id,\n    users.name\n   FROM users\n  WHERE users.active;",
+        ));
+        let mut desired = schema(Vec::new());
+        desired.add_view(crate::View::new(
+            "active_users",
+            "SELECT id, name FROM users WHERE active",
+        ));
+
         assert!(diff(&current, &desired).is_empty());
         assert!(diff(&desired, &current).is_empty());
+    }
+
+    #[test]
+    fn a_view_over_a_view_is_created_in_dependency_order() {
+        let mut desired = schema(Vec::new());
+        desired.add_view(crate::View::new("a_first", "SELECT id FROM users"));
+        desired.add_view(crate::View::new(
+            "b_second",
+            "SELECT id FROM a_first WHERE id > 0",
+        ));
+
+        let changes = diff(&Schema::new(), &desired);
+        assert!(matches!(&changes[0], Change::CreateView(view) if view.name == "a_first"));
+        assert!(matches!(&changes[1], Change::CreateView(view) if view.name == "b_second"));
+    }
+
+    #[test]
+    fn a_view_in_a_schema_the_declared_schema_never_names_is_left_alone() {
+        let mut current = schema(Vec::new());
+        current.add_view(crate::View::new("somebody_else.their_view", "SELECT 1"));
+        assert!(diff(&current, &schema(Vec::new())).is_empty());
+    }
+
+    fn sequence(name: &str) -> crate::Sequence {
+        crate::Sequence::new(name)
+    }
+
+    #[test]
+    fn a_sequence_is_created_and_dropped_in_the_right_order() {
+        let mut desired = schema(vec![table("orders", vec![column("id", TypeDef::Int8)])]);
+        let mut numbers = sequence("order_number_seq");
+        numbers.start = 1000;
+        desired.add_sequence(numbers);
+
+        let created = diff(&Schema::new(), &desired);
+        assert!(matches!(&created[0], Change::CreateSequence(s) if s.name == "order_number_seq"));
+        assert_eq!(created[0].safety(), Safety::Safe);
+
+        let dropped = diff(&desired, &Schema::new());
+        assert!(matches!(&dropped[0], Change::DropTable { .. }));
+        assert!(matches!(&dropped[1], Change::DropSequence { .. }));
+        assert_eq!(worst_safety(&dropped), Safety::Destructive);
+    }
+
+    #[test]
+    fn a_changed_sequence_is_alterable_and_a_default_bound_is_not_a_change() {
+        let mut current = schema(Vec::new());
+        current.add_sequence(sequence("order_number_seq"));
+        let mut desired = current.clone();
+        desired.sequences[0].start = 1000;
+
+        let changes = diff(&current, &desired);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0], Change::AlterSequence { .. }));
+        assert_eq!(changes[0].safety(), Safety::Risky);
+
+        // PostgreSQL reports the default bound as a number; a declaration that leaves it
+        // out is the same sequence.
+        let mut concrete = current.clone();
+        concrete.sequences[0].min = Some(1);
+        concrete.sequences[0].max = Some(i64::MAX);
+        assert!(diff(&current, &concrete).is_empty());
+        assert!(diff(&concrete, &current).is_empty());
+    }
+
+    #[test]
+    fn an_index_kind_is_part_of_the_index() {
+        let mut before = schema(vec![table(
+            "events",
+            vec![column("payload", TypeDef::Jsonb)],
+        )]);
+        before.tables[0].indexes.push(crate::Index {
+            name: "events_payload_idx".into(),
+            columns: vec!["payload".into()],
+            unique: false,
+            kind: crate::IndexKind::Btree,
+            predicate: None,
+        });
+        let mut after = before.clone();
+        after.tables[0].indexes[0].kind = crate::IndexKind::Gin;
+
+        let changes = diff(&before, &after);
+        // Both statements use the same name, so the drop has to run first.
+        assert!(matches!(&changes[0], Change::DropIndex { .. }));
+        assert!(matches!(&changes[1], Change::AddIndex { .. }));
+        assert!(diff(&after, &after).is_empty());
+    }
+
+    #[test]
+    fn a_generated_column_change_is_risky_and_adding_one_is_safe() {
+        let before = schema(vec![table("users", vec![column("id", TypeDef::Int8)])]);
+        let mut after = before.clone();
+        after.tables[0].columns.push(crate::Column {
+            name: "search".into(),
+            ty: TypeDef::Text,
+            nullable: true,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            generated: Some(crate::Generated {
+                expression: "lower(id)".into(),
+                stored: true,
+            }),
+            comment: None,
+            renamed_from: None,
+        });
+
+        let added = diff(&before, &after);
+        assert_eq!(added.len(), 1);
+        assert!(matches!(&added[0], Change::AddColumn { .. }));
+        // A generated column has no value of its own to invent, so it cannot fail the way a
+        // `NOT NULL` column without a default does.
+        assert_eq!(added[0].safety(), Safety::Safe);
+
+        let mut changed = after.clone();
+        if let Some(generated) = &mut changed.tables[0].columns[1].generated {
+            generated.expression = "upper(id)".into();
+        }
+        let altered = diff(&after, &changed);
+        assert_eq!(altered.len(), 1);
+        assert!(matches!(&altered[0], Change::AlterColumn { .. }));
+        assert_eq!(altered[0].safety(), Safety::Risky);
+    }
+
+    #[test]
+    fn rls_is_enabled_but_never_disabled() {
+        let mut desired = schema(vec![table("invoices", vec![column("id", TypeDef::Int8)])]);
+        desired.tables[0].rls = true;
+
+        let mut without_rls = desired.tables.clone();
+        without_rls[0].rls = false;
+        let enabled = diff(&schema(without_rls), &desired);
+        assert_eq!(
+            enabled,
+            [Change::EnableRls {
+                table: "invoices".into(),
+            }]
+        );
+        assert_eq!(enabled[0].safety(), Safety::Safe);
+
+        // The reverse is not a change: disabling RLS is a decision for a migration.
+        let mut without_rls = desired.tables.clone();
+        without_rls[0].rls = false;
+        assert!(diff(&desired, &schema(without_rls)).is_empty());
+    }
+
+    #[test]
+    fn policies_are_recorded_but_never_diffed() {
+        let mut current = schema(vec![table("invoices", vec![column("id", TypeDef::Int8)])]);
+        current.policies.push(crate::Policy {
+            table: "invoices".into(),
+            name: "own_invoices".into(),
+            command: crate::PolicyCommand::All,
+            roles: Vec::new(),
+            using: Some("owner_id = current_setting('app.user_id')::uuid".into()),
+            with_check: None,
+        });
+
+        // Removing the policy from the declaration does not drop it, and adding one does not
+        // create it: the differ ignores the list in both directions.
+        assert!(diff(&current, &schema(current.tables.clone())).is_empty());
+        assert!(diff(&schema(current.tables.clone()), &current).is_empty());
     }
 }

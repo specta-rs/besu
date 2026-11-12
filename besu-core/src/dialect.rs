@@ -45,6 +45,108 @@ pub enum FullTextStyle {
     Unsupported,
 }
 
+/// How a dialect spells a `NULL`-safe comparison.
+///
+/// `IS DISTINCT FROM` is `true` when the two sides differ and `false` when they are equal,
+/// even when one side is `NULL` — unlike `<>`, which is `UNKNOWN` for any `NULL` and
+/// therefore neither matches nor rejects the row. It is the comparison to reach for when a
+/// nullable column has to be compared exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistinctFromStyle {
+    /// `a IS DISTINCT FROM b` and `a IS NOT DISTINCT FROM b`, the SQL standard spelling,
+    /// available on PostgreSQL and on SQLite 3.39 and later.
+    Standard,
+    /// MySQL has no `IS DISTINCT FROM` keyword, but its null-safe equality operator `<=>` is
+    /// exactly `IS NOT DISTINCT FROM`, so the negated form is written around it.
+    MySql,
+    /// A dialect that has not said how it spells the comparison.
+    ///
+    /// Rendering records an `unsupported` error rather than emitting another database's
+    /// syntax, which would fail inside the server with a message that points at the wrong
+    /// place.
+    Unsupported,
+}
+
+/// How a dialect spells a regular-expression match.
+///
+/// The three databases do not agree even on the operator, so this is a style rather than a
+/// flag: PostgreSQL's `~` family takes modifiers in the operator itself, MySQL has a keyword
+/// and a three-argument function, and SQLite has nothing unless an extension is loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegexStyle {
+    /// `a ~ b`, `a ~* b`, `a !~ b` and `a !~* b`, as in PostgreSQL.
+    Postgres,
+    /// `a REGEXP b` for a match and `REGEXP_LIKE(a, b, 'i')` for a case-insensitive one, as
+    /// in MySQL. There is no operator for the negated forms, so they are wrapped in `NOT`.
+    MySql,
+    /// A dialect with no regular-expression matching at all, as in SQLite without an
+    /// extension. Using one records an `unsupported` error.
+    Unsupported,
+}
+
+/// How a dialect spells a canonical function name.
+///
+/// Function spellings are not portable in the way operators are: the same operation can be
+/// called `char_length` here and `LENGTH` there, can need an extra literal argument, and can
+/// be spelled as a bare keyword. The variants cover exactly those differences, so a helper
+/// names one canonical function and the dialect decides what reaches the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionStyle {
+    /// `NAME(args...)`, with the arguments in the order the caller wrote them.
+    Named(&'static str),
+    /// `NAME` with no parentheses, for keywords such as `CURRENT_DATE` that share a
+    /// function's meaning but not its syntax.
+    Bare(&'static str),
+    /// `NAME(args..., extra...)`, where the extras are raw SQL literals the caller has no
+    /// business supplying: MySQL's `SHA2(x, 256)` and PostgreSQL's `encode(x, 'base64')`.
+    WithSuffix(&'static str, &'static [&'static str]),
+    /// `NAME(a SEPARATOR b)`, which is the only way MySQL spells the two-argument
+    /// `string_agg`.
+    Separator(&'static str),
+}
+
+impl FunctionStyle {
+    /// The name written before the parentheses.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Named(name) | Self::Bare(name) | Self::Separator(name) => name,
+            Self::WithSuffix(name, _) => name,
+        }
+    }
+}
+
+/// The functions every dialect spells the same way, as the default for
+/// [`Dialect::function`].
+///
+/// Only a spelling that is identical on PostgreSQL, MySQL and SQLite belongs here. A
+/// function that one of them lacks, renames or orders differently is deliberately absent, so
+/// that a dialect has to say what it does with it and a missing capability becomes an
+/// `unsupported` error instead of a server-side syntax error.
+pub fn portable_function(name: &str) -> Option<FunctionStyle> {
+    let spelling = match name {
+        "count" => "COUNT",
+        "sum" => "SUM",
+        "avg" => "AVG",
+        "min" => "MIN",
+        "max" => "MAX",
+        "lower" => "LOWER",
+        "upper" => "UPPER",
+        "length" => "LENGTH",
+        "trim" => "TRIM",
+        "abs" => "ABS",
+        "round" => "ROUND",
+        "coalesce" => "COALESCE",
+        "nullif" => "NULLIF",
+        "row_number" => "ROW_NUMBER",
+        "rank" => "RANK",
+        "dense_rank" => "DENSE_RANK",
+        "lag" => "LAG",
+        "lead" => "LEAD",
+        _ => return None,
+    };
+    Some(FunctionStyle::Named(spelling))
+}
+
 /// How a dialect spells an upsert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsertStyle {
@@ -160,6 +262,32 @@ pub trait Dialect: 'static + Sized {
     /// modifier subtracts the counts instead, which is the multiset difference. SQLite has
     /// no such spelling, so it is off there.
     const SUPPORTS_EXCEPT_ALL: bool = true;
+
+    /// How the dialect spells `IS DISTINCT FROM`.
+    ///
+    /// Defaulted to [`DistinctFromStyle::Standard`] because the standard spelling is what
+    /// most databases that implement the operation at all accept.
+    const DISTINCT_FROM: DistinctFromStyle = DistinctFromStyle::Standard;
+
+    /// How the dialect spells a regular-expression match.
+    ///
+    /// Defaulted to [`RegexStyle::Unsupported`], for the same reason as
+    /// [`Dialect::FULL_TEXT`]: emitting one database's operator on another produces a
+    /// syntax error a long way from the query that caused it.
+    const REGEX: RegexStyle = RegexStyle::Unsupported;
+
+    /// The dialect's spelling of a canonical function name.
+    ///
+    /// The helpers in the expression layer name a function once — `char_length`,
+    /// `string_agg`, `json_agg` — and this hook turns that name into the text the server
+    /// parses, or `None` when the dialect has no such function. `None` makes rendering
+    /// record an [`Error::unsupported`] rather than write another database's syntax.
+    ///
+    /// The default is [`portable_function`], which knows only the handful of spellings that
+    /// PostgreSQL, MySQL and SQLite genuinely share; a dialect overrides it to add the rest.
+    fn function(name: &str) -> Option<FunctionStyle> {
+        portable_function(name)
+    }
 
     /// Convert a generic value into the dialect's bound representation.
     fn bind(value: Value) -> Result<Self::Value, Error>;

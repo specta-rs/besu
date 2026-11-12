@@ -22,15 +22,15 @@ not implemented. **N/A** — no meaning in a Rust library.
 | Drizzle | Besu | Notes |
 | --- | --- | --- |
 | Column types | **Partial** | Every primitive round-trips. `INTERVAL`, `INET`/`CIDR`, `BIT`, arrays, ranges, spatial and `pgvector` are database-native only |
-| Indexes | **Partial** | Single-column indexes and uniques are declarable; composite indexes, expression indexes and index methods are snapshot-only or not modelled |
+| Indexes | **Partial** | Single-column indexes and uniques are declarable, and the IR carries the access method (`GIN`, `GiST`, `BRIN`, `FULLTEXT`, `SPATIAL`), which round-trips and is diffed. Composite indexes, expression indexes and operator classes are snapshot-only or not modelled |
 | Constraints | **Partial** | Foreign keys, single and composite `UNIQUE`, and `CHECK` round-trip. A check cannot be declared from the derive yet |
-| Sequences | **No** | `SERIAL`/`IDENTITY` only. No standalone sequence — [#81](https://github.com/specta-rs/besu/issues/81) |
-| Views | **Partial** | Introspection round-trips a view through `besu pull`; `push` never creates, alters or drops one, and materialised views are not modelled — [#83](https://github.com/specta-rs/besu/issues/83) |
+| Sequences | **Yes** | `Schema::sequences`, created and diffed on PostgreSQL; SQLite and MySQL have none |
+| Views | **Yes** | Declared as SQL bodies, created/replaced/dropped by `push` in dependency order, with materialised views on PostgreSQL |
 | Table schemas | **Yes** | PostgreSQL; `#[besu(schema = "..")]` |
-| Row-level security | **No** | Write the policy in a migration — [#82](https://github.com/specta-rs/besu/issues/82) |
+| Row-level security | **Partial** | `#[besu(rls)]` enables it and `pull` round-trips policies; a policy itself is migration SQL, and the differ never drops one |
 | Extensions | **No** | `CREATE EXTENSION` is migration SQL, by design |
 | Enum types | **Partial** | PostgreSQL enums round-trip and are diffed; MySQL's inline column enums are not modelled |
-| Generated columns | **No** | Use a migration and `sql!` until the derive can declare one — [#80](https://github.com/specta-rs/besu/issues/80) |
+| Generated columns | **Yes** | `#[besu(generated = "..")]`, stored or virtual, rendered, introspected and excluded from writes |
 
 ## Access your data
 

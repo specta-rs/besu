@@ -1,7 +1,8 @@
-use besu_core::{TypeDef, Value};
+use besu_core::{IndexKind, TypeDef, Value};
 
 use crate::{
-    Check, Column, Enum, ForeignKey, Index, ReferenceAction, Schema, Table, Unique, diff::Change,
+    Change, Check, Column, Enum, ForeignKey, Index, ReferenceAction, Schema, Sequence, Table,
+    Unique, View, view_body,
 };
 
 /// Render a schema as DDL for a particular database.
@@ -168,15 +169,37 @@ pub trait Ddl {
     }
 
     /// `CREATE INDEX`.
+    ///
+    /// The access method is rendered as `USING <method>` for the PostgreSQL ones. MySQL has
+    /// its own syntax and overrides this; the two MySQL-only kinds fall back to GIN and
+    /// GiST here, which is the closest thing PostgreSQL has to a full-text and a spatial
+    /// index.
     fn create_index(&self, table: &str, index: &Index) -> String {
         let mut sql = String::from("CREATE ");
-        if index.unique {
+        if index.unique && !matches!(index.kind, IndexKind::FullText) {
             sql.push_str("UNIQUE ");
         }
         sql.push_str("INDEX ");
         sql.push_str(&self.quote(&index.name));
         sql.push_str(" ON ");
         sql.push_str(&self.quote_table(table));
+
+        let method = match index.kind {
+            IndexKind::Btree => None,
+            IndexKind::FullText => Some("gin"),
+            IndexKind::Gin => Some("gin"),
+            IndexKind::Spatial => Some("gist"),
+            IndexKind::Gist => Some("gist"),
+            IndexKind::Brin => Some("brin"),
+            // `IndexKind` is non-exhaustive: a kind added later falls back to the default
+            // access method rather than failing to render.
+            _ => None,
+        };
+        if let Some(method) = method {
+            sql.push_str(" USING ");
+            sql.push_str(method);
+        }
+
         sql.push_str(" (");
         for (i, column) in index.columns.iter().enumerate() {
             if i != 0 {
@@ -295,6 +318,94 @@ pub trait Ddl {
         Vec::new()
     }
 
+    /// Statements that create a view.
+    ///
+    /// A view carries its definition as SQL, so the statement is the header plus that body.
+    /// MySQL and SQLite have no materialised views and override this to ignore the flag
+    /// rather than emit a spelling their server rejects.
+    fn create_view(&self, view: &View) -> Vec<String> {
+        let materialised = if view.materialised {
+            "MATERIALIZED "
+        } else {
+            ""
+        };
+        vec![format!(
+            "CREATE {materialised}VIEW {} AS {}",
+            self.quote_table(&view.name),
+            view_body(&view.definition)
+        )]
+    }
+
+    /// Statements that replace an existing view.
+    ///
+    /// The default uses `CREATE OR REPLACE VIEW`, which PostgreSQL and MySQL understand.
+    /// SQLite has no `OR REPLACE` and overrides this with a drop and a create.
+    fn replace_view(&self, view: &View) -> Vec<String> {
+        let materialised = if view.materialised {
+            "MATERIALIZED "
+        } else {
+            ""
+        };
+        vec![format!(
+            "CREATE OR REPLACE {materialised}VIEW {} AS {}",
+            self.quote_table(&view.name),
+            view_body(&view.definition)
+        )]
+    }
+
+    /// Statements that drop a view.
+    ///
+    /// A materialised view has its own `DROP` spelling in every dialect that has one, so
+    /// the flag travels with the change.
+    fn drop_view(&self, name: &str, materialised: bool) -> Vec<String> {
+        let materialised = if materialised { "MATERIALIZED " } else { "" };
+        vec![format!(
+            "DROP {materialised}VIEW {}",
+            self.quote_table(name)
+        )]
+    }
+
+    /// Statements that rebuild a materialised view's contents.
+    ///
+    /// The default returns nothing, because only PostgreSQL has materialised views. It is
+    /// emitted as part of replacing one: `CREATE MATERIALIZED VIEW ... AS` already populates
+    /// the result, but an explicit refresh makes the cost of the change visible in the
+    /// generated migration.
+    fn refresh_view(&self, _view: &View) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that create a sequence.
+    ///
+    /// The default returns nothing: SQLite and MySQL have no standalone sequence, so a
+    /// snapshot shared with PostgreSQL still pushes to them. PostgreSQL implements it.
+    fn create_sequence(&self, _sequence: &Sequence) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that change a sequence's options.
+    ///
+    /// The default returns nothing; see [`Ddl::create_sequence`].
+    fn alter_sequence(&self, _from: &Sequence, _to: &Sequence) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that drop a sequence.
+    ///
+    /// The default returns nothing; see [`Ddl::create_sequence`].
+    fn drop_sequence(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The statement that turns row-level security on for a table.
+    ///
+    /// The default returns an empty string, because only PostgreSQL has RLS. An empty
+    /// statement is dropped rather than executed, so a schema shared with the other
+    /// dialects still pushes.
+    fn enable_rls(&self, _table: &str) -> String {
+        String::new()
+    }
+
     /// The `FOREIGN KEY` clause used inside `CREATE TABLE`.
     fn foreign_key_clause(&self, fk: &ForeignKey) -> String {
         let mut sql = String::from("CONSTRAINT ");
@@ -354,6 +465,14 @@ pub trait Ddl {
                         statements.push(self.create_index(&table.qualified_name(), index));
                     }
                 }
+                // RLS is a table flag, not part of `CREATE TABLE`, so it is a second
+                // statement. A dialect without RLS returns nothing and it is skipped.
+                if table.rls {
+                    let statement = self.enable_rls(&table.qualified_name());
+                    if !statement.is_empty() {
+                        statements.push(statement);
+                    }
+                }
                 statements
             }
             Change::DropTable { name } => vec![self.drop_table(name)],
@@ -379,16 +498,34 @@ pub trait Ddl {
             }
             Change::AddCheck { table, check } => vec![self.add_check(table, check)],
             Change::DropCheck { table, check } => vec![self.drop_check(table, check)],
+            Change::CreateView(view) => self.create_view(view),
+            Change::ReplaceView(view) => self.replace_view(view),
+            Change::DropView { name, materialised } => self.drop_view(name, *materialised),
+            Change::CreateSequence(sequence) => self.create_sequence(sequence),
+            Change::AlterSequence { from, to, .. } => self.alter_sequence(from, to),
+            Change::DropSequence { name } => self.drop_sequence(name),
+            Change::EnableRls { table } => {
+                let statement = self.enable_rls(table);
+                if statement.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![statement]
+                }
+            }
         }
     }
 
     /// Render a whole schema from scratch.
     ///
-    /// Enums come first, because a column can name one; then tables in dependency order;
-    /// then their indexes, so a foreign key can reference a table that has not been created
-    /// yet.
+    /// Sequences and enums come first, because a column can name or default to one; then
+    /// tables in dependency order; then their indexes, so a foreign key can reference a
+    /// table that has not been created yet; and finally views, in dependency order, so a
+    /// view over a table created here works.
     fn create_schema(&self, schema: &Schema) -> Vec<String> {
         let mut statements = Vec::new();
+        for sequence in &schema.sequences {
+            statements.extend(self.create_sequence(sequence));
+        }
         for e in &schema.enums {
             statements.extend(self.create_enum(e));
         }
@@ -397,6 +534,12 @@ pub trait Ddl {
                 .topological_order()
                 .into_iter()
                 .flat_map(|table| self.default_change(&Change::CreateTable(table.clone()))),
+        );
+        statements.extend(
+            schema
+                .ordered_views()
+                .into_iter()
+                .flat_map(|view| self.create_view(view)),
         );
         statements
     }

@@ -1,15 +1,60 @@
 # SQL comments
 
-> **Not supported yet.**
+Every builder takes a `.comment(..)`, which appends a `/* ... */` after the statement so a
+slow-query log can say which code ran it.
 
-There is no `comment` on a query builder, so a statement cannot carry an application-level label
-the way Drizzle's `.comment("...")` can. Tracking issue:
-[#87](https://github.com/specta-rs/besu/issues/87), also on the
-[roadmap](../roadmap.md#smaller-items), and listed on [Drizzle parity](../parity.md).
+```rust
+db.select(users)
+    .filter(users.age.gte(18))
+    .comment("feed page")
+    .all()
+    .await?;
+```
+
+```sql
+SELECT "users"."id", ... FROM "users" WHERE ("users"."age" >= $1) /* feed page */
+```
+
+The comment is the last thing in the statement, after the dialect's own suffix (PostgreSQL
+adds one that encodes the parameter types, for its prepared-statement cache). It is part of
+the statement *text*, not a driver feature, which is what makes it appear everywhere at once:
+
+- `Select::to_sql()` and `Select::inspect()` show it.
+- A slow-query log shows it: PostgreSQL's `pg_stat_statements`, MySQL's slow log and SQLite's
+  `sqlite3_stmt` text all keep the comment.
+- [`besu::logged`](../drivers.md) reports it, because it reports `Sql::inspect()`.
+
+Every builder has one: `Select`, `SetQuery`, `Insert`, `Update` and `Delete`, including their
+`RETURNING` forms, so a label survives being added before or after `returning(..)`.
+
+## What it costs
+
+The comment becomes part of the prepared statement's cache key, so two calls with different
+labels are two prepared statements even though they are the same query. Label a handful of
+call sites with a fixed string, not a per-request value such as a user id — for that, bind a
+parameter.
+
+## Escaping
+
+A `*/` inside the label would end the comment early and turn the rest of it into SQL, so it is
+written as `* /`:
+
+```rust
+db.select(users).comment("weird */ label")
+```
+
+```sql
+SELECT ... FROM "users" /* weird * / label */
+```
+
+That is the only transformation applied. The label is otherwise written verbatim, so it must
+come from your source, not from user input — an unparameterised comment is still SQL.
 
 ## Putting a comment in a statement
 
-Use [`sql!`](sql.md) and write the comment as part of the text:
+Since the comment is ordinary SQL text, `sql!` can carry one as well. A `?` inside it is
+counted as a placeholder by the macro's arity check, and a `--` comment ends at the newline,
+so a trailing `--` swallows whatever follows.
 
 ```rust
 db.execute(sql!(
@@ -20,20 +65,9 @@ db.execute(sql!(
 .await?;
 ```
 
-A `--` comment ends at the newline, so keep the line break. A `/* ... */` comment can sit
-anywhere, but it may not contain a `?` — the macro counts that as a placeholder and the arity
-check fails. A comment is only possible in one hand-written statement; the typed builders have
-nowhere to put one.
-
-## Seeing the statement instead
-
-- `Select::inspect()` and `Sql::inspect()` inline the parameters for a log line; see
-  [query utilities](query-utils.md).
-- `besu::logged` wraps a driver and logs every statement at `DEBUG` on the `besu::query` target,
-  with its duration, plus a `WARN` for anything slower than the `Policy` threshold.
-
 ## Gotchas
 
-- **No builder method adds a comment.** `sql!` or nothing.
-- **A `?` in a comment is a placeholder** to `sql!`, and a `--` comment without a trailing
-  newline comments out the rest of the statement.
+- **A comment is part of the cache key.** Keep the label constant per call site.
+- **A `?` in a comment is a placeholder** to `sql!`.
+- **A `--` comment without a trailing newline** comments out the rest of the statement.
+- **The label is not escaped beyond `*/`.** Never build one from user input.

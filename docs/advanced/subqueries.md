@@ -89,3 +89,5 @@ PostgreSQL driver suffix is appended once, to the whole statement.
   column is fast; without one it is a scan per row, and the builder cannot tell you which.
 - A set operation is not accepted as a subquery yet; convert it to one with `sql!` if you need
   it.
+- A named subquery is a [common table expression](ctes.md): `Select::cte` names one, and
+  `db.from(&cte)` reads it back.

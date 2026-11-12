@@ -26,8 +26,9 @@ besu pull --database postgres://user:pass@host/db --out schema.json
 besu pull --database sqlite:app.db > schema.json
 ```
 
-The output is `Schema` serialised with `serde_json`: tables, enum types and views. Enums and
-views are omitted when the list is empty, so a SQLite snapshot contains only tables.
+The output is `Schema` serialised with `serde_json`: tables, enum types, views, sequences and
+row-level policies where the dialect has them. Empty lists are omitted, so a SQLite snapshot
+contains only tables.
 
 ```json
 {
@@ -65,7 +66,6 @@ it, because `push` would then try to drop or replace it:
 - expression indexes and `INCLUDE` indexes;
 - indexes behind a constraint, and exclusion constraints;
 - triggers;
-- standalone sequences;
 - a view whose definition the connected role cannot see;
 - `CHECK` constraints on SQLite and MySQL;
 - a partial index's predicate on SQLite and MySQL.

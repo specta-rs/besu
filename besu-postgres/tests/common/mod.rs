@@ -30,7 +30,7 @@ pub async fn database() -> besu::Database<Sqlx> {
     db
 }
 
-/// Remove every table and every non-`public` schema, so each test starts from an empty
+/// Remove every table, sequence and non-`public` schema, so each test starts from an empty
 /// database.
 ///
 /// Introspection reports every table outside PostgreSQL's system schemas, so anything a
@@ -58,6 +58,28 @@ pub async fn reset(db: &besu::Database<Sqlx>) {
         db.execute(besu::Fragment::new(statement))
             .await
             .expect("a leftover table must be droppable");
+    }
+
+    // A standalone sequence outlives the table that used it unless it was `OWNED BY` one,
+    // and a test that failed before its cleanup would leave it behind.
+    let sequences: Vec<(String, String)> = db
+        .execute(sql!(
+            "SELECT schemaname, sequencename FROM pg_sequences \
+             WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+               AND schemaname NOT LIKE 'pg\\_%' ESCAPE '\\'"
+        ))
+        .all()
+        .await
+        .expect("the sequence list must be readable");
+    for (schema, sequence) in sequences {
+        let statement = format!(
+            "DROP SEQUENCE IF EXISTS {}.{} CASCADE",
+            quote_ident(&schema),
+            quote_ident(&sequence)
+        );
+        db.execute(besu::Fragment::new(statement))
+            .await
+            .expect("a leftover sequence must be droppable");
     }
 
     let schemas: Vec<String> = db

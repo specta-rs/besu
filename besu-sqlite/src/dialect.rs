@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use besu_core::dialect::FullTextStyle;
+use besu_core::dialect::{
+    DistinctFromStyle, FullTextStyle, FunctionStyle, RegexStyle, portable_function,
+};
 use besu_core::{Dialect, Error, Placeholder, TypeDef, UpsertStyle, Value};
 
 /// The SQLite dialect.
@@ -90,6 +92,48 @@ impl Dialect for SQLite {
             TypeDef::Decimal(_, _) => "TEXT",
             TypeDef::Custom(ref name) => return name.clone(),
             _ => "TEXT",
+        })
+    }
+
+    /// SQLite has had `IS DISTINCT FROM` since 3.39, and no regular-expression matching at
+    /// all without an extension, so a regex records `unsupported`.
+    const DISTINCT_FROM: DistinctFromStyle = DistinctFromStyle::Standard;
+    const REGEX: RegexStyle = RegexStyle::Unsupported;
+
+    /// SQLite's function library is smaller and differently named than the other two, so
+    /// this table is mostly a translation: `char_length` is `length`, `btrim` is `trim`,
+    /// `strpos` is `instr`, and `string_agg` is `group_concat`. Anything absent is a
+    /// function SQLite does not have, which becomes an `unsupported` error rather than a
+    /// server-side syntax error.
+    fn function(name: &str) -> Option<FunctionStyle> {
+        use FunctionStyle::{Bare, Named};
+        Some(match name {
+            "char_length" => Named("LENGTH"),
+            "substr" => Named("SUBSTR"),
+            "replace" => Named("REPLACE"),
+            "ltrim" => Named("LTRIM"),
+            "rtrim" => Named("RTRIM"),
+            "btrim" => Named("TRIM"),
+            "concat" => Named("CONCAT"),
+            "concat_ws" => Named("CONCAT_WS"),
+            "strpos" => Named("INSTR"),
+            "greatest" => Named("MAX"),
+            "least" => Named("MIN"),
+            "current_date" => Bare("CURRENT_DATE"),
+            "string_agg" => Named("GROUP_CONCAT"),
+            "json_agg" => Named("JSON_GROUP_ARRAY"),
+            // SQLite has one JSON type, so the binary variant is the same aggregate.
+            "jsonb_agg" => Named("JSON_GROUP_ARRAY"),
+            "json_object" => Named("JSON_OBJECT"),
+            "bool_and" => Named("MIN"),
+            "bool_or" => Named("MAX"),
+            "every" => Named("MIN"),
+            "row_number" => Named("ROW_NUMBER"),
+            "rank" => Named("RANK"),
+            "dense_rank" => Named("DENSE_RANK"),
+            "lag" => Named("LAG"),
+            "lead" => Named("LEAD"),
+            other => return portable_function(other),
         })
     }
 }
