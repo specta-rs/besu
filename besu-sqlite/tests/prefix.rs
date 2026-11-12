@@ -57,6 +57,33 @@ async fn every_rendered_table_name_carries_the_prefix() {
         sql.sql()
     );
     assert!(!sql.sql().contains("tenant_1_recent"), "{}", sql.sql());
+
+    // An alias renames a table rather than defining one, so the same split applies from the
+    // other side: the table in `FROM` is prefixed and the name after `AS` is not, and every
+    // column reference uses the alias verbatim.
+    let manager = alias(users, "manager");
+    let sql = prefixed
+        .select(&manager)
+        .filter(manager.column(users.id).gt(0_i64))
+        .to_sql()
+        .unwrap();
+    assert!(
+        sql.sql().contains(r#"FROM "tenant_1_users" AS "manager""#),
+        "the aliased table must be prefixed and the alias must not: {}",
+        sql.sql()
+    );
+    assert!(
+        sql.sql()
+            .contains(r#"SELECT "manager"."id", "manager"."name" FROM"#),
+        "the default projection must use the alias: {}",
+        sql.sql()
+    );
+    assert!(
+        sql.sql().contains(r#"("manager"."id" >"#),
+        "a column of the alias must not be prefixed either: {}",
+        sql.sql()
+    );
+    assert!(!sql.sql().contains("tenant_1_manager"), "{}", sql.sql());
 }
 
 #[tokio::test]

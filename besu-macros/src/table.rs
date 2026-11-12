@@ -325,6 +325,13 @@ struct Column {
     renamed_from: Option<LitStr>,
     reference: Option<Reference>,
     generated: Option<Generated>,
+    /// Whether the seed generator has an implementation for this column's `SqlType`.
+    ///
+    /// An explicit `sql_type` can name a user-defined type, and there is no honest way to
+    /// invent a value for it. Such a column is left unset by `Seedable` and has to be given a
+    /// value with `.set(..)`; the trait's `REQUIRED` list is what turns "forgot to override"
+    /// into a clear error instead of a constraint violation.
+    seed_supported: bool,
 }
 
 /// A field computed by the database rather than supplied by the program.
@@ -367,15 +374,21 @@ impl Column {
 
         // An explicit `sql_type` names a `SqlType` implementation directly, which is how a
         // `DECIMAL(10,2)`, a `VARCHAR(255)` or a user-defined type gets declared.
+        let mut explicit_ty: Option<Type> = None;
         let explicit = match &attrs.sql_type {
             Some(lit) => {
                 let ty: Type = syn::parse_str(&lit.value()).map_err(|err| {
                     Error::new(lit.span(), format!("besu: `sql_type` is not a type: {err}"))
                 })?;
+                explicit_ty = Some(ty.clone());
                 Some((quote!(#ty), quote!(<#ty as #besu::SqlType>::DEF)))
             }
             None => None,
         };
+
+        // Every type the derive infers from a Rust field has a generator. Only an explicit
+        // `sql_type` can escape the built-in set, and then it is the caller's to fill in.
+        let seed_supported = explicit_ty.as_ref().is_none_or(seed_type_supported);
 
         let (sql_ty, type_def) = match explicit {
             Some(explicit) => explicit,
@@ -487,7 +500,38 @@ impl Column {
                 expression,
                 stored: attrs.generated_stored.unwrap_or(true),
             }),
+            seed_supported,
         })))
+    }
+}
+
+/// Whether `besu::seed::SeedValue` has an implementation for this SQL type.
+///
+/// The list mirrors the implementations in `besu/src/seed.rs`. A type that is not here is not
+/// a compile error: the column is left unset and the caller supplies it with `.set(..)`,
+/// which keeps a table with one exotic column seedable.
+fn seed_type_supported(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+
+    match segment.ident.to_string().as_str() {
+        "Bool" | "Int1" | "Int2" | "Int4" | "Int8" | "UInt1" | "UInt2" | "UInt4" | "UInt8"
+        | "U128" | "I128" | "Float4" | "Float8" | "Text" | "Char" | "VarChar" | "Decimal"
+        | "Bytes" | "Date" | "Time" | "Timestamp" | "TimestampTz" | "Uuid" | "Json" | "Jsonb" => {
+            true
+        }
+        "Array" => match &segment.arguments {
+            syn::PathArguments::AngleBracketed(args) => match args.args.first() {
+                Some(syn::GenericArgument::Type(inner)) => seed_type_supported(inner),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -834,6 +878,44 @@ impl Codegen {
             }
         });
 
+        // --- seeding ------------------------------------------------------------------
+        // A column with no generator is left unset; when SQL would also refuse a missing
+        // value, it is listed so the seeder can say which `.set(..)` is needed.
+        let seed_required = writable
+            .iter()
+            .filter(|column| {
+                !column.seed_supported
+                    && !column.nullable
+                    && !column.auto_increment
+                    && column.default.is_none()
+            })
+            .map(|column| &column.sql_name);
+        let seed_fields = writable.iter().map(|column| {
+            let ident = &column.ident;
+            let sql_ty = &column.sql_ty;
+            let name = &column.sql_name;
+            if !column.seed_supported {
+                quote!(#ident: #besu::Set::Unset)
+            } else if let Some(reference) = &column.reference {
+                // The parent's key pool is keyed by the names in the reference, which is
+                // exactly what the foreign key metadata already carries.
+                let table = LitStr::new(&reference.table, column.ident.span());
+                let referenced = LitStr::new(&reference.column, column.ident.span());
+                quote!(#ident: #besu::Set::Value(
+                    ctx.foreign_key::<#sql_ty>(#name, #table, #referenced)?
+                ))
+            } else if column.auto_increment || column.primary_key {
+                // Integers number from 1; every other primary key is made unique.
+                quote!(#ident: #besu::Set::Value(ctx.primary::<#sql_ty>(#name)))
+            } else if column.unique {
+                quote!(#ident: #besu::Set::Value(ctx.unique::<#sql_ty>(#name)))
+            } else if column.nullable {
+                quote!(#ident: ctx.optional::<#sql_ty>(#name))
+            } else {
+                quote!(#ident: #besu::Set::Value(ctx.value::<#sql_ty>(#name)))
+            }
+        });
+
         let model_doc = format!(
             "Insert a new row into the `{}` table.",
             self.table_name.value()
@@ -925,6 +1007,18 @@ impl Codegen {
                         Self {
                             #(#from_model,)*
                         }
+                    }
+                }
+
+                impl #besu::seed::Seedable for #table_struct_ident {
+                    const REQUIRED: &'static [&'static str] = &[#(#seed_required),*];
+
+                    fn seed_row(
+                        ctx: &mut #besu::seed::SeedContext<'_>,
+                    ) -> ::core::result::Result<Self::Insert, #besu::seed::SeedError> {
+                        ::core::result::Result::Ok(#insert_struct_ident {
+                            #(#seed_fields,)*
+                        })
                     }
                 }
 

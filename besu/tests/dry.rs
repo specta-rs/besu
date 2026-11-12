@@ -129,6 +129,17 @@ pub struct Post {
     author_id: i64,
 }
 
+/// A table that refers to itself, so a query can read it twice: every employee has at most
+/// one manager, who is another employee.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "employees")]
+pub struct Employee {
+    #[besu(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    manager_id: Option<i64>,
+}
+
 #[test]
 fn select_renders_the_same_sql_a_server_would_run() {
     let db = dry::<TestDialect>();
@@ -747,6 +758,72 @@ fn a_derived_expression_needs_an_explicit_pick() {
     let sql = db.select(&named).to_sql().unwrap();
     let error = sql.error().expect("the unnamed column must be rejected");
     assert!(error.to_string().contains("no single name"), "{error:?}");
+}
+
+/// An alias renames a table inside the statement, which is the only way to read one table
+/// twice: every employee and the employee who manages them are rows of `employees`.
+#[test]
+fn an_alias_reads_a_table_under_a_second_name() {
+    let db = dry::<TestDialect>();
+    let manager = alias(employees, "manager");
+
+    // `FROM "employees" AS "manager"`, with the default projection qualified by the alias.
+    let sql = db.select(&manager).to_sql().unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "manager"."id", "manager"."name", "manager"."manager_id" FROM "employees" AS "manager""#
+    );
+
+    // The self-join: one table, two names, and the condition names both. The alias takes the
+    // join's place in the row set, so both sides of the comparison are checked against the
+    // schema and against the tables the statement really reads.
+    let sql = db
+        .select(employees)
+        .left_join(
+            &manager,
+            manager.column(employees.id).eq(employees.manager_id),
+        )
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "employees"."id", "employees"."name", "employees"."manager_id", "manager"."id", "manager"."name", "manager"."manager_id" FROM "employees" LEFT JOIN "employees" AS "manager" ON ("manager"."id" = "employees"."manager_id")"#
+    );
+
+    // An alias column is an expression, so it projects, filters and orders like any other.
+    let manager_name = manager.column(employees.name);
+    let sql = db
+        .select(employees)
+        .inner_join(
+            &manager,
+            manager.column(employees.id).eq(employees.manager_id),
+        )
+        .pick((employees.name, manager_name.clone()))
+        .filter(manager_name.clone().like("A%"))
+        .order_by(manager_name)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "employees"."name", "manager"."name" FROM "employees" INNER JOIN "employees" AS "manager" ON ("manager"."id" = "employees"."manager_id") WHERE ("manager"."name" LIKE $1) ORDER BY "manager"."name" ASC"#
+    );
+    assert_eq!(sql.args(), [Value::Text("A%".into())]);
+
+    // The same statement on a dialect with backtick identifiers and `?` placeholders.
+    let db = dry::<BacktickDialect>();
+    let manager = alias(employees, "manager");
+    let sql = db
+        .select(employees)
+        .left_join(
+            &manager,
+            manager.column(employees.id).eq(employees.manager_id),
+        )
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        "SELECT `employees`.`id`, `employees`.`name`, `employees`.`manager_id`, `manager`.`id`, `manager`.`name`, `manager`.`manager_id` FROM `employees` LEFT JOIN `employees` AS `manager` ON (`manager`.`id` = `employees`.`manager_id`)"
+    );
 }
 
 #[test]

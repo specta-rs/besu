@@ -89,6 +89,7 @@ pub mod migrate;
 pub mod prelude;
 mod query;
 pub mod relation;
+pub mod seed;
 mod selection;
 mod stream;
 mod table;
@@ -142,10 +143,11 @@ pub use macros::Fragment;
 #[cfg(feature = "migrate")]
 pub use migrate::{PushResult, SchemaDriver, SchemaError};
 pub use query::{
-    Cte, Delete, DeleteReturning, Derived, Insert, InsertReturning, JoinKind, OnConflict, Select,
-    SetOp, SetQuery, Update, UpdateReturning, derived,
+    Alias, Cte, Delete, DeleteReturning, Derived, Insert, InsertReturning, JoinKind, OnConflict,
+    Select, SetOp, SetQuery, Update, UpdateReturning, alias, derived,
 };
 pub use relation::{HasMany, WithRelation, has_many};
+pub use seed::{Seed, SeedError, SeedReport, TableSeed, seed};
 pub use selection::Selection;
 pub use stream::Rows;
 pub use table::{Insertable, Set, Table, TableRef};

@@ -62,13 +62,19 @@ impl<Dr: Driver> Database<Dr> {
     /// Start a `SELECT` over `table`.
     ///
     /// The source is anything implementing [`TableRef`](crate::TableRef): a declared table
-    /// from `#[derive(Table)]`, or a derived table from [`derived`](crate::derived). Pass a
-    /// derived table by reference when its columns are also needed:
+    /// from `#[derive(Table)]`, a derived table from [`derived`](crate::derived), or the same
+    /// table under a second name from [`alias`](crate::alias). Pass a derived table or an
+    /// alias by reference when its columns are also needed:
     ///
     /// ```ignore
     /// let totals = derived(db.select(posts).pick(posts.author_id), "totals");
     /// let author = totals.column(posts.author_id);
     /// db.select(&totals).pick((author.clone(), count_all())).group_by(author)
+    /// ```
+    ///
+    /// ```ignore
+    /// let manager = alias(employees, "manager");
+    /// db.select(&manager).filter(manager.column(employees.name).eq("Alice"))
     /// ```
     pub fn select<T: TableRef>(&self, table: T) -> Select<'_, &Self, (T::Marker,), T::Model> {
         Select::new(self, table.into_source())

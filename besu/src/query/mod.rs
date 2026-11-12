@@ -1,5 +1,6 @@
 //! Query builders.
 
+pub(crate) mod alias;
 pub(crate) mod cte;
 pub(crate) mod delete;
 pub(crate) mod derived;
@@ -8,6 +9,7 @@ pub(crate) mod select;
 pub(crate) mod set;
 pub(crate) mod update;
 
+pub use alias::{Alias, alias};
 pub use cte::Cte;
 pub use delete::{Delete, DeleteReturning};
 pub use derived::{Derived, derived};
@@ -24,20 +26,38 @@ use crate::expr::{ExprKind, NullsOrder, Order, OrderClause};
 
 /// Where a `SELECT` reads its rows from.
 ///
-/// A statement's source is a table in the database, a common table expression defined by the
-/// same statement, or a derived table — a subquery given a name and read as if it were one.
-/// They render differently in three places — the name, the prefix, and the default
-/// projection — so the distinction has to be explicit rather than a bare
-/// `&'static TableDef`.
+/// A statement's source is a table in the database, that table under a second name, a common
+/// table expression defined by the same statement, or a derived table — a subquery given a
+/// name and read as if it were one. They render differently in three places — the name, the
+/// prefix, and the default projection — so the distinction has to be explicit rather than a
+/// bare `&'static TableDef`.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum From {
     /// A table in the database, which is schema-qualified and given the tenant prefix.
     Table(&'static TableDef),
+    /// A table in the database under another name: qualified and prefixed like a table, but
+    /// referred to by the alias.
+    Alias(AliasSource),
     /// A common table expression, which is neither.
     Cte(CteSource),
     /// A subquery in `FROM`, which is written out in place and given an alias.
     Derived(DerivedSource),
+}
+
+/// A table working under a second name in one statement.
+///
+/// Nothing separates it from the table except the name: the same `TableDef` supplies the
+/// columns, so the default projection and the decode order are unchanged. The alias is a
+/// name in the statement rather than a table in the database, so column references use it
+/// verbatim — no schema and no tenant prefix — while `FROM` still names the real table.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct AliasSource {
+    /// The name written after `AS`.
+    pub alias: &'static str,
+    /// The table being renamed.
+    pub table: &'static TableDef,
 }
 
 /// A common table expression used as a `SELECT`'s source.
@@ -74,6 +94,7 @@ impl From {
     pub(crate) fn column_count(&self) -> usize {
         match self {
             Self::Table(def) => def.columns.len(),
+            Self::Alias(source) => source.table.columns.len(),
             Self::Cte(source) => source.columns.len(),
             Self::Derived(source) => source.columns.len(),
         }
@@ -83,6 +104,12 @@ impl From {
     pub(crate) fn column_names(&self) -> Vec<Option<&'static str>> {
         match self {
             Self::Table(def) => def.columns.iter().map(|column| Some(column.name)).collect(),
+            Self::Alias(source) => source
+                .table
+                .columns
+                .iter()
+                .map(|column| Some(column.name))
+                .collect(),
             Self::Cte(source) => source
                 .columns
                 .iter()
@@ -103,6 +130,16 @@ impl From {
                 for column in def.columns {
                     push_comma(out, first);
                     out.push_qualified(def.name, column.name);
+                }
+            }
+            // An alias is a name in the statement, so its columns are written the way a
+            // common table expression's are: quoted, dot-separated and never prefixed.
+            Self::Alias(source) => {
+                for column in source.table.columns {
+                    push_comma(out, first);
+                    out.push_ident(source.alias);
+                    out.push_raw(".");
+                    out.push_ident(column.name);
                 }
             }
             Self::Cte(source) => {
@@ -143,6 +180,13 @@ impl From {
     pub(crate) fn render<D: Dialect>(&mut self, out: &mut Sql<D>) {
         match self {
             Self::Table(def) => out.push_table(def.schema, def.name),
+            // The table is a table in the database, so it takes its schema and the tenant
+            // prefix; the name after `AS` is a name in the statement and takes neither.
+            Self::Alias(source) => {
+                out.push_table(source.table.schema, source.table.name);
+                out.push_raw(" AS ");
+                out.push_ident(source.alias);
+            }
             // A CTE is a name in the statement, not a table in the database, so it is never
             // schema-qualified and never given the tenant prefix.
             Self::Cte(source) => out.push_ident(source.name),
@@ -162,6 +206,12 @@ impl From {
     pub(crate) fn list_bytes(&self) -> usize {
         match self {
             Self::Table(def) => table_list_bytes(def),
+            Self::Alias(source) => source
+                .table
+                .columns
+                .iter()
+                .map(|column| source.alias.len() + column.name.len() + 6)
+                .sum(),
             Self::Cte(source) => source
                 .columns
                 .iter()
