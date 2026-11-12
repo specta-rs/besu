@@ -1581,3 +1581,227 @@ async fn numeric_functions_run() {
         .unwrap();
     assert_eq!(rows[0], (25, 20, 20));
 }
+
+/// A batch runs every statement and commits them together.
+#[tokio::test]
+async fn batch_commits_every_statement() {
+    let db = setup().await;
+
+    let (first, second, third) = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            db.insert(users)
+                .value(users.insert("b@example.com", "Bob", 31)),
+            db.update(users)
+                .set(users.age, 40)
+                .filter(users.email.eq("a@example.com")),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(first.rows_affected(), 1);
+    assert_eq!(second.rows_affected(), 1);
+    assert_eq!(third.rows_affected(), 1);
+
+    let all: Vec<User> = db.select(users).order_by(users.email.asc()).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].age, 40);
+    assert_eq!(all[1].age, 31);
+}
+
+/// A failure part-way through a batch leaves none of its writes behind.
+#[tokio::test]
+async fn batch_rolls_back_on_failure() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("taken@example.com", "Taken", 20))
+        .await
+        .unwrap();
+
+    let result = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            // The unique index rejects this one.
+            db.insert(users)
+                .value(users.insert("taken@example.com", "Duplicate", 31)),
+            db.insert(users)
+                .value(users.insert("c@example.com", "Carol", 32)),
+        ))
+        .await;
+
+    assert!(result.is_err());
+
+    let all: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].email, "taken@example.com");
+}
+
+// ---------------------------------------------------------------------------------------
+// JSON operators and structured paths
+// ---------------------------------------------------------------------------------------
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "json_docs")]
+pub struct JsonDoc {
+    #[besu(primary_key)]
+    pub id: i64,
+    /// `JSONB`, because PostgreSQL's containment and existence operators are only defined
+    /// between two `jsonb` values; a plain `json` column supports `->` but not `@>`.
+    #[besu(sql_type = "besu::Jsonb")]
+    pub payload: serde_json::Value,
+}
+
+#[tokio::test]
+async fn json_paths_are_structured_and_bound() {
+    use besu::expr::{JsonPath, json_at, json_at_text, json_key, json_key_text};
+
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([json_docs.def()]).await.unwrap();
+
+    db.insert(json_docs)
+        .value(json_docs.insert(
+            1,
+            serde_json::json!({"a": 1, "user.name": "oscar", "b": {"c": [10, 20]}}),
+        ))
+        .await
+        .unwrap();
+
+    // A key containing a dot is one member, not two path segments.
+    let names: Vec<String> = db
+        .select(json_docs)
+        .pick(json_at_text(
+            json_docs.payload,
+            JsonPath::root().key("user.name"),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names[0], "oscar");
+
+    // `json_text` still splits on dots, so this path is two keys and finds nothing.
+    let old: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(is_null(json_text(json_docs.payload, "user.name")))
+        .await
+        .unwrap();
+    assert_eq!(old.len(), 1);
+
+    // An array index inside the path.
+    let first: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_at(
+            json_docs.payload,
+            JsonPath::root().key("b").key("c").index(0),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(first[0], serde_json::json!(10));
+
+    // `->` and `->>` with a key that is bound rather than written into the SQL.
+    let bound: Vec<String> = db
+        .select(json_docs)
+        .pick(json_key_text(json_docs.payload, "user.name"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(bound[0], "oscar");
+
+    let bound_json: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_key(json_docs.payload, "a"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(bound_json[0], serde_json::json!(1));
+}
+
+#[tokio::test]
+async fn json_operators_render_for_postgres() {
+    use besu::expr::{
+        JsonPath, contains_json, json_contained_by, json_has_all, json_has_any, json_has_key,
+        json_matches, json_matches_path, json_strip,
+    };
+
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([json_docs.def()]).await.unwrap();
+
+    db.insert(json_docs)
+        .value(json_docs.insert(1, serde_json::json!({"a": 1, "b": 2})))
+        .await
+        .unwrap();
+    db.insert(json_docs)
+        .value(json_docs.insert(2, serde_json::json!({"c": 3})))
+        .await
+        .unwrap();
+
+    let contained: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(contains_json(
+            json_docs.payload,
+            serde_json::json!({"a": 1}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(contained.len(), 1);
+
+    let has_key: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(json_has_key(json_docs.payload, "c"))
+        .await
+        .unwrap();
+    assert_eq!(has_key.len(), 1);
+    assert_eq!(has_key[0].id, 2);
+
+    let any: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(json_has_any(json_docs.payload, ["z", "b"]))
+        .await
+        .unwrap();
+    assert_eq!(any.len(), 1);
+
+    let all: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(json_has_all(json_docs.payload, ["a", "b"]))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+
+    let matched: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(json_matches_path(json_docs.payload, "$ ? (@.a == 1)"))
+        .await
+        .unwrap();
+    assert_eq!(matched.len(), 1);
+
+    let exact: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(json_matches(json_docs.payload, "$.c == 3"))
+        .await
+        .unwrap();
+    assert_eq!(exact.len(), 1);
+
+    let stripped: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_strip(json_docs.payload, JsonPath::root().key("a")))
+        .filter(json_docs.id.eq(1_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(stripped[0], serde_json::json!({"b": 2}));
+
+    let contained_by: Vec<JsonDoc> = db
+        .select(json_docs)
+        .filter(json_contained_by(
+            json_docs.payload,
+            serde_json::json!({"a": 1, "b": 2, "c": 3}),
+        ))
+        .await
+        .unwrap();
+    // Both documents are contained in the larger one, which is what `<@` means.
+    assert_eq!(contained_by.len(), 2);
+}

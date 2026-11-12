@@ -1,57 +1,97 @@
 # Batch API
 
-> **Not supported yet.** Besu has no `db.batch([..])`. One builder is one statement, and
-> awaiting it is one round trip.
-
-Drizzle's `db.batch([..])` takes an array of queries, sends them in a single request and
-returns a typed tuple of their results. It is a latency feature: atomicity still comes from a
-transaction. Besu has no batch, so the honest options are to await each statement or to put
-them in one transaction.
-
-## Await each statement
-
-Two independent statements are two round trips. That is the same SQL Drizzle would send,
-without the request batching.
+`db.batch((..))` runs several **write** statements in one transaction and returns a typed
+tuple of what each one reported.
 
 ```rust
-let users = db.select(users).filter(users.age.gte(18)).await?;
-let posts = db.select(posts).order_by(posts.created_at.desc()).limit(20).await?;
-```
-
-This is the right shape when the statements are independent: one failing does not have to undo
-the other, and the second does not need the first's result.
-
-## Atomic: one transaction
-
-When the statements must land together, wrap them in `db.transaction(..)` and return a tuple.
-That is the closest thing to a batch Besu has: it is still one round trip per statement, plus
-`BEGIN` and `COMMIT`.
-
-```rust
-let (user, post) = db
-    .transaction(async |tx| {
-        let user = tx
-            .insert(users)
-            .value(users.insert("oscar@example.com", "Oscar", 21))
-            .returning(users)
-            .await?
-            .remove(0);
-
-        let post = tx
-            .insert(posts)
-            .value(posts.insert("Hello, world", user.id))
-            .returning(posts)
-            .await?
-            .remove(0);
-
-        Ok::<_, sqlx::Error>((user, post))
-    })
+let (first, second, third) = db
+    .batch((
+        db.insert(users).value(users.insert("a@example.com", "Alice", 30)),
+        db.insert(users).value(users.insert("b@example.com", "Bob", 31)),
+        db.update(users).set(users.age, 40).filter(users.email.eq("a@example.com")),
+    ))
     .await?;
 ```
 
-The closure is where the dependency lives: the post needs `user.id`, which a batch of
-pre-built statements could not express. MySQL has no `RETURNING`, so on MySQL select the rows
-back by key after the insert instead.
+The tuple takes one to eight `INSERT`, `UPDATE` or `DELETE` builders. Every element is
+rendered before the transaction is opened, then the statements run one after another on the
+transaction's connection, and the transaction commits only if all of them succeed. Each
+element of the returned tuple is that statement's own driver output — usually the number of
+affected rows.
+
+## Atomicity
+
+A batch is atomic by default, matching Drizzle. If any statement fails, the transaction is
+rolled back and the error is returned; nothing the batch wrote stays, including the rows the
+earlier statements inserted or changed. If every statement succeeds, the transaction commits
+once.
+
+That is the difference between a batch and awaiting the statements individually:
+
+```rust
+// If the second insert fails, the first one stays.
+db.insert(users).value(users.insert("a@example.com", "Alice", 30)).await?;
+db.insert(users).value(users.insert("b@example.com", "Bob", 31)).await?;
+```
+
+```rust
+// If the second insert fails, neither row exists.
+db.batch((
+    db.insert(users).value(users.insert("a@example.com", "Alice", 30)),
+    db.insert(users).value(users.insert("b@example.com", "Bob", 31)),
+))
+.await?;
+```
+
+A failed statement is reported as the driver's own error type, the same one every other
+statement returns, so there is no second error type to handle.
+
+## One `await`, not one round trip
+
+This is the part worth being honest about. PostgreSQL has a pipeline protocol, but sqlx does
+not expose it, and the SQLite and MySQL drivers do not pipeline at all. So a batch sends its
+statements **sequentially** over one connection, exactly as a sequence of `await`s would.
+
+What a batch buys is:
+
+- one `await` instead of one per statement,
+- one transaction, without a closure or a manual `BEGIN`/`COMMIT`,
+- a typed tuple of outputs.
+
+What it does not buy is fewer messages to the server. If the round-trip count is the
+problem, a multi-row `INSERT` is the tool — see [Bulk inserts](#bulk-inserts-are-a-different-problem).
+
+The statements run in the order the tuple lists them. A later statement can read a row an
+earlier one wrote, which is why they cannot be reordered or run concurrently.
+
+## Writes only, for now
+
+A batched `SELECT` is not supported yet. A write always reports the driver's output type, so
+every element of the tuple has the same shape. A select reports decoded rows, and its row
+type lives in the builder's type parameters; making that survive a heterogeneous tuple is a
+different design. Until then, run selects beside a batch, or inside
+[`db.transaction`](transactions.md).
+
+The `returning(..)` form of a write is not part of a batch either, for the same reason: it
+returns rows rather than an affected-row count.
+
+## The safe-statement rule still applies
+
+`UPDATE` and `DELETE` need a `WHERE` clause, or an explicit `all_rows()`, before they can run.
+A batch does not bypass that check, so `db.update(users)` with no filter does not compile as a
+batch element.
+
+## When to use a batch, and when not to
+
+A batch is for writes that belong together and do not need each other's results:
+
+- creating a user and their first settings row,
+- moving a row and writing the audit entry that explains the move,
+- seeding a fixed set of rows.
+
+It is the wrong shape when one statement needs an id or a value that an earlier statement
+generates — a batch is built before any of it runs, so there is nothing to read. Use
+[`db.transaction`](transactions.md) there: the closure can use each statement's result.
 
 ## Bulk inserts are a different problem
 
@@ -77,24 +117,19 @@ let outputs = db
 ```
 
 The chunks are **not** atomic; each statement commits on its own unless the whole call runs
-inside a transaction. The parameter limit is enforced per statement, and `values_chunked` is
-how a bulk load gets past it.
-
-No batch API is tracked. It would need a driver method that accepts several statements and
-returns several results in one exchange; `Driver` has only `query`, `execute` and
-`query_stream` today.
+inside a transaction. A batch does not help here either, because the split is within one
+statement rather than across several. The parameter limit is enforced per statement, and
+`values_chunked` is how a bulk load gets past it.
 
 ## Gotchas
 
-- **Batching is a latency feature, not a correctness one.** Each `await` here is a full round
-  trip, so a loop of inserts over a network is slow by construction; move the work into one
-  multi-row insert or one transaction.
-- **There is no pipelining.** The next statement is not sent until the previous future
-  resolves, even on a pool with idle connections. Awaiting concurrently with `join!` uses
-  several connections, which is a different guarantee and can exhaust a small pool.
-- **A transaction is not one round trip.** It is `BEGIN`, then each statement, then `COMMIT`.
-  It buys atomicity and a single connection, not fewer messages.
-- **`values_chunked` is not a batch.** The statements are independent, and a failure part-way
-  leaves the earlier chunks committed.
-- **`RETURNING` is not portable.** PostgreSQL and SQLite have it; MySQL does not, so a batch
-  that needs generated ids is written differently there.
+- **A batch is not fewer round trips.** It is one transaction and one `await`. See above.
+- **A batch is not a pipeline.** The next statement is not sent until the previous one
+  resolves.
+- **A transaction is not one round trip either.** It is `BEGIN`, then each statement, then
+  `COMMIT`. It buys atomicity and a single connection, not fewer messages.
+- **Order matters.** Statements run in tuple order, and a failing one stops the rest.
+- **`RETURNING` is outside a batch.** PostgreSQL and SQLite support `returning`; MySQL does
+  not, so a batch that needs generated ids is written as a transaction instead.
+- **Eight is the limit.** Longer tuples are not implemented; split the work into two batches
+  or use a transaction.

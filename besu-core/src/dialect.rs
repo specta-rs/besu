@@ -192,6 +192,14 @@ pub trait Dialect: 'static + Sized {
     /// Whether `ILIKE` is available (PostgreSQL only).
     const SUPPORTS_ILIKE: bool;
 
+    /// Whether the dialect has a native array type.
+    ///
+    /// Only PostgreSQL does. The expression layer uses this to decide whether an `IN` list
+    /// can be one array parameter and whether an array operator is expressible at all; a
+    /// dialect that leaves it off records an `unsupported` error rather than emitting
+    /// PostgreSQL's syntax.
+    const SUPPORTS_ARRAYS: bool = false;
+
     /// Whether `FULL OUTER JOIN` is available.
     const SUPPORTS_FULL_JOIN: bool;
 
@@ -248,6 +256,13 @@ pub trait Dialect: 'static + Sized {
 
     /// Whether `SELECT ... FOR UPDATE` is available. SQLite has no row locking.
     const SUPPORTS_ROW_LOCKING: bool = true;
+
+    /// Whether `round(value, digits)` exists only for `numeric`, as on PostgreSQL.
+    ///
+    /// PostgreSQL has `round(numeric, int)` and no `round(double precision, int)`, so the
+    /// portable two-argument call has to cast its value first. Rendering the cast here keeps
+    /// the helper's promise that it works on any number.
+    const ROUND_TO_NEEDS_NUMERIC: bool = false;
 
     /// Whether `INTERSECT ALL` is available.
     ///

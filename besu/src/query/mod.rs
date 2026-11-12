@@ -169,8 +169,9 @@ pub(crate) fn render_with<D: Dialect>(out: &mut Sql<D>, with: &mut Option<WithCl
 /// any of them knowing about comments.
 ///
 /// An embedded `*/` would end the comment early and turn the rest of the label into SQL, so
-/// it is written as `* /`. The label therefore cannot be used to inject anything, and a
-/// comment that happens to contain the sequence simply reads slightly differently.
+/// it is written as `* /`. An embedded `/*` matters too, and only on PostgreSQL: block
+/// comments nest there, so an unmatched opener leaves the statement unterminated. Both are
+/// neutralised, which is why the label cannot be used to inject anything.
 pub(crate) fn render_comment<D: Dialect>(out: &mut Sql<D>, comment: Option<&str>) {
     let Some(comment) = comment else {
         return;
@@ -179,9 +180,11 @@ pub(crate) fn render_comment<D: Dialect>(out: &mut Sql<D>, comment: Option<&str>
         return;
     }
     out.push_raw(" /* ");
-    match comment.find("*/") {
-        Some(_) => out.push_raw(&comment.replace("*/", "* /")),
-        None => out.push_raw(comment),
+    if comment.contains("*/") || comment.contains("/*") {
+        let escaped = comment.replace("*/", "* /").replace("/*", "/ *");
+        out.push_raw(&escaped);
+    } else {
+        out.push_raw(comment);
     }
     out.push_raw(" */");
 }

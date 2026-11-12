@@ -1020,16 +1020,15 @@ impl Column {
             && self.unique == other.unique
             && normalise_default(self.default.as_deref())
                 == normalise_default(other.default.as_deref())
+            // `stored` is deliberately not compared. PostgreSQL has no virtual generated
+            // column, so it always writes `STORED` and always reports `stored: true`; a
+            // declaration asking for virtual would otherwise look different on every push
+            // and be dropped and re-added each time. Changing stored ↔ virtual is a
+            // migration, not a diff.
             && self.generated.as_ref().map(|generated| {
-                (
-                    normalise_generated_expression(&generated.expression),
-                    generated.stored,
-                )
+                normalise_generated_expression(&generated.expression)
             }) == other.generated.as_ref().map(|generated| {
-                (
-                    normalise_generated_expression(&generated.expression),
-                    generated.stored,
-                )
+                normalise_generated_expression(&generated.expression)
             })
     }
 }

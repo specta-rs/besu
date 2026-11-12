@@ -10,7 +10,7 @@
 mod common;
 
 use besu::prelude::*;
-use besu::{Driver, Sql};
+use besu::{Decimal, Driver, Sql};
 use besu_postgres::{Postgres, Sqlx};
 
 #[derive(Table, Debug, Clone, PartialEq)]
@@ -348,4 +348,251 @@ async fn round_numbers_round_trip() {
         assert_eq!(stored[0].value, value);
         assert_eq!(stored[0].signed, signed);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Exact decimals
+// ---------------------------------------------------------------------------------------
+
+/// A decimal column whose Rust type is the exact text.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "ledger")]
+pub struct Ledger {
+    #[besu(primary_key)]
+    pub id: i64,
+    /// `NUMERIC(12,2)`, which `Decimal` maps onto.
+    #[besu(sql_type = "besu::Decimal<12,2>")]
+    pub amount: String,
+}
+
+/// A `Decimal` is written and read as its exact text, at a scale that a float could not keep.
+#[tokio::test]
+async fn a_decimal_round_trips_exactly() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([ledger.def()]).await.unwrap();
+
+    // The declared type comes back as the same width, so a second push changes nothing.
+    let second = db.push([ledger.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+
+    for (id, amount) in [
+        (1_i64, "0.00"),
+        (2, "1.23"),
+        (3, "-1234567890.99"),
+        (4, "9999999999.99"),
+    ] {
+        db.insert(ledger)
+            .value(ledger.insert(id, amount.to_owned()))
+            .await
+            .unwrap();
+    }
+
+    let stored: Vec<Ledger> = db.select(ledger).order_by(ledger.id.asc()).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|row| row.amount.as_str())
+            .collect::<Vec<_>>(),
+        ["0.00", "1.23", "-1234567890.99", "9999999999.99"]
+    );
+
+    // A decimal is bound as `NUMERIC`, not as text, so an equality comparison resolves.
+    let found: Vec<Ledger> = db
+        .select(ledger)
+        .filter(ledger.amount.eq("1.23"))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, 2);
+}
+
+/// `sum_as` and `avg_as` add up a decimal without ever passing through a double.
+#[tokio::test]
+async fn a_decimal_sums_exactly() {
+    use besu::expr::{AvgAs, SumAs};
+
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([ledger.def()]).await.unwrap();
+
+    for (id, amount) in [(1_i64, "0.10"), (2, "0.20")] {
+        db.insert(ledger)
+            .value(ledger.insert(id, amount.to_owned()))
+            .await
+            .unwrap();
+    }
+
+    // `0.1 + 0.2` is the classic float failure; an exact sum is `0.30`.
+    let sums: Vec<String> = db
+        .select(ledger)
+        .pick(ledger.amount.sum_as::<Decimal<20, 2>>())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(sums[0], "0.30");
+
+    let averages: Vec<String> = db
+        .select(ledger)
+        .pick(ledger.amount.avg_as::<Decimal<20, 4>>())
+        .all()
+        .await
+        .unwrap();
+    assert!(averages[0].starts_with("0.15"), "got {:?}", averages[0]);
+}
+
+/// `NUMERIC(20,0)` is no longer guessed to be a `u64`: a twenty-digit numeric can be larger
+/// than `u64::MAX`, so the column is reported as the decimal it is.
+#[tokio::test]
+async fn a_numeric_20_is_a_decimal_not_a_guess() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(sql!("CREATE TABLE wide (v NUMERIC(20,0) NOT NULL)"))
+        .await
+        .unwrap();
+
+    let schema = db.introspect().await.unwrap();
+    assert_eq!(
+        schema.table("wide").unwrap().column("v").unwrap().ty,
+        TypeDef::Decimal(20, 0)
+    );
+    // The declared `u64` folds onto the same decimal, so convergence survives the change.
+    let mut declared = schema.clone();
+    declared.tables[0].columns[0].ty = TypeDef::UInt(64);
+    assert!(db.push_schema(&declared).await.unwrap().is_empty());
+    // And the snapshot replays to the schema that is already there.
+    assert!(db.push_schema(&schema).await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------
+// Arrays
+// ---------------------------------------------------------------------------------------
+
+/// A table with arrays of text and of integers, which the derive infers from `Vec<T>`.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "articles")]
+pub struct Article {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub tags: Vec<String>,
+    pub scores: Vec<i32>,
+}
+
+#[tokio::test]
+async fn an_array_is_declared_and_converges() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    let first = db.push([articles.def()]).await.unwrap();
+    let statement = &first.statements[0];
+    assert!(
+        statement.contains(r#""tags" TEXT[] NOT NULL"#),
+        "{statement}"
+    );
+    assert!(
+        statement.contains(r#""scores" INTEGER[] NOT NULL"#),
+        "{statement}"
+    );
+
+    // `int[]` used to introspect as `Custom("_int4")`, so this second push was a rename of
+    // the column's type. It is now the same type twice.
+    let second = db.push([articles.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+}
+
+#[tokio::test]
+async fn an_array_round_trips_and_queries() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([articles.def()]).await.unwrap();
+
+    db.insert(articles)
+        .value(articles.insert(1, vec!["rust".into(), "sql".into()], vec![10, 20]))
+        .await
+        .unwrap();
+    db.insert(articles)
+        .value(articles.insert(2, Vec::new(), vec![30]))
+        .await
+        .unwrap();
+
+    let stored: Vec<Article> = db
+        .select(articles)
+        .order_by(articles.id.asc())
+        .await
+        .unwrap();
+    assert_eq!(stored[0].tags, ["rust", "sql"]);
+    assert_eq!(stored[0].scores, [10, 20]);
+    assert!(stored[1].tags.is_empty());
+    assert_eq!(stored[1].scores, [30]);
+}
+
+#[tokio::test]
+async fn array_operators_are_rendered_for_postgres() {
+    use besu::expr::{
+        array_append, array_contains, array_length, array_overlaps, array_position, cardinality,
+        in_list,
+    };
+
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([articles.def()]).await.unwrap();
+
+    db.insert(articles)
+        .value(articles.insert(1, vec!["rust".into(), "sql".into()], vec![10, 20]))
+        .await
+        .unwrap();
+    db.insert(articles)
+        .value(articles.insert(2, vec!["go".into()], vec![30]))
+        .await
+        .unwrap();
+
+    let containing: Vec<Article> = db
+        .select(articles)
+        .filter(array_contains(articles.tags, vec!["rust".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(containing.len(), 1);
+
+    let overlapping: Vec<Article> = db
+        .select(articles)
+        .filter(array_overlaps(articles.tags, vec!["go".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(overlapping.len(), 1);
+    assert_eq!(overlapping[0].id, 2);
+
+    // `in_list` binds one array parameter rather than one per value.
+    let listed: Vec<Article> = db
+        .select(articles)
+        .filter(in_list(articles.id, [1_i64, 2]))
+        .order_by(articles.id.asc())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+
+    let lengths: Vec<(i64, i64)> = db
+        .select(articles)
+        .pick((array_length(articles.tags, 1), cardinality(articles.scores)))
+        .filter(articles.id.eq(1_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(lengths[0], (2, 2));
+
+    let position: Vec<i64> = db
+        .select(articles)
+        .pick(array_position(articles.scores, 20))
+        .filter(articles.id.eq(1_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(position[0], 2);
+
+    let appended: Vec<Vec<String>> = db
+        .select(articles)
+        .pick(array_append(articles.tags, "db"))
+        .filter(articles.id.eq(2_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(appended[0], ["go", "db"]);
 }

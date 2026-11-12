@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use besu_core::{Dialect, Executor, Sql, TypeDef, Value};
 
 use crate::types::{
-    Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, I128, Int1, Int2, Int4, Int8, Json,
-    Jsonb, Nullability, SqlType, Text, Time, Timestamp, TimestampTz, U128, UInt1, UInt2, UInt4,
-    UInt8, Uuid, VarChar,
+    Array, Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, I128, Int1, Int2, Int4, Int8,
+    Json, Jsonb, Nullability, SqlType, Text, Time, Timestamp, TimestampTz, U128, UInt1, UInt2,
+    UInt4, UInt8, Uuid, VarChar,
 };
 
 use crate::condition::Contains;
@@ -168,12 +168,67 @@ pub enum ExprKind {
         /// The column to read.
         column: &'static str,
     },
-    /// A value inside a JSON document, reached by a dotted path.
+    /// A value inside a JSON document, reached by a structured path.
     JsonPath {
         expr: Operand,
-        path: &'static str,
+        /// The path, which each dialect renders in its own grammar.
+        path: JsonPath,
         /// `true` for the text form (`->>`), `false` for the JSON form (`->`).
         as_text: bool,
+    },
+    /// `document -> key` / `document ->> key`, with the key bound as a parameter.
+    ///
+    /// This is the spelling to reach for when the key is not known until run time: the
+    /// path form has to be rendered into the statement, while this one binds the key, so a
+    /// key that comes from a user is never SQL.
+    JsonKey {
+        expr: Operand,
+        /// The key, bound as a text parameter.
+        key: Value,
+        /// `true` for `->>`, which returns text rather than JSON.
+        as_text: bool,
+    },
+    /// A JSON function that takes a path, as in MySQL's `JSON_VALUE` or `JSON_SET`.
+    ///
+    /// The path cannot be an ordinary argument because its grammar differs per dialect, so it
+    /// travels as a [`JsonPath`] and is rendered in place.
+    JsonPathFunction {
+        /// The canonical function name, as [`Dialect::function`] knows it.
+        name: &'static str,
+        document: Operand,
+        path: JsonPath,
+        /// Any arguments after the path.
+        extra: Vec<Operand>,
+    },
+    /// A JSON containment, existence or path operator.
+    JsonOp {
+        op: JsonOperator,
+        left: Operand,
+        right: JsonRight,
+    },
+    /// `left op right` for an operator only PostgreSQL has: `@>`, `<@`, `&&` or `||`.
+    ///
+    /// The node is separate from [`ExprKind::Binary`] because a dialect without arrays must
+    /// reject it rather than emit PostgreSQL's spelling, which the server would parse as a
+    /// syntax error a long way from the query that caused it.
+    ArrayOp {
+        op: &'static str,
+        left: Operand,
+        right: Operand,
+    },
+    /// `array[index]`, PostgreSQL's subscript.
+    Subscript { array: Operand, index: Operand },
+    /// `expr = ANY(array)`, or `<> ALL(array)` when negated.
+    ///
+    /// The array is a single bound parameter rather than one parameter per element, which
+    /// is what lets an `IN` list be as long as the database's array limit instead of its
+    /// parameter limit.
+    AnyOf {
+        expr: Operand,
+        /// The declared element type, which PostgreSQL's array encoding needs.
+        element: TypeDef,
+        values: Vec<Value>,
+        negated: bool,
     },
     /// A full-text match, spelled however the dialect spells one.
     FullText {
@@ -267,6 +322,502 @@ impl Operand {
     fn set_upsert_row(&mut self, row: &'static str) {
         if let Self::Expr(kind) = self {
             kind.set_upsert_row(row);
+        }
+    }
+}
+
+/// One step of a [`JsonPath`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsonSegment {
+    /// An object member, by name.
+    Key(String),
+    /// An array element, by position.
+    Index(i64),
+    /// Raw path text in the dialect's own grammar.
+    ///
+    /// This is the escape hatch for everything the structured segments cannot express. It is
+    /// inserted verbatim, so it must never contain user input.
+    Raw(String),
+}
+
+/// A structured path into a JSON document.
+///
+/// A path is built from segments rather than written as one dotted string so that each
+/// dialect can render it in its own grammar: PostgreSQL takes a `text[]` path, MySQL and
+/// SQLite take a `$.a[0]` path. That is the difference that makes a key containing a dot,
+/// a comma or a quote expressible — `root().key("a.b")` is one key, not two.
+///
+/// ```ignore
+/// JsonPath::root().key("a").index(0).key("b")
+/// ```
+///
+/// [`JsonPath::raw`] appends text in the dialect's grammar for anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JsonPath {
+    segments: Vec<JsonSegment>,
+}
+
+impl JsonPath {
+    /// The document itself.
+    pub const fn root() -> Self {
+        Self {
+            segments: Vec::new(),
+        }
+    }
+
+    /// The object member called `key`.
+    ///
+    /// The name is treated as one member, so a dot inside it does not become a separator.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.segments.push(JsonSegment::Key(key.into()));
+        self
+    }
+
+    /// The element at `index`, counted from zero.
+    pub fn index(mut self, index: i64) -> Self {
+        self.segments.push(JsonSegment::Index(index));
+        self
+    }
+
+    /// Append raw path text in the dialect's own grammar.
+    ///
+    /// This is the escape hatch for syntax the structured segments do not cover. The text is
+    /// never escaped or validated, so never pass it user input.
+    pub fn raw(mut self, raw: impl Into<String>) -> Self {
+        self.segments.push(JsonSegment::Raw(raw.into()));
+        self
+    }
+
+    /// Whether the path names the document itself.
+    pub fn is_root(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    /// Write ` #> '...'` or ` #>> '...'` after an already rendered document.
+    fn render_document<D: Dialect>(&self, out: &mut Sql<D>, as_text: bool) {
+        out.push_raw(if as_text { " #>> '" } else { " #> '" });
+        out.push_raw(&self.postgres_literal());
+        out.push_raw("'");
+    }
+
+    /// The PostgreSQL `text[]` literal for this path, as a single-quoted string's contents.
+    fn postgres_literal(&self) -> String {
+        let mut out = String::from("{");
+        for (i, segment) in self.segments.iter().enumerate() {
+            if i != 0 {
+                out.push(',');
+            }
+            match segment {
+                JsonSegment::Key(key) => push_pg_array_element(&mut out, key),
+                JsonSegment::Index(index) => out.push_str(&index.to_string()),
+                JsonSegment::Raw(raw) => out.push_str(raw),
+            }
+        }
+        out.push('}');
+        out
+    }
+
+    /// Write a MySQL JSON path literal, including its quotes, in place of a document.
+    fn render_mysql_path<D: Dialect>(&self, out: &mut Sql<D>) {
+        out.push_raw("'");
+        out.push_raw(&self.mysql_path_text());
+        out.push_raw("'");
+    }
+
+    /// Write a SQLite JSON path literal, including its quotes.
+    fn render_sqlite_path<D: Dialect>(&self, out: &mut Sql<D>) {
+        out.push_raw("'");
+        out.push_raw(&self.sqlite_path_text());
+        out.push_raw("'");
+    }
+
+    /// The path as MySQL spells it, before SQL-literal escaping.
+    fn mysql_path_text(&self) -> String {
+        let mut out = String::from("$");
+        for segment in &self.segments {
+            match segment {
+                JsonSegment::Key(key) => {
+                    out.push('.');
+                    push_mysql_quoted_member(&mut out, key);
+                }
+                JsonSegment::Index(index) => {
+                    out.push('[');
+                    out.push_str(&index.to_string());
+                    out.push(']');
+                }
+                JsonSegment::Raw(raw) => out.push_str(raw),
+            }
+        }
+        // A MySQL string literal treats a backslash as an escape, so every backslash the
+        // path needs has to be doubled before it reaches the parser.
+        out.replace('\\', "\\\\").replace('\'', "''")
+    }
+
+    /// The path as SQLite spells it, before SQL-literal escaping.
+    fn sqlite_path_text(&self) -> String {
+        let mut out = String::from("$");
+        for segment in &self.segments {
+            match segment {
+                JsonSegment::Key(key) => {
+                    out.push('.');
+                    push_sqlite_quoted_member(&mut out, key);
+                }
+                JsonSegment::Index(index) => {
+                    out.push('[');
+                    out.push_str(&index.to_string());
+                    out.push(']');
+                }
+                JsonSegment::Raw(raw) => out.push_str(raw),
+            }
+        }
+        out.replace('\'', "''")
+    }
+}
+
+/// A key is safe to write bare when it is an ASCII identifier.
+fn is_simple_json_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    match bytes.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == b'_' => {}
+        _ => return false,
+    }
+    bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Append one element of a PostgreSQL array literal.
+fn push_pg_array_element(out: &mut String, element: &str) {
+    let needs_quotes = element.is_empty()
+        || element
+            .chars()
+            .any(|ch| matches!(ch, ',' | '{' | '}' | '"' | '\\'));
+    if !needs_quotes {
+        out.push_str(element);
+        return;
+    }
+    out.push('"');
+    for ch in element.chars() {
+        if matches!(ch, '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+}
+
+/// Append a MySQL JSON path member, quoting it when it is not a bare identifier.
+fn push_mysql_quoted_member(out: &mut String, key: &str) {
+    if is_simple_json_key(key) {
+        out.push_str(key);
+        return;
+    }
+    out.push('"');
+    for ch in key.chars() {
+        if matches!(ch, '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+}
+
+/// Append a SQLite JSON path member, quoting it when it is not a bare identifier.
+fn push_sqlite_quoted_member(out: &mut String, key: &str) {
+    if is_simple_json_key(key) {
+        out.push_str(key);
+        return;
+    }
+    out.push('"');
+    for ch in key.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+}
+
+/// A JSON operator that the dialects spell in incompatible ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum JsonOperator {
+    /// The left document contains the right one.
+    Contains,
+    /// The left document is contained by the right one.
+    ContainedBy,
+    /// The document has a top-level key.
+    HasKey,
+    /// The document has at least one of the keys.
+    HasAnyKey,
+    /// The document has every one of the keys.
+    HasAllKey,
+    /// Remove a path from the document.
+    Strip,
+    /// The document satisfies a JSON path predicate.
+    MatchesPath,
+    /// The document satisfies a JSON path `@@` match.
+    Matches,
+    /// The two documents have an array element or object member in common.
+    ///
+    /// MySQL spells it `JSON_OVERLAPS`; PostgreSQL has no value-overlap operator for JSON,
+    /// so it records an `unsupported` error there.
+    Overlaps,
+}
+
+/// The right-hand side of a [`JsonOperator`].
+#[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
+pub enum JsonRight {
+    /// An expression, compared as JSON.
+    Operand(Operand),
+    /// A single key, bound on PostgreSQL and rendered into a path elsewhere.
+    Key(String),
+    /// A list of keys, bound as a `text[]` on PostgreSQL.
+    Keys(Vec<String>),
+    /// A document path.
+    Path(JsonPath),
+}
+
+impl JsonRight {
+    /// Remove the table name from a column reference inside this side.
+    fn unqualify(&mut self) {
+        if let Self::Operand(operand) = self {
+            operand.unqualify();
+        }
+    }
+
+    /// Whether this side reads the row an upsert is inserting.
+    fn reads_upsert_row(&self) -> bool {
+        match self {
+            Self::Operand(operand) => operand.reads_upsert_row(),
+            Self::Key(_) | Self::Keys(_) | Self::Path(_) => false,
+        }
+    }
+
+    /// Point every reference to the incoming upsert row at `row`.
+    fn set_upsert_row(&mut self, row: &'static str) {
+        if let Self::Operand(operand) = self {
+            operand.set_upsert_row(row);
+        }
+    }
+}
+
+/// Render an argument that has to be JSON rather than a string parameter.
+///
+/// MySQL takes a string parameter as a JSON string, so `JSON_SET(doc, '$.a', ?)` with `4`
+/// stores `"4"`. Casting the parameter to `JSON` is what makes the value mean the document
+/// the caller passed.
+fn render_json_argument<D: Dialect>(out: &mut Sql<D>, operand: &mut Operand) {
+    out.push_raw("CAST(");
+    operand.render(out);
+    out.push_raw(" AS JSON)");
+}
+
+/// Render a JSON operator in whichever grammar the dialect has.
+fn render_json_op<D: Dialect>(
+    out: &mut Sql<D>,
+    op: JsonOperator,
+    left: &mut Operand,
+    right: &mut JsonRight,
+) {
+    use besu_core::JsonPathStyle;
+    if D::JSON_PATH == JsonPathStyle::Postgres {
+        left.render(out);
+        let operator = match op {
+            JsonOperator::Contains => " @> ",
+            JsonOperator::ContainedBy => " <@ ",
+            JsonOperator::HasKey => " ? ",
+            JsonOperator::HasAnyKey => " ?| ",
+            JsonOperator::HasAllKey => " ?& ",
+            JsonOperator::Strip => " #- ",
+            JsonOperator::MatchesPath => " @? ",
+            JsonOperator::Matches => " @@ ",
+            JsonOperator::Overlaps => {
+                // `?|` asks whether a key is present; there is no value-overlap operator for
+                // JSON on PostgreSQL, so the closest spelling is refused rather than guessed.
+                out.set_error(besu_core::Error::unsupported(
+                    "`postgres` has no JSON overlap; compare with `@>` or `?|` instead",
+                ));
+                " @> "
+            }
+        };
+        out.push_raw(operator);
+        match right {
+            JsonRight::Operand(operand) => operand.render(out),
+            JsonRight::Key(key) => {
+                out.bind_value(Value::Text(core::mem::take(key)));
+                // `@?` and `@@` take a `jsonpath`, and a text parameter does not resolve
+                // either operator without the cast.
+                if matches!(op, JsonOperator::MatchesPath | JsonOperator::Matches) {
+                    out.push_raw("::jsonpath");
+                }
+            }
+            JsonRight::Keys(keys) => out.bind_value(Value::Array {
+                element: TypeDef::Text,
+                values: core::mem::take(keys).into_iter().map(Value::Text).collect(),
+            }),
+            JsonRight::Path(path) => {
+                out.push_raw("'");
+                out.push_raw(&path.postgres_literal());
+                out.push_raw("'");
+            }
+        }
+        return;
+    }
+
+    if D::JSON_PATH == JsonPathStyle::Mysql {
+        match op {
+            JsonOperator::Contains => {
+                out.push_raw("JSON_CONTAINS(");
+                left.render(out);
+                out.push_raw(", ");
+                match right {
+                    JsonRight::Operand(operand) => render_json_argument::<D>(out, operand),
+                    _ => out.set_error(besu_core::Error::unsupported(
+                        "`JSON_CONTAINS` compares two documents, not a key",
+                    )),
+                }
+                out.push_raw(")");
+            }
+            JsonOperator::ContainedBy => {
+                // `JSON_CONTAINS(target, candidate)` asks whether the target contains the
+                // candidate, so "is contained by" swaps the two sides.
+                out.push_raw("JSON_CONTAINS(");
+                match right {
+                    JsonRight::Operand(operand) => render_json_argument::<D>(out, operand),
+                    _ => out.set_error(besu_core::Error::unsupported(
+                        "`JSON_CONTAINS` compares two documents, not a key",
+                    )),
+                }
+                out.push_raw(", ");
+                left.render(out);
+                out.push_raw(")");
+            }
+            JsonOperator::HasKey | JsonOperator::HasAnyKey | JsonOperator::HasAllKey => {
+                out.push_raw("JSON_CONTAINS_PATH(");
+                left.render(out);
+                out.push_raw(if op == JsonOperator::HasAllKey {
+                    ", 'all'"
+                } else {
+                    ", 'one'"
+                });
+                let keys: Vec<String> = match right {
+                    JsonRight::Key(key) => core::iter::once(core::mem::take(key)).collect(),
+                    JsonRight::Keys(keys) => core::mem::take(keys),
+                    _ => {
+                        out.set_error(besu_core::Error::unsupported(
+                            "a key test needs literal key names",
+                        ));
+                        Vec::new()
+                    }
+                };
+                for key in keys {
+                    out.push_raw(", '");
+                    out.push_raw(&JsonPath::root().key(key).mysql_path_text());
+                    out.push_raw("'");
+                }
+                out.push_raw(")");
+            }
+            JsonOperator::Overlaps => {
+                out.push_raw("JSON_OVERLAPS(");
+                left.render(out);
+                out.push_raw(", ");
+                match right {
+                    JsonRight::Operand(operand) => render_json_argument::<D>(out, operand),
+                    _ => out.set_error(besu_core::Error::unsupported(
+                        "`JSON_OVERLAPS` compares two documents, not a key",
+                    )),
+                }
+                out.push_raw(")");
+            }
+            JsonOperator::Strip => {
+                out.push_raw("JSON_REMOVE(");
+                left.render(out);
+                match right {
+                    JsonRight::Path(path) => {
+                        out.push_raw(", ");
+                        path.render_mysql_path(out);
+                    }
+                    _ => out.set_error(besu_core::Error::unsupported("`JSON_REMOVE` needs a path")),
+                }
+                out.push_raw(")");
+            }
+            JsonOperator::MatchesPath | JsonOperator::Matches => {
+                out.set_error(besu_core::Error::unsupported(
+                    "`mysql` has no JSON path predicate".to_owned(),
+                ));
+                left.render(out);
+            }
+        }
+        return;
+    }
+
+    out.set_error(besu_core::Error::unsupported(alloc::format!(
+        "`{}` has no JSON operators; write the query with `raw` if this database has them",
+        D::NAME
+    )));
+    left.render(out);
+}
+
+/// Render a path-taking JSON function, whose path grammar differs per dialect.
+fn render_json_path_function<D: Dialect>(
+    out: &mut Sql<D>,
+    name: &'static str,
+    document: &mut Operand,
+    path: &JsonPath,
+    extra: &mut [Operand],
+) {
+    use besu_core::JsonPathStyle;
+    match D::JSON_PATH {
+        JsonPathStyle::Mysql | JsonPathStyle::Sqlite => {
+            let Some(spelling) = D::function(name) else {
+                out.set_error(besu_core::Error::unsupported(alloc::format!(
+                    "`{}` has no `{name}` function",
+                    D::NAME
+                )));
+                document.render(out);
+                return;
+            };
+            out.push_raw(spelling.name());
+            out.push_raw("(");
+            document.render(out);
+            out.push_raw(", ");
+            if D::JSON_PATH == JsonPathStyle::Mysql {
+                path.render_mysql_path(out);
+            } else {
+                path.render_sqlite_path(out);
+            }
+            for operand in extra {
+                out.push_raw(", ");
+                if D::JSON_PATH == JsonPathStyle::Mysql {
+                    render_json_argument::<D>(out, operand);
+                } else {
+                    operand.render(out);
+                }
+            }
+            out.push_raw(")");
+        }
+        JsonPathStyle::Postgres => {
+            // PostgreSQL's path-taking function takes a `text[]` path and always wants the
+            // `create_missing` flag, so it is the one spelling that is not the same shape.
+            if name == "json_set" {
+                out.push_raw("JSONB_SET(");
+                document.render(out);
+                out.push_raw(", '");
+                out.push_raw(&path.postgres_literal());
+                out.push_raw("', ");
+                match extra {
+                    [value] => value.render(out),
+                    _ => out.set_error(besu_core::Error::unsupported(
+                        "`json_set` takes exactly one value",
+                    )),
+                }
+                out.push_raw(", true)");
+            } else {
+                out.set_error(besu_core::Error::unsupported(alloc::format!(
+                    "`postgres` has no `{name}` function"
+                )));
+                document.render(out);
+            }
         }
     }
 }
@@ -392,6 +943,8 @@ impl ExprKind {
                 if *distinct {
                     out.push_raw("DISTINCT ");
                 }
+                let round_to_numeric = D::ROUND_TO_NEEDS_NUMERIC && *name == "round";
+                let two_arguments = args.len() > 1;
                 for (i, arg) in args.iter_mut().enumerate() {
                     if i != 0 {
                         match spelling {
@@ -401,7 +954,16 @@ impl ExprKind {
                             _ => out.push_raw(", "),
                         }
                     }
-                    arg.render(out);
+                    // PostgreSQL has `round(numeric, int)` and no `round(double precision,
+                    // int)`, and the helper is typed for any number. Casting the value makes
+                    // the portable call work without changing what the helper promises.
+                    if round_to_numeric && two_arguments && i == 0 {
+                        out.push_raw("CAST(");
+                        arg.render(out);
+                        out.push_raw(" AS numeric)");
+                    } else {
+                        arg.render(out);
+                    }
                 }
                 if let FunctionStyle::WithSuffix(_, extra) = spelling {
                     for literal in extra {
@@ -499,25 +1061,7 @@ impl ExprKind {
                 match D::JSON_PATH {
                     JsonPathStyle::Postgres => {
                         expr.render(out);
-                        out.push_raw(if *as_text { " #>> '{" } else { " #> '{" });
-                        for (i, segment) in path.split('.').enumerate() {
-                            if i != 0 {
-                                out.push_raw(",");
-                            }
-                            out.push_raw(segment.replace('\'', "''").as_str());
-                        }
-                        out.push_raw("}'");
-                    }
-                    JsonPathStyle::Sqlite => {
-                        // `->` and `->>` have been available since SQLite 3.38 and keep the
-                        // JSON/text distinction that `json_extract` does not: it returns a
-                        // native scalar, which cannot decode as JSON.
-                        expr.render(out);
-                        out.push_raw(if *as_text { " ->> '$." } else { " -> '$." });
-                        // A quoted literal, so a quote in the path has to be doubled —
-                        // the same rule the PostgreSQL arm applies to each segment.
-                        out.push_raw(&path.replace('\'', "''"));
-                        out.push_raw("'");
+                        path.render_document(out, *as_text);
                     }
                     JsonPathStyle::Mysql => {
                         if *as_text {
@@ -525,16 +1069,130 @@ impl ExprKind {
                         }
                         out.push_raw("JSON_EXTRACT(");
                         expr.render(out);
-                        out.push_raw(", '$.");
-                        out.push_raw(&path.replace('\'', "''"));
-                        // The path is a quoted string literal, so it needs its closing
-                        // quote — the first version of this arm simply forgot it.
-                        out.push_raw("'");
+                        out.push_raw(", ");
+                        path.render_mysql_path(out);
                         out.push_raw(")");
                         if *as_text {
                             out.push_raw(")");
                         }
                     }
+                    JsonPathStyle::Sqlite => {
+                        // `->` and `->>` have been available since SQLite 3.38 and keep the
+                        // JSON/text distinction that `json_extract` loses.
+                        expr.render(out);
+                        out.push_raw(if *as_text { " ->> " } else { " -> " });
+                        path.render_sqlite_path(out);
+                    }
+                }
+            }
+            Self::JsonKey { expr, key, as_text } => {
+                use besu_core::JsonPathStyle;
+                match D::JSON_PATH {
+                    JsonPathStyle::Postgres => {
+                        expr.render(out);
+                        out.push_raw(if *as_text { " ->> " } else { " -> " });
+                        out.bind_value(core::mem::replace(key, Value::Null));
+                    }
+                    // Neither MySQL nor SQLite has an operator that takes a key on its own:
+                    // both are reached through a path, which is what the bound key becomes.
+                    JsonPathStyle::Mysql | JsonPathStyle::Sqlite => {
+                        let path = match key {
+                            Value::Text(key) => JsonPath::root().key(key.clone()),
+                            _ => JsonPath::root(),
+                        };
+                        match D::JSON_PATH {
+                            JsonPathStyle::Mysql => {
+                                if *as_text {
+                                    out.push_raw("JSON_UNQUOTE(");
+                                }
+                                out.push_raw("JSON_EXTRACT(");
+                                expr.render(out);
+                                out.push_raw(", ");
+                                path.render_mysql_path(out);
+                                out.push_raw(")");
+                                if *as_text {
+                                    out.push_raw(")");
+                                }
+                            }
+                            _ => {
+                                // `->>` keeps the JSON/text distinction that
+                                // `json_extract` loses.
+                                expr.render(out);
+                                out.push_raw(if *as_text { " ->> " } else { " -> " });
+                                path.render_sqlite_path(out);
+                            }
+                        }
+                    }
+                }
+            }
+            Self::JsonOp { op, left, right } => render_json_op::<D>(out, *op, left, right),
+            Self::JsonPathFunction {
+                name,
+                document,
+                path,
+                extra,
+            } => render_json_path_function::<D>(out, name, document, path, extra),
+            Self::ArrayOp { op, left, right } => {
+                if !D::SUPPORTS_ARRAYS {
+                    out.set_error(besu_core::Error::unsupported(alloc::format!(
+                        "`{}` has no array operators; only PostgreSQL has an array type",
+                        D::NAME
+                    )));
+                }
+                out.push_raw("(");
+                left.render(out);
+                out.push_raw(" ");
+                out.push_raw(op);
+                out.push_raw(" ");
+                right.render(out);
+                out.push_raw(")");
+            }
+            Self::Subscript { array, index } => {
+                if !D::SUPPORTS_ARRAYS {
+                    out.set_error(besu_core::Error::unsupported(alloc::format!(
+                        "`{}` has no array subscript; only PostgreSQL has an array type",
+                        D::NAME
+                    )));
+                }
+                array.render(out);
+                out.push_raw("[");
+                index.render(out);
+                out.push_raw("]");
+            }
+            Self::AnyOf {
+                expr,
+                element,
+                values,
+                negated,
+            } => {
+                if values.is_empty() {
+                    // `IN ()` is a syntax error in every dialect, but an empty list has an
+                    // obvious meaning, and the constant is both portable and parameter-free.
+                    out.push_raw(if *negated { "(1 = 1)" } else { "(1 = 0)" });
+                } else if D::SUPPORTS_ARRAYS {
+                    // One array parameter instead of one per element, which is what keeps a
+                    // large `IN` list under the 65,535-parameter limit.
+                    out.push_raw("(");
+                    expr.render(out);
+                    out.push_raw(if *negated { " <> ALL(" } else { " = ANY(" });
+                    out.bind_value(Value::Array {
+                        element: element.clone(),
+                        values: core::mem::take(values),
+                    });
+                    out.push_raw("))");
+                } else {
+                    // Every other dialect binds one parameter per element. The list is
+                    // already in memory, so this is the same `IN (...)` it always was.
+                    out.push_raw("(");
+                    expr.render(out);
+                    out.push_raw(if *negated { " NOT IN (" } else { " IN (" });
+                    for (i, value) in core::mem::take(values).into_iter().enumerate() {
+                        if i != 0 {
+                            out.push_raw(", ");
+                        }
+                        out.bind_value(value);
+                    }
+                    out.push_raw("))");
                 }
             }
             Self::FullText { column, query } => {
@@ -655,9 +1313,36 @@ impl ExprKind {
             }
             Self::Cast { expr, .. }
             | Self::JsonPath { expr, .. }
+            | Self::JsonKey { expr, .. }
             | Self::InSubquery { expr, .. }
             | Self::Extract { expr, .. }
             | Self::DateAdd { expr, .. } => expr.unqualify(),
+            Self::JsonOp { left, right, .. } => {
+                left.unqualify();
+                right.unqualify();
+            }
+            Self::ArrayOp { left, right, .. } => {
+                left.unqualify();
+                right.unqualify();
+            }
+            Self::JsonPathFunction {
+                document, extra, ..
+            } => {
+                document.unqualify();
+                for operand in extra {
+                    operand.unqualify();
+                }
+            }
+            Self::Subscript { array, index } => {
+                array.unqualify();
+                index.unqualify();
+            }
+            Self::AnyOf { expr, values, .. } => {
+                expr.unqualify();
+                // A value has no table name, but the list is emptied as the node is
+                // consumed elsewhere; nothing to do here.
+                let _ = values;
+            }
             Self::DistinctFrom { left, right, .. }
             | Self::Regex { left, right, .. }
             | Self::DateDiff { left, right, .. } => {
@@ -716,9 +1401,24 @@ impl ExprKind {
             }
             Self::Cast { expr, .. }
             | Self::JsonPath { expr, .. }
+            | Self::JsonKey { expr, .. }
             | Self::InSubquery { expr, .. }
             | Self::Extract { expr, .. }
             | Self::DateAdd { expr, .. } => expr.reads_upsert_row(),
+            Self::JsonOp { left, right, .. } => left.reads_upsert_row() || right.reads_upsert_row(),
+            Self::ArrayOp { left, right, .. } => {
+                left.reads_upsert_row() || right.reads_upsert_row()
+            }
+            Self::JsonPathFunction {
+                document, extra, ..
+            } => document.reads_upsert_row() || extra.iter().any(Operand::reads_upsert_row),
+            Self::Subscript { array, index } => {
+                array.reads_upsert_row() || index.reads_upsert_row()
+            }
+            Self::AnyOf { expr, values, .. } => {
+                let _ = values;
+                expr.reads_upsert_row()
+            }
             Self::DistinctFrom { left, right, .. }
             | Self::Regex { left, right, .. }
             | Self::DateDiff { left, right, .. } => {
@@ -787,9 +1487,34 @@ impl ExprKind {
             }
             Self::Cast { expr, .. }
             | Self::JsonPath { expr, .. }
+            | Self::JsonKey { expr, .. }
             | Self::InSubquery { expr, .. }
             | Self::Extract { expr, .. }
             | Self::DateAdd { expr, .. } => expr.set_upsert_row(row),
+            Self::JsonOp { left, right, .. } => {
+                left.set_upsert_row(row);
+                right.set_upsert_row(row);
+            }
+            Self::ArrayOp { left, right, .. } => {
+                left.set_upsert_row(row);
+                right.set_upsert_row(row);
+            }
+            Self::JsonPathFunction {
+                document, extra, ..
+            } => {
+                document.set_upsert_row(row);
+                for operand in extra {
+                    operand.set_upsert_row(row);
+                }
+            }
+            Self::Subscript { array, index } => {
+                array.set_upsert_row(row);
+                index.set_upsert_row(row);
+            }
+            Self::AnyOf { expr, values, .. } => {
+                let _ = values;
+                expr.set_upsert_row(row);
+            }
             Self::DistinctFrom { left, right, .. }
             | Self::Regex { left, right, .. }
             | Self::DateDiff { left, right, .. } => {
@@ -999,7 +1724,9 @@ impl DateField {
         match self {
             Self::Year => Some("%Y"),
             Self::Month => Some("%m"),
-            Self::Week => Some("%W"),
+            // `%V` is the ISO-8601 week, which is what PostgreSQL's `EXTRACT(WEEK)`
+            // returns; `%W` is Monday-of-week-0 and disagrees at every year boundary.
+            Self::Week => Some("%V"),
             Self::Day => Some("%d"),
             Self::DayOfWeek => Some("%w"),
             Self::DayOfYear => Some("%j"),
@@ -1025,6 +1752,13 @@ fn render_extract<D: Dialect>(out: &mut Sql<D>, field: DateField, expr: &mut Ope
         }
         "mysql" => match field {
             // MySQL's `EXTRACT` only names the simple units; the rest are functions.
+            // `EXTRACT(WEEK)` uses mode 0, which is Sunday-based, while PostgreSQL's is
+            // ISO-8601 — `WEEK(x, 3)` is the ISO one.
+            DateField::Week => {
+                out.push_raw("WEEK(");
+                expr.render(out);
+                out.push_raw(", 3)");
+            }
             DateField::DayOfWeek => {
                 out.push_raw("DAYOFWEEK(");
                 expr.render(out);
@@ -1125,6 +1859,12 @@ fn render_date_add<D: Dialect>(
 ) {
     match D::NAME {
         "postgres" => {
+            // `date + interval` is a `timestamp` on PostgreSQL even when both sides are
+            // dates, so a helper typed for a `DATE` has to cast the result back or the
+            // driver decodes a `NaiveDate` from a timestamp.
+            if date_only {
+                out.push_raw("CAST(");
+            }
             out.push_raw("(");
             expr.render(out);
             out.push_raw(if subtract {
@@ -1140,6 +1880,9 @@ fn render_date_add<D: Dialect>(
             // `make_interval` takes `secs` as a double, and a bare decimal literal is typed
             // as `numeric`, which does not resolve the function.
             out.push_raw("::double precision))");
+            if date_only {
+                out.push_raw(" AS DATE)");
+            }
         }
         "mysql" => {
             // MySQL takes one unit per `INTERVAL`, so a compound interval is nested. The
@@ -1375,7 +2118,7 @@ impl Window {
         self
     }
 
-    /// A frame that starts at `start` and runs to the end of the partition.
+    /// A frame that starts at `start` and runs to the current row.
     pub fn rows_from(mut self, start: FrameBound) -> Self {
         self.frame = Some((FrameUnits::Rows, start, None));
         self
@@ -1655,10 +2398,10 @@ impl<T, S: SqlType> Expr<T, S> {
         F: IntoCondition<T, P>,
     {
         let _ = core::marker::PhantomData::<P>;
-        Expr::from_kind(ExprKind::Filter {
-            expr: Operand::new(self.into_kind()),
-            condition: Operand::new(condition.into_condition()),
-        })
+        let condition = Operand::new(condition.into_condition());
+        Expr::from_kind(wrap_outside_cast(self.into_kind(), |expr| {
+            ExprKind::Filter { expr, condition }
+        }))
     }
 
     /// `this OVER (window)`: evaluate an aggregate or window function over a window.
@@ -1667,10 +2410,10 @@ impl<T, S: SqlType> Expr<T, S> {
     /// row_number().over(Window::new().partition_by(users.team).order_by(users.age.asc()))
     /// ```
     pub fn over(self, window: Window) -> Expr<T, S> {
-        Expr::from_kind(ExprKind::Over {
-            expr: Operand::new(self.into_kind()),
+        Expr::from_kind(wrap_outside_cast(self.into_kind(), |expr| ExprKind::Over {
+            expr,
             window: Box::new(window),
-        })
+        }))
     }
 
     /// Sort ascending.
@@ -1835,12 +2578,6 @@ macro_rules! text_values {
                 Value::Text(self.into())
             }
         }
-
-        impl IntoSqlValue<Decimal<0, 0>> for $ty {
-            fn into_sql_value(self) -> Value {
-                Value::Text(self.into())
-            }
-        }
     };
 }
 
@@ -1848,6 +2585,59 @@ text_values!(&str);
 text_values!(String);
 text_values!(&String);
 text_values!(alloc::borrow::Cow<'_, str>);
+
+/// A decimal is bound as its exact decimal text, whatever its precision and scale.
+///
+/// The implementation is generic over `PRECISION` and `SCALE` because the text does not
+/// change with them: PostgreSQL parses the digits into its binary `NUMERIC` format and MySQL
+/// lets the server coerce the string to the column's type. The previous version only covered
+/// `Decimal<0, 0>`, which made every real `Decimal<10, 2>` column impossible to compare.
+macro_rules! decimal_values {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl<const PRECISION: u8, const SCALE: u8> IntoSqlValue<Decimal<PRECISION, SCALE>>
+                for $ty
+            {
+                fn into_sql_value(self) -> Value {
+                    Value::Decimal(self.into())
+                }
+            }
+        )*
+    };
+}
+
+decimal_values!(&str, String, &String, alloc::borrow::Cow<'_, str>);
+
+/// A `Vec<S::Rust>` is an array of `S`.
+///
+/// The element's declared type travels with the values because PostgreSQL's binary array
+/// header names the element OID and the server rejects a mismatch. `Vec<u8>` is deliberately
+/// not covered: [`Bytes`] implements `IntoSqlValue` for it, and a byte vector means binary
+/// data rather than an array of one-byte integers.
+impl<S: SqlType> IntoSqlValue<Array<S>> for Vec<S::Rust>
+where
+    Array<S>: SqlType,
+{
+    fn into_sql_value(self) -> Value {
+        Value::Array {
+            element: S::DEF,
+            values: self.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl<S: SqlType> IntoSqlValue<Array<S>> for &[S::Rust]
+where
+    S::Rust: Clone,
+    Array<S>: SqlType,
+{
+    fn into_sql_value(self) -> Value {
+        Value::Array {
+            element: S::DEF,
+            values: self.iter().cloned().map(Into::into).collect(),
+        }
+    }
+}
 
 impl IntoSqlValue<Bytes> for Vec<u8> {
     fn into_sql_value(self) -> Value {
@@ -1916,6 +2706,38 @@ impl<T, S: SqlType, V: IntoSqlValue<S>> IntoExpr<T, S, OptionMarker> for Option<
             None => Value::Null,
         }))
     }
+}
+
+/// Convert a derived insert's [`Set`](crate::table::Set) field using the column's SQL type.
+///
+/// The derive knows the column's `SqlType`, but a `Set<T>` only knows its Rust type — and the
+/// same Rust type can mean two SQL types, `String` being both `TEXT` and `DECIMAL`. Going
+/// through [`IntoSqlValue`] here is what makes an insert bind a `Decimal` as `NUMERIC` rather
+/// than as text, which PostgreSQL would refuse.
+#[doc(hidden)]
+pub fn set_to_value<S: SqlType, T: IntoSqlValue<S> + Clone>(
+    set: &crate::table::Set<T>,
+) -> Option<Value> {
+    match set {
+        crate::table::Set::Unset => None,
+        crate::table::Set::Null => Some(Value::Null),
+        crate::table::Set::Value(value) => Some((*value).clone().into_sql_value()),
+    }
+}
+
+/// Convert an `Option` from a model into a bound value, with the column's SQL type.
+#[doc(hidden)]
+pub fn option_to_value<S: SqlType, T: IntoSqlValue<S>>(value: Option<T>) -> Value {
+    match value {
+        Some(value) => value.into_sql_value(),
+        None => Value::Null,
+    }
+}
+
+/// Convert a model field into a bound value, with the column's SQL type.
+#[doc(hidden)]
+pub fn value_to_value<S: SqlType, T: IntoSqlValue<S>>(value: T) -> Value {
+    value.into_sql_value()
 }
 
 /// Two column types must match for a comparison.
@@ -2124,11 +2946,12 @@ where
     I: IntoIterator<Item = V>,
     V: IntoSqlValue<A::SqlType>,
 {
-    Expr::from_kind(ExprKind::InList {
+    Expr::from_kind(ExprKind::AnyOf {
         expr: Operand::new(a.into_typed().into_kind()),
-        list: values
+        element: <A::SqlType as SqlType>::DEF,
+        values: values
             .into_iter()
-            .map(|v| ExprKind::Value(v.into_sql_value()))
+            .map(IntoSqlValue::into_sql_value)
             .collect(),
         negated: false,
     })
@@ -2143,11 +2966,12 @@ where
     I: IntoIterator<Item = V>,
     V: IntoSqlValue<A::SqlType>,
 {
-    Expr::from_kind(ExprKind::InList {
+    Expr::from_kind(ExprKind::AnyOf {
         expr: Operand::new(a.into_typed().into_kind()),
-        list: values
+        element: <A::SqlType as SqlType>::DEF,
+        values: values
             .into_iter()
-            .map(|v| ExprKind::Value(v.into_sql_value()))
+            .map(IntoSqlValue::into_sql_value)
             .collect(),
         negated: true,
     })
@@ -2609,12 +3433,42 @@ unary_same! {
     max = "max",
     /// `ABS(expr)`.
     abs = "abs",
-    /// `ROUND(expr)`.
-    round = "round",
-    /// `CEIL(expr)`.
-    ceil = "ceil",
-    /// `FLOOR(expr)`.
-    floor = "floor",
+}
+
+/// `ROUND(expr)`.
+///
+/// Cast to a double, because PostgreSQL returns `double precision` for an integer argument
+/// (`pg_typeof(round(20::int4))`), so an `i64` column would decode as the wrong type.
+pub fn round<RowSet, A, MA>(value: A) -> Expr<RowSet, Float8>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    cast_to_float(call::<_, Float8>(
+        "round",
+        alloc::vec![value.into_typed().into_kind()],
+    ))
+}
+
+/// `CEIL(expr)`, cast for the same reason as [`round`].
+pub fn ceil<RowSet, A, MA>(value: A) -> Expr<RowSet, Float8>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    cast_to_float(call::<_, Float8>(
+        "ceil",
+        alloc::vec![value.into_typed().into_kind()],
+    ))
+}
+
+/// `FLOOR(expr)`, cast for the same reason as [`round`].
+pub fn floor<RowSet, A, MA>(value: A) -> Expr<RowSet, Float8>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    cast_to_float(call::<_, Float8>(
+        "floor",
+        alloc::vec![value.into_typed().into_kind()],
+    ))
 }
 
 /// `SUM(expr)`, widened to a float because integer sums overflow.
@@ -2643,11 +3497,81 @@ where
     ))
 }
 
+/// Apply `wrap` to the *inside* of a cast, keeping the cast on the outside.
+///
+/// `sum` and friends cast their result — `CAST(SUM(x) AS double precision)` — because the
+/// database's natural result type cannot be decoded. `FILTER` and `OVER` attach to the
+/// aggregate, not to the cast: `CAST(SUM(x) AS double precision) FILTER (...)` is a syntax
+/// error on every server, while `CAST(SUM(x) FILTER (...) AS double precision)` is what the
+/// caller meant.
+fn wrap_outside_cast(kind: ExprKind, wrap: impl FnOnce(Operand) -> ExprKind) -> ExprKind {
+    match kind {
+        ExprKind::Cast { expr, ty } => ExprKind::Cast {
+            expr: Operand::new(wrap(expr)),
+            ty,
+        },
+        other => wrap(Operand::new(other)),
+    }
+}
+
 fn cast_to_float<T, S: SqlType>(expr: Expr<T, S>) -> Expr<T, Float8> {
     Expr::from_kind(ExprKind::Cast {
         expr: Operand::new(expr.into_kind()),
         ty: Float8::DEF,
     })
+}
+
+/// An exact `SUM`, choosing the result type at the call site.
+///
+/// The free function [`sum_as`] cannot be called with a turbofish, because Rust requires every
+/// generic parameter of a function to be named once any is; this trait exists so that
+/// `column.sum_as::<Decimal<20, 2>>()` names only the result type.
+pub trait SumAs<RowSet, M>: TypedExpr<RowSet, M> + Sized {
+    /// `SUM(self)`, decoded as `S`.
+    fn sum_as<S: SqlType>(self) -> Expr<RowSet, S> {
+        call("sum", alloc::vec![self.into_typed().into_kind()])
+    }
+}
+
+impl<RowSet, M, A: TypedExpr<RowSet, M>> SumAs<RowSet, M> for A {}
+
+/// An exact `AVG`; see [`SumAs`].
+pub trait AvgAs<RowSet, M>: TypedExpr<RowSet, M> + Sized {
+    /// `AVG(self)`, decoded as `S`.
+    fn avg_as<S: SqlType>(self) -> Expr<RowSet, S> {
+        call("avg", alloc::vec![self.into_typed().into_kind()])
+    }
+}
+
+impl<RowSet, M, A: TypedExpr<RowSet, M>> AvgAs<RowSet, M> for A {}
+
+/// `SUM(expr)`, decoded as `S` without a cast in the database.
+///
+/// Use this when a float would lose the value, which is what [`sum`] does deliberately:
+/// `sum_as::<Decimal<20, 4>>(orders.total)` is an exact sum of a decimal column, while
+/// `sum(orders.total)` is the same sum rounded through a double. The database's own return
+/// type is what `S` has to describe; PostgreSQL's `SUM(numeric)` is an unconstrained
+/// `numeric`, so any `Decimal` decodes it.
+///
+/// Call [`SumAs::sum_as`] on the column when a turbofish is more convenient: this function
+/// has four generic parameters, and Rust requires all of them to be named together.
+pub fn sum_as<S: SqlType, RowSet, A, MA>(value: A) -> Expr<RowSet, S>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    call("sum", alloc::vec![value.into_typed().into_kind()])
+}
+
+/// `AVG(expr)`, decoded as `S` without a cast in the database.
+///
+/// See [`sum_as`] for why an exact average needs its own entry point. PostgreSQL's
+/// `AVG(numeric)` returns an unconstrained `numeric`, so `avg_as::<Decimal<20, 4>>` keeps
+/// every digit the server computed.
+pub fn avg_as<S: SqlType, RowSet, A, MA>(value: A) -> Expr<RowSet, S>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    call("avg", alloc::vec![value.into_typed().into_kind()])
 }
 
 /// Wrap an integer-valued expression in a cast to a 64-bit integer.
@@ -2698,9 +3622,9 @@ where
 /// `concat(users.first, " ")` compiles. Rust has no variadic functions, so the three- to
 /// eight-argument forms are [`concat3`] and its siblings.
 ///
-/// `CONCAT` skips `NULL` arguments on PostgreSQL and MySQL but returns `NULL` if any
-/// argument is `NULL` on SQLite; [`concat_ws`] behaves the same way everywhere and is the
-/// safer choice when a column may be `NULL`.
+/// `CONCAT` ignores a `NULL` argument on PostgreSQL but returns `NULL` on MySQL and SQLite;
+/// [`concat_ws`] behaves the same way everywhere and is the safer choice when a column may
+/// be `NULL`.
 pub fn concat<RowSet, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Text>
 where
     A: IntoExpr<RowSet, Text, MA>,
@@ -3353,10 +4277,14 @@ where
 /// `EXTRACT(field FROM value)` as a whole number.
 ///
 /// The fields that are not universally supported are spelled by each dialect: MySQL uses
-/// `DAYOFWEEK`, `DAYOFYEAR` and `UNIX_TIMESTAMP`, and SQLite uses `strftime`. The three of
-/// them number the days of the week differently — PostgreSQL counts from Sunday, MySQL from
-/// Sunday with `1` as the first day, and SQLite from Sunday with `0` — so only compare a
-/// `DayOfWeek` with another of the same database.
+/// `DAYOFWEEK`, `DAYOFYEAR` and `UNIX_TIMESTAMP`, and SQLite uses `strftime`.
+///
+/// `Week` is the ISO-8601 week everywhere: `EXTRACT(WEEK)` on PostgreSQL, `WEEK(x, 3)` on
+/// MySQL and `%V` on SQLite, so the three agree at year boundaries.
+///
+/// `DayOfWeek` is the exception: the three databases number the days differently —
+/// PostgreSQL counts from Sunday, MySQL from Sunday with `1` as the first day, and SQLite
+/// from Sunday with `0` — so only compare a `DayOfWeek` with another of the same database.
 pub fn extract<RowSet, A, MA>(field: DateField, value: A) -> Expr<RowSet, Int8>
 where
     A: TypedExpr<RowSet, MA>,
@@ -3583,20 +4511,28 @@ impl<T, S: SqlType> CaseBuilder<T, S> {
     }
 }
 
+/// Turn a dotted string into a structured path.
+///
+/// This is what the older [`json_get`] signature uses; a key that contains a dot cannot be
+/// expressed this way, which is why [`JsonPath`] exists.
+fn dotted_path(path: &str) -> JsonPath {
+    let mut out = JsonPath::root();
+    for key in path.split('.') {
+        out = out.key(key);
+    }
+    out
+}
+
 /// The JSON value at `path` inside `document`, keeping its JSON type.
 ///
 /// `path` is a dotted key path — `"a.b"` reaches `document["a"]["b"]` — and must be a
-/// literal, because it is rendered into the SQL rather than bound. Keys containing a dot are
-/// not expressible; use [`raw`] for those.
+/// literal, because it is rendered into the SQL rather than bound. A key containing a dot is
+/// not expressible this way; use [`json_at`] with a [`JsonPath`] for that.
 pub fn json_get<RowSet, A, MA>(document: A, path: &'static str) -> Expr<RowSet, Json>
 where
     A: TypedExpr<RowSet, MA>,
 {
-    Expr::from_kind(ExprKind::JsonPath {
-        expr: Operand::new(document.into_typed().into_kind()),
-        path,
-        as_text: false,
-    })
+    json_at(document, dotted_path(path))
 }
 
 /// The text at `path` inside `document`, unquoted.
@@ -3607,11 +4543,525 @@ pub fn json_text<RowSet, A, MA>(document: A, path: &'static str) -> Expr<RowSet,
 where
     A: TypedExpr<RowSet, MA>,
 {
+    json_at_text(document, dotted_path(path))
+}
+
+/// The JSON value at a structured path, keeping its JSON type.
+///
+/// Unlike [`json_get`], the path is built from segments, so a key that contains a dot, a
+/// comma or a quote is expressible and each dialect renders the path in its own grammar.
+pub fn json_at<RowSet, A, MA>(document: A, path: JsonPath) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonPath {
+        expr: Operand::new(document.into_typed().into_kind()),
+        path,
+        as_text: false,
+    })
+}
+
+/// The text at a structured path, unquoted.
+pub fn json_at_text<RowSet, A, MA>(document: A, path: JsonPath) -> Expr<RowSet, Text>
+where
+    A: TypedExpr<RowSet, MA>,
+{
     Expr::from_kind(ExprKind::JsonPath {
         expr: Operand::new(document.into_typed().into_kind()),
         path,
         as_text: true,
     })
+}
+
+/// `document -> key`: the JSON value under a key that is not known until run time.
+///
+/// The key is bound as a parameter, so it is never SQL text. Use [`json_at`] when the path is
+/// a literal and contains several segments.
+pub fn json_key<RowSet, A, MA>(document: A, key: impl Into<String>) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonKey {
+        expr: Operand::new(document.into_typed().into_kind()),
+        key: Value::Text(key.into()),
+        as_text: false,
+    })
+}
+
+/// `document ->> key`: the text under a bound key, unquoted.
+pub fn json_key_text<RowSet, A, MA>(document: A, key: impl Into<String>) -> Expr<RowSet, Text>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonKey {
+        expr: Operand::new(document.into_typed().into_kind()),
+        key: Value::Text(key.into()),
+        as_text: true,
+    })
+}
+
+/// `a @> b` on PostgreSQL, `JSON_CONTAINS(a, b)` on MySQL: does `a` contain `b`?
+pub fn contains_json<RowSet, A, B, MA, MB>(document: A, candidate: B) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+    B: IntoExpr<RowSet, Json, MB>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::Contains,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Operand(Operand::new(candidate.into_expr().into_kind())),
+    })
+}
+
+/// `a <@ b` on PostgreSQL, `JSON_CONTAINS(b, a)` on MySQL: is `a` contained in `b`?
+pub fn json_contained_by<RowSet, A, B, MA, MB>(document: A, container: B) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+    B: IntoExpr<RowSet, Json, MB>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::ContainedBy,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Operand(Operand::new(container.into_expr().into_kind())),
+    })
+}
+
+/// `document ? key` on PostgreSQL, `JSON_CONTAINS_PATH` on MySQL: is `key` present?
+///
+/// The key is a name rather than a path, and it is not bound on MySQL because the function
+/// needs a path expression; it is escaped into `$."key"`, so a key containing a dot or a
+/// quote still means the one member.
+pub fn json_has_key<RowSet, A, MA>(document: A, key: impl Into<String>) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::HasKey,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Key(key.into()),
+    })
+}
+
+/// `document ?| keys` on PostgreSQL: is at least one of the keys present?
+pub fn json_has_any<RowSet, A, I, K, MA>(document: A, keys: I) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+    I: IntoIterator<Item = K>,
+    K: Into<String>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::HasAnyKey,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Keys(keys.into_iter().map(Into::into).collect()),
+    })
+}
+
+/// `document ?& keys` on PostgreSQL: are all of the keys present?
+pub fn json_has_all<RowSet, A, I, K, MA>(document: A, keys: I) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+    I: IntoIterator<Item = K>,
+    K: Into<String>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::HasAllKey,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Keys(keys.into_iter().map(Into::into).collect()),
+    })
+}
+
+/// `JSON_OVERLAPS(a, b)` on MySQL: do the documents share an element or member?
+pub fn json_overlaps<RowSet, A, B, MA, MB>(document: A, other: B) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+    B: IntoExpr<RowSet, Json, MB>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::Overlaps,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Operand(Operand::new(other.into_expr().into_kind())),
+    })
+}
+
+/// `document #- path` on PostgreSQL, `JSON_REMOVE` on MySQL: remove a path.
+pub fn json_strip<RowSet, A, MA>(document: A, path: JsonPath) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::Strip,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Path(path),
+    })
+}
+
+/// `document @? predicate` on PostgreSQL: does the document match a JSON path predicate?
+///
+/// The predicate is bound as a parameter. MySQL has no equivalent, so the statement records
+/// an `unsupported` error there rather than emitting PostgreSQL syntax.
+pub fn json_matches_path<RowSet, A, MA>(
+    document: A,
+    predicate: impl Into<String>,
+) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::MatchesPath,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Key(predicate.into()),
+    })
+}
+
+/// `document @@ predicate` on PostgreSQL: does the document satisfy a `jsonpath` match?
+///
+/// The predicate is bound as a parameter; MySQL has no equivalent.
+pub fn json_matches<RowSet, A, MA>(document: A, predicate: impl Into<String>) -> Expr<RowSet, Bool>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonOp {
+        op: JsonOperator::Matches,
+        left: Operand::new(document.into_typed().into_kind()),
+        right: JsonRight::Key(predicate.into()),
+    })
+}
+
+/// `JSON_SET(document, path, value)` on MySQL and SQLite, `JSONB_SET(...)` on PostgreSQL.
+///
+/// Every dialect creates a missing path, which is the behaviour that makes the helper useful
+/// for building a document up over several updates.
+pub fn json_set<RowSet, A, B, MA, MB>(document: A, path: JsonPath, value: B) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+    B: IntoExpr<RowSet, Json, MB>,
+{
+    Expr::from_kind(ExprKind::JsonPathFunction {
+        name: "json_set",
+        document: Operand::new(document.into_typed().into_kind()),
+        path,
+        extra: alloc::vec![Operand::new(value.into_expr().into_kind())],
+    })
+}
+
+/// `JSON_REMOVE` on MySQL and SQLite: remove a path, without knowing its value.
+///
+/// This is [`json_strip`] under its MySQL spelling, so the same call works on both.
+pub fn json_remove<RowSet, A, MA>(document: A, path: JsonPath) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonPathFunction {
+        name: "json_remove",
+        document: Operand::new(document.into_typed().into_kind()),
+        path,
+        extra: Vec::new(),
+    })
+}
+
+/// `JSON_VALUE(document, path)` on MySQL: the scalar at a path, as text.
+pub fn json_value<RowSet, A, MA>(document: A, path: JsonPath) -> Expr<RowSet, Text>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonPathFunction {
+        name: "json_value",
+        document: Operand::new(document.into_typed().into_kind()),
+        path,
+        extra: Vec::new(),
+    })
+}
+
+/// `JSON_QUERY(document, path)` on MySQL: the JSON value or array at a path.
+pub fn json_query<RowSet, A, MA>(document: A, path: JsonPath) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::JsonPathFunction {
+        name: "json_query",
+        document: Operand::new(document.into_typed().into_kind()),
+        path,
+        extra: Vec::new(),
+    })
+}
+
+/// `JSON_MERGE_PATCH(a, b)`: apply `b` to `a` as an RFC 7396 merge patch.
+///
+/// MySQL spells it as a function; PostgreSQL has no merge-patch operator, and SQLite calls
+/// it `json_patch`, which is a different spelling of the same idea.
+pub fn json_merge_patch<RowSet, A, B, MA, MB>(document: A, patch: B) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+    B: IntoExpr<RowSet, Json, MB>,
+{
+    call(
+        "json_merge_patch",
+        alloc::vec![
+            document.into_typed().into_kind(),
+            patch.into_expr().into_kind(),
+        ],
+    )
+}
+
+/// `JSON_ARRAYAGG(expr)`: the aggregate's values as one JSON array.
+///
+/// This is the same operation as [`json_agg`] and exists so that a query can name the MySQL
+/// spelling; on PostgreSQL and SQLite both map onto the aggregate those servers provide.
+pub fn json_array_agg<RowSet, A, MA>(value: A) -> Expr<RowSet, Json>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    call(
+        "json_array_agg",
+        alloc::vec![value.into_typed().into_kind()],
+    )
+}
+
+/// `JSON_OBJECTAGG(key, value)`: the aggregate's key/value pairs as one JSON object.
+pub fn json_object_agg<RowSet, A, B, MA, MB>(key: A, value: B) -> Expr<RowSet, Json>
+where
+    A: IntoExpr<RowSet, Text, MA>,
+    B: TypedExpr<RowSet, MB>,
+{
+    call(
+        "json_object_agg",
+        alloc::vec![key.into_expr().into_kind(), value.into_typed().into_kind()],
+    )
+}
+
+// ---------------------------------------------------------------------------------------
+// Arrays
+// ---------------------------------------------------------------------------------------
+
+/// `a @> b`: does array `a` contain every element of `b`?
+pub fn array_contains<RowSet, S: SqlType, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Bool>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, Array<S>, MB>,
+    Array<S>: SqlType,
+{
+    Expr::from_kind(ExprKind::ArrayOp {
+        op: "@>",
+        left: Operand::new(a.into_expr().into_kind()),
+        right: Operand::new(b.into_expr().into_kind()),
+    })
+}
+
+/// `a <@ b`: is every element of array `a` also in `b`?
+pub fn array_contained_by<RowSet, S: SqlType, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Bool>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, Array<S>, MB>,
+    Array<S>: SqlType,
+{
+    Expr::from_kind(ExprKind::ArrayOp {
+        op: "<@",
+        left: Operand::new(a.into_expr().into_kind()),
+        right: Operand::new(b.into_expr().into_kind()),
+    })
+}
+
+/// `a && b`: do arrays `a` and `b` have any element in common?
+pub fn array_overlaps<RowSet, S: SqlType, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Bool>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, Array<S>, MB>,
+    Array<S>: SqlType,
+{
+    Expr::from_kind(ExprKind::ArrayOp {
+        op: "&&",
+        left: Operand::new(a.into_expr().into_kind()),
+        right: Operand::new(b.into_expr().into_kind()),
+    })
+}
+
+/// `a || b`: concatenate two arrays.
+pub fn array_concat<RowSet, S: SqlType, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Array<S>>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, Array<S>, MB>,
+    Array<S>: SqlType,
+{
+    Expr::from_kind(ExprKind::ArrayOp {
+        op: "||",
+        left: Operand::new(a.into_expr().into_kind()),
+        right: Operand::new(b.into_expr().into_kind()),
+    })
+}
+
+/// `array[index]`: the element at a one-based position.
+///
+/// PostgreSQL arrays are one-based, and an out-of-range subscript is `NULL` rather than an
+/// error. The expression's type does not model that `NULL`, exactly as `MIN` and a column
+/// read from an optional join do not.
+pub fn array_get<RowSet, S: SqlType, A, MA>(array: A, index: i32) -> Expr<RowSet, S>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    Array<S>: SqlType,
+{
+    Expr::from_kind(ExprKind::Subscript {
+        array: Operand::new(array.into_expr().into_kind()),
+        index: Operand::new(ExprKind::Value(Value::Int(i64::from(index)))),
+    })
+}
+
+/// `array_length(array, dimension)`, or `NULL` when the array has no such dimension.
+pub fn array_length<RowSet, S: SqlType, A, MA>(array: A, dimension: i32) -> Expr<RowSet, Int8>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    Array<S>: SqlType,
+{
+    // The dimension is written as a literal: PostgreSQL declares the argument `integer`, and
+    // a bound `i64` parameter would not resolve the function without a cast.
+    cast_to_int(call::<_, Int8>(
+        "array_length",
+        alloc::vec![
+            array.into_expr().into_kind(),
+            ExprKind::Raw(alloc::format!("{dimension}")),
+        ],
+    ))
+}
+
+/// `cardinality(array)`: the total number of elements across every dimension.
+pub fn cardinality<RowSet, S: SqlType, A, MA>(array: A) -> Expr<RowSet, Int8>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    Array<S>: SqlType,
+{
+    cast_to_int(call::<_, Int8>(
+        "cardinality",
+        alloc::vec![array.into_expr().into_kind()],
+    ))
+}
+
+/// `array_append(array, value)`.
+pub fn array_append<RowSet, S: SqlType, A, B, MA, MB>(array: A, value: B) -> Expr<RowSet, Array<S>>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, S, MB>,
+    Array<S>: SqlType,
+{
+    call(
+        "array_append",
+        alloc::vec![array.into_expr().into_kind(), value.into_expr().into_kind(),],
+    )
+}
+
+/// `array_prepend(value, array)`.
+pub fn array_prepend<RowSet, S: SqlType, A, B, MA, MB>(value: A, array: B) -> Expr<RowSet, Array<S>>
+where
+    A: IntoExpr<RowSet, S, MA>,
+    B: IntoExpr<RowSet, Array<S>, MB>,
+    Array<S>: SqlType,
+{
+    call(
+        "array_prepend",
+        alloc::vec![value.into_expr().into_kind(), array.into_expr().into_kind(),],
+    )
+}
+
+/// `array_cat(a, b)`: concatenate two arrays.
+pub fn array_cat<RowSet, S: SqlType, A, B, MA, MB>(a: A, b: B) -> Expr<RowSet, Array<S>>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, Array<S>, MB>,
+    Array<S>: SqlType,
+{
+    call(
+        "array_cat",
+        alloc::vec![a.into_expr().into_kind(), b.into_expr().into_kind()],
+    )
+}
+
+/// `array_position(array, value)`: the one-based position of the first match, or `NULL`.
+pub fn array_position<RowSet, S: SqlType, A, B, MA, MB>(array: A, value: B) -> Expr<RowSet, Int8>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, S, MB>,
+    Array<S>: SqlType,
+{
+    cast_to_int(call::<_, Int8>(
+        "array_position",
+        alloc::vec![array.into_expr().into_kind(), value.into_expr().into_kind(),],
+    ))
+}
+
+/// `array_remove(array, value)`: the array without every occurrence of `value`.
+pub fn array_remove<RowSet, S: SqlType, A, B, MA, MB>(array: A, value: B) -> Expr<RowSet, Array<S>>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, S, MB>,
+    Array<S>: SqlType,
+{
+    call(
+        "array_remove",
+        alloc::vec![array.into_expr().into_kind(), value.into_expr().into_kind(),],
+    )
+}
+
+/// `array_replace(array, from, to)`.
+pub fn array_replace<RowSet, S: SqlType, A, B, C, MA, MB, MC>(
+    array: A,
+    from: B,
+    to: C,
+) -> Expr<RowSet, Array<S>>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, S, MB>,
+    C: IntoExpr<RowSet, S, MC>,
+    Array<S>: SqlType,
+{
+    call(
+        "array_replace",
+        alloc::vec![
+            array.into_expr().into_kind(),
+            from.into_expr().into_kind(),
+            to.into_expr().into_kind(),
+        ],
+    )
+}
+
+/// `array_to_string(array, delimiter)`.
+pub fn array_to_string<RowSet, S: SqlType, A, B, MA, MB>(
+    array: A,
+    delimiter: B,
+) -> Expr<RowSet, Text>
+where
+    A: IntoExpr<RowSet, Array<S>, MA>,
+    B: IntoExpr<RowSet, Text, MB>,
+    Array<S>: SqlType,
+{
+    call(
+        "array_to_string",
+        alloc::vec![
+            array.into_expr().into_kind(),
+            delimiter.into_expr().into_kind(),
+        ],
+    )
+}
+
+/// `string_to_array(text, delimiter)`.
+pub fn string_to_array<RowSet, A, B, MA, MB>(value: A, delimiter: B) -> Expr<RowSet, Array<Text>>
+where
+    A: IntoExpr<RowSet, Text, MA>,
+    B: IntoExpr<RowSet, Text, MB>,
+{
+    call(
+        "string_to_array",
+        alloc::vec![
+            value.into_expr().into_kind(),
+            delimiter.into_expr().into_kind(),
+        ],
+    )
+}
+
+/// `array_agg(expr)`: the aggregate's values as an array.
+pub fn array_agg<RowSet, A, MA>(value: A) -> Expr<RowSet, Array<A::SqlType>>
+where
+    A: TypedExpr<RowSet, MA>,
+    Array<A::SqlType>: SqlType,
+{
+    call("array_agg", alloc::vec![value.into_typed().into_kind()])
 }
 
 /// A full-text match: `column` contains the search `query`.

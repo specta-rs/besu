@@ -125,4 +125,4 @@ Both render the name as a qualifier: `"app"."users"`.
   and creating them in the new one. Use `ALTER SCHEMA ... RENAME TO ...` in a migration.
 - **`push` never drops a schema.** Even when every table in it is dropped, the empty schema
   stays. `DROP SCHEMA` is migration SQL.
-- **Views follow the same naming rule** but are never diffed; see [views](views.md).
+- **Views follow the same naming rule** and are diffed once the declaration names one; see [views](views.md).

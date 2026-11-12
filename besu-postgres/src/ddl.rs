@@ -43,6 +43,14 @@ impl Ddl for PostgresDdl {
             // The same is true of `u128` in `NUMERIC(39,0)`. A signed `i128` is declared as
             // `Decimal(39, 0)` already, so the two share a type and converge.
             TypeDef::UInt(128) => TypeDef::Decimal(39, 0),
+            // The fold has to reach through the wrappers: `Array(UInt(16))` is declared
+            // `INTEGER[]`, which introspection reports as `Array(Int4)`.
+            TypeDef::Array(inner) => TypeDef::Array(besu_core::types::TypeRef::owned(
+                self.normalise_type(inner.as_type()),
+            )),
+            TypeDef::Collated(inner, collation) => {
+                TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
+            }
             other => other.clone(),
         }
     }

@@ -77,7 +77,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     let columns = db
         .execute(table_query(
             "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, \
-             COLUMN_KEY, GENERATION_EXPRESSION \
+             COLUMN_KEY, GENERATION_EXPRESSION, COLLATION_NAME \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
              ORDER BY ORDINAL_POSITION",
@@ -92,8 +92,24 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
             String,
             String,
             String,
+            Option<String>,
         )>()
         .await?;
+
+    // A per-column collation is only interesting when it differs from the table's: otherwise
+    // every text column would carry the table's default and no declared `String` would ever
+    // converge.
+    let table_collation = db
+        .execute(table_query(
+            "SELECT TABLE_COLLATION FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+            &name,
+        ))
+        .all::<(Option<String>,)>()
+        .await?
+        .into_iter()
+        .next()
+        .and_then(|(collation,)| collation);
 
     let statistics = db
         .execute(table_query(
@@ -137,6 +153,7 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
                     extra,
                     column_key,
                     generation_expression,
+                    collation,
                 )| {
                     let extra_lower = extra.to_ascii_lowercase();
                     // `EXTRA` is the only place MySQL says a column is generated; a
@@ -150,9 +167,15 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
                             expression: besu_schema::normalise_generated_expression(&expression),
                             stored,
                         });
+                    let mut ty = parse_type(&data_type, &column_type);
+                    if let Some(collation) = collation
+                        && table_collation.as_deref() != Some(collation.as_str())
+                    {
+                        ty = TypeDef::Collated(Box::new(ty), collation.into());
+                    }
                     Column {
                         name: column_name,
-                        ty: parse_type(&data_type, &column_type),
+                        ty,
                         nullable: is_nullable.eq_ignore_ascii_case("YES"),
                         // A generated column owns its value, so it is not an
                         // `AUTO_INCREMENT` column.
@@ -339,11 +362,14 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
         "bool" | "boolean" => TypeDef::Bool,
         "tinyint" if unsigned => TypeDef::UInt(8),
         "tinyint" if lower.starts_with("tinyint(1)") => TypeDef::Bool,
-        "tinyint" => TypeDef::Int2,
+        // A signed `TINYINT` is a real storage width that `SMALLINT` would not recreate, so
+        // the native name is kept and `normalise_type` folds it onto `Int2`.
+        "tinyint" => TypeDef::Custom(lower.into()),
         "smallint" if unsigned => TypeDef::UInt(16),
         "smallint" => TypeDef::Int2,
         "mediumint" if unsigned => TypeDef::UInt(32),
-        "mediumint" => TypeDef::Int4,
+        // See the `tinyint` arm: `INT` is wider than the column really is.
+        "mediumint" => TypeDef::Custom(lower.into()),
         "int" | "integer" if unsigned => TypeDef::UInt(32),
         "int" | "integer" => TypeDef::Int4,
         "bigint" if unsigned => TypeDef::UInt(64),
@@ -355,25 +381,46 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
             Some(length) => TypeDef::VarChar(length),
             None => TypeDef::Text,
         },
-        "tinytext" | "text" | "mediumtext" | "longtext" => TypeDef::Text,
+        "text" => TypeDef::Text,
+        // `TINYTEXT`, `MEDIUMTEXT` and `LONGTEXT` have different storage limits, which
+        // `TEXT` would silently change; the exact name is kept.
+        "tinytext" | "mediumtext" | "longtext" => TypeDef::Custom(lower.into()),
         // A 16-byte `BINARY` is how this crate stores a UUID; everything else binary is
         // opaque bytes.
         "binary" if length(&lower) == Some(16) => TypeDef::Uuid,
-        "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob" => TypeDef::Bytes,
+        "binary" | "varbinary" | "blob" => TypeDef::Bytes,
+        "tinyblob" | "mediumblob" | "longblob" => TypeDef::Custom(lower.into()),
         "json" => TypeDef::Json,
         "date" => TypeDef::Date,
-        "time" => TypeDef::Time,
-        "datetime" => TypeDef::Timestamp,
-        "timestamp" => TypeDef::TimestampTz,
+        // MySQL's `TIME`, `DATETIME` and `TIMESTAMP` carry a fractional-second precision,
+        // and dropping it truncates the nanoseconds a `Value::Time` holds.
+        "time" => match length(&lower) {
+            Some(precision) => TypeDef::TimeP(narrow(precision)),
+            None => TypeDef::Time,
+        },
+        "datetime" => match length(&lower) {
+            Some(precision) => TypeDef::TimestampP(narrow(precision)),
+            None => TypeDef::Timestamp,
+        },
+        "timestamp" => match length(&lower) {
+            Some(precision) => TypeDef::TimestampTzP(narrow(precision)),
+            None => TypeDef::TimestampTz,
+        },
         "decimal" | "numeric" => {
             let (precision, scale) = decimal_parts(&lower).unwrap_or((10, 0));
             TypeDef::Decimal(precision, scale)
         }
-        "year" => TypeDef::Int2,
+        // A `YEAR` column has its own range and formatting; `SMALLINT` is not the same type.
+        "year" => TypeDef::Custom(lower.into()),
         // Enums, sets and anything newer than this crate knows about keep their native
         // spelling, so generated DDL round-trips.
         _ => TypeDef::Custom(column_type.to_owned().into()),
     }
+}
+
+/// Narrow a parsed precision to the `u8` a [`TypeDef`] carries.
+fn narrow(precision: u32) -> u8 {
+    u8::try_from(precision).unwrap_or(u8::MAX)
 }
 
 /// The first number inside `(...)`, as in `varchar(255)`.
@@ -403,22 +450,47 @@ fn decimal_parts(column_type: &str) -> Option<(u8, u8)> {
 /// MySQL wraps string defaults in quotes and reports the `NULL` keyword as a plain string,
 /// while an expression default comes back bare, marked by `DEFAULT_GENERATED` in `EXTRA`.
 fn parse_default(default: Option<&str>, extra: &str) -> Option<String> {
-    let default = default?.trim();
+    let on_update = on_update_clause(extra);
+    let base = default.map(str::trim).and_then(|default| {
+        if default.eq_ignore_ascii_case("NULL") {
+            return None;
+        }
 
-    if default.eq_ignore_ascii_case("NULL") {
-        return None;
+        if extra.to_ascii_lowercase().contains("default_generated") {
+            return Some(default.to_owned());
+        }
+
+        match default
+            .strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+        {
+            Some(quoted) => Some(quoted.replace("''", "'")),
+            None => Some(default.to_owned()),
+        }
+    });
+
+    // `ON UPDATE` is an attribute of the column rather than a default, but MySQL's `EXTRA`
+    // gives it no other home in the IR: appending it to the default means the DDL renders
+    // `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`, which is the exact syntax the
+    // server accepts back.
+    match (base, on_update) {
+        (Some(default), Some(clause)) => Some(format!("{default} {clause}")),
+        // Without a default there is nothing Besu can attach the clause to, so an
+        // `ON UPDATE`-only column is reported without it rather than with a wrong default.
+        (None, _) => None,
+        (Some(default), None) => Some(default),
     }
+}
 
-    if extra.to_ascii_lowercase().contains("default_generated") {
-        return Some(default.to_owned());
-    }
-
-    match default
-        .strip_prefix('\'')
-        .and_then(|value| value.strip_suffix('\''))
-    {
-        Some(quoted) => Some(quoted.replace("''", "'")),
-        None => Some(default.to_owned()),
+/// The `ON UPDATE ...` clause in MySQL's `EXTRA`, as SQL.
+fn on_update_clause(extra: &str) -> Option<String> {
+    let lower = extra.to_ascii_lowercase();
+    let at = lower.find("on update ")?;
+    let clause = extra[at + "on update ".len()..].trim();
+    if clause.is_empty() {
+        None
+    } else {
+        Some(format!("ON UPDATE {clause}"))
     }
 }
 
@@ -435,6 +507,14 @@ mod tests {
             parse_type("tinyint", "tinyint(1) unsigned"),
             TypeDef::UInt(8)
         );
-        assert_eq!(parse_type("tinyint", "tinyint(4)"), TypeDef::Int2);
+        // A signed `TINYINT` keeps its native width, which is narrower than `SMALLINT`.
+        assert_eq!(
+            parse_type("tinyint", "tinyint(4)"),
+            TypeDef::Custom("tinyint(4)".into())
+        );
+        assert_eq!(
+            parse_type("tinyint", "tinyint"),
+            TypeDef::Custom("tinyint".into())
+        );
     }
 }

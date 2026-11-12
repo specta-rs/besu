@@ -122,6 +122,9 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             Value::Int128(v) => add(&mut arguments, v.to_string())?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
+            // SQLite has no decimal type: `DECIMAL` is declared as `TEXT`, so the exact
+            // digits are bound as text and never pass through a float.
+            Value::Decimal(v) => add(&mut arguments, v.as_str())?,
             Value::Bytes(v) => add(&mut arguments, v.as_slice())?,
             // sqlx's `Uuid` encoder copies the sixteen bytes into an owned `Vec`. Binding the
             // same bytes as a borrowed blob writes an identical SQLite `BLOB` with no copy.
@@ -142,6 +145,14 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             // are not copied. Binding the `&[u8]` instead would cost the same and lose the
             // column's `TEXT` affinity, which JSON functions rely on.
             Value::Json(v) => add(&mut arguments, from_utf8(v).unwrap_or("null"))?,
+            // SQLite has no array type. Binding `NULL` instead would turn a programming
+            // mistake into a missing value, so the statement fails before it is sent.
+            Value::Array { .. } => {
+                return Err(<Sqlx as Driver>::error(Error::encode(
+                    value.display(),
+                    "`sqlite` has no array type; store the elements as JSON instead",
+                )));
+            }
             _ => add(&mut arguments, None::<i64>)?,
         }
     }

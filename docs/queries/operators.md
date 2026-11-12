@@ -165,14 +165,20 @@ db.select(users).filter(users.name.not_in(["Alice"])).await?;
 ```
 
 ```sql
+-- SQLite and MySQL
 SELECT ... FROM "users" WHERE ("users"."name" IN (?, ?))
 SELECT ... FROM "users" WHERE ("users"."name" NOT IN (?))
+
+-- PostgreSQL
+SELECT ... FROM "users" WHERE ("users"."name" = ANY($1))
+SELECT ... FROM "users" WHERE ("users"."name" <> ALL($1))
 ```
 
-Every item is its own bound parameter, which is why a very large list can exceed the dialect's
-parameter limit. An empty list is not valid SQL — `IN ()` is a syntax error everywhere — so it
-renders the constant predicate `(1 = 0)` for `in_list` and `(1 = 1)` for `not_in`, which the
-database folds away and which keeps a dynamically built filter from producing broken SQL.
+On PostgreSQL the whole list is one bound array parameter, so a large list is limited by the
+array size rather than by the 65,535-parameter limit. Every other dialect binds one parameter
+per item. An empty list is not valid SQL — `IN ()` is a syntax error everywhere — so it renders
+the constant predicate `(1 = 0)` for `in_list` and `(1 = 1)` for `not_in`, which the database
+folds away and which keeps a dynamically built filter from producing broken SQL.
 
 The items are checked against the column's SQL type, so `users.age.in_list(["Alice"])` is a
 compile error rather than a runtime one. For a subquery, `in_query` and `not_in_query` take a
@@ -304,7 +310,7 @@ database does not have, and using it records `unsupported`.
 | `regexp_substr` | — | `REGEXP_SUBSTR` | — |
 | `date_format` | — | `DATE_FORMAT` | — |
 | `date_trunc` | `DATE_TRUNC` | — | — |
-| `extract` | `EXTRACT(.. FROM ..)` | `EXTRACT(.. FROM ..)` | `strftime` |
+| `extract` | `EXTRACT(.. FROM ..)` | `EXTRACT(.. FROM ..)` / `WEEK(x, 3)` | `strftime` |
 | `datediff` | date subtraction | `DATEDIFF` | `julianday` |
 | `date_add`, `date_sub` | `make_interval` | `DATE_ADD`/`DATE_SUB` | `date`/`datetime` |
 | `unix_timestamp`, `from_unixtime` | — | `UNIX_TIMESTAMP`, `FROM_UNIXTIME` | — |
@@ -351,8 +357,9 @@ db.select(orders)
 ```
 
 ```sql
-SELECT "orders"."customer_id", (CAST(SUM("orders"."total") AS DOUBLE PRECISION)
-       FILTER (WHERE "orders"."paid")) FROM "orders" GROUP BY "orders"."customer_id"
+SELECT "orders"."customer_id",
+       CAST((SUM("orders"."total") FILTER (WHERE "orders"."paid")) AS DOUBLE PRECISION)
+FROM "orders" GROUP BY "orders"."customer_id"
 ```
 
 PostgreSQL and SQLite have `FILTER`; MySQL does not, so it records `unsupported` with the
@@ -409,13 +416,113 @@ WHERE ("events"."payload" ->> '$.kind' = ?)
 plainto_tsquery(..)` on PostgreSQL, `MATCH(..) AGAINST (..)` on MySQL and `MATCH` on SQLite,
 where the table has to be an FTS5 virtual table.
 
+## Arrays
+
+Only PostgreSQL has an array type. A `Vec<T>` field is inferred as `besu::Array<T>` and declared
+as `<T>[]`; every helper below renders PostgreSQL's operator or function and records
+`Error::unsupported` on MySQL and SQLite, which have no array type at all.
+
+| SQL | Helper |
+| --- | --- |
+| `a @> b` | `array_contains(a, b)` |
+| `a <@ b` | `array_contained_by(a, b)` |
+| `a && b` | `array_overlaps(a, b)` |
+| `a \|\| b` | `array_concat(a, b)` or `array_cat(a, b)` |
+| `a[i]` | `array_get(a, i)` |
+| `x = ANY(a)` | `in_list(x, values)` |
+| `array_length(a, n)` | `array_length(a, n)` |
+| `cardinality(a)` | `cardinality(a)` |
+| `array_append(a, x)` | `array_append(a, x)` |
+| `array_prepend(x, a)` | `array_prepend(x, a)` |
+| `array_position(a, x)` | `array_position(a, x)` |
+| `array_remove(a, x)` | `array_remove(a, x)` |
+| `array_replace(a, x, y)` | `array_replace(a, from, to)` |
+| `array_to_string(a, s)` | `array_to_string(a, separator)` |
+| `string_to_array(s, d)` | `string_to_array(text, delimiter)` |
+| `array_agg(x)` | `array_agg(x)` |
+
+```rust
+db.select(posts)
+    .filter(array_contains(posts.tags, vec!["rust".to_owned()]))
+    .await?;
+```
+
+```sql
+SELECT ... FROM "posts" WHERE ("posts"."tags" @> $1)
+```
+
+A bound array carries its element's declared type, because PostgreSQL's binary array format
+names the element OID in its header and the server rejects a mismatch. One consequence is that
+`Vec<String>` is always bound as `TEXT[]`: a `VARCHAR(n)[]` column needs the typed expression
+path rather than a whole-model insert.
+
+Arrays decode one dimension into a `Vec`. A multi-dimensional array, or one containing a `NULL`
+element, needs `sql!`: a `Vec<T>` has no room for either.
+
+## JSON
+
+`json_get(document, "a.b")` and `json_text(document, "a.b")` split a dotted string, which cannot
+express a key containing a dot. `JsonPath` is the structured form and each dialect renders it in
+its own grammar, escaping once:
+
+```rust
+use besu::expr::{JsonPath, json_at_text};
+
+db.select(events)
+    .pick(json_at_text(
+        events.payload,
+        JsonPath::root().key("user.name").index(0),
+    ))
+    .await?;
+```
+
+```sql
+-- PostgreSQL: a text[] path, so the key with a dot is one element
+SELECT ("events"."payload" #>> '{user.name,0}') FROM "events"
+
+-- MySQL: a $.path, so the key is quoted
+SELECT JSON_UNQUOTE(JSON_EXTRACT(`events`.`payload`, '$."user.name"[0]')) FROM "events"
+```
+
+`json_key` and `json_key_text` bind a key instead of writing it into the path, which is what to
+use when the key comes from the caller.
+
+| SQL | Helper | Dialects |
+| --- | --- | --- |
+| `a @> b` | `contains_json(a, b)` | PostgreSQL |
+| `a <@ b` | `json_contained_by(a, b)` | PostgreSQL |
+| `a ? key` | `json_has_key(a, key)` | PostgreSQL |
+| `a ?\| keys` | `json_has_any(a, keys)` | PostgreSQL |
+| `a ?& keys` | `json_has_all(a, keys)` | PostgreSQL |
+| `a #- path` | `json_strip(a, path)` | PostgreSQL |
+| `a @? predicate` | `json_matches_path(a, predicate)` | PostgreSQL |
+| `a @@ predicate` | `json_matches(a, predicate)` | PostgreSQL |
+| `JSON_CONTAINS(a, b)` | `contains_json(a, b)` | MySQL |
+| `JSON_CONTAINS_PATH(a, ..)` | `json_has_key`, `json_has_any`, `json_has_all` | MySQL |
+| `JSON_REMOVE(a, path)` | `json_strip`, `json_remove` | MySQL, SQLite |
+| `JSON_SET(a, path, v)` | `json_set(a, path, value)` | MySQL, SQLite, PostgreSQL (`JSONB_SET`) |
+| `JSON_VALUE(a, path)` | `json_value(a, path)` | MySQL |
+| `JSON_QUERY(a, path)` | `json_query(a, path)` | MySQL |
+| `JSON_MERGE_PATCH(a, b)` | `json_merge_patch(a, b)` | MySQL |
+| `JSON_OVERLAPS(a, b)` | `json_overlaps(a, b)` | MySQL |
+| `JSON_ARRAYAGG(x)` | `json_array_agg(x)` / `json_agg(x)` | MySQL |
+| `JSON_OBJECTAGG(k, v)` | `json_object_agg(k, v)` | MySQL |
+
+The `?`, `?|` and `?&` operators are written with `??`, `??|` and `??&` in `sql!`, which the
+macro unescapes, so a raw fragment can use them too.
+
+MySQL takes a JSON argument as a JSON *document* only when it is cast; the helpers cast their
+parameters to `JSON`, so `json_set(doc, path, 4)` stores the number rather than the string
+`"4"`.
+
 ## What is missing
 
-- **Array operators** — `@>`, `<@`, `&&`, `||`, `ANY`/`ALL` over an array. They need a
-  `TypeDef::Array` to describe the column, which the type layer does not have yet, so for now
-  they can only be written as `sql!` fragments.
 - **`SIMILAR TO`** — reachable through `raw`, because no dialect here implements it and it is
   not the same thing as a regular expression.
+- **`unnest` in `FROM`** — a set-returning function has no place in the typed query builder, so
+  write it with `sql!`.
+- **Multi-dimensional arrays** — only one dimension decodes into a `Vec`, and a `NULL` element
+  has no representation in one.
 
 ## What is checked
 
@@ -436,5 +543,6 @@ where the table has to be an FTS5 virtual table.
 - **A function the dialect lacks is a build error, not a server error.** That is deliberate:
   the message names the helper and the dialect, where the server would only say "no such
   function".
-- **`sum` and `avg` return `f64`.** Annotate `Vec<f64>` when you pick one, and note that
-  `json_get` paths use dots — a key containing one cannot be expressed, so write it with `raw`.
+- **`sum` and `avg` return `f64`.** Annotate `Vec<f64>` when you pick one. For an exact sum of a
+  decimal column use `sum_as`/`avg_as` (or the `SumAs`/`AvgAs` methods), which do not cast
+  through a double. `json_get` paths still use dots — a key containing one needs `JsonPath`.

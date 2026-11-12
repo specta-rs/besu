@@ -4,6 +4,7 @@
 //! and `cargo test` can be repeated without cleaning anything up first.
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
+use besu::Decimal;
 use besu::prelude::*;
 use besu_mysql::Sqlx;
 use sqlx::MySqlPool;
@@ -211,4 +212,58 @@ async fn a_timestamp_with_a_zone_converges() {
         "push must be a no-op, got: {:?}",
         second.changes
     );
+}
+
+/// A decimal column whose Rust type is the exact text.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "ledger")]
+pub struct Ledger {
+    #[besu(primary_key)]
+    pub id: i64,
+    #[besu(sql_type = "besu::Decimal<10,2>")]
+    pub amount: String,
+}
+
+/// MySQL coerces a string parameter into the `DECIMAL` column, and the value comes back with
+/// the column's own scale.
+#[tokio::test]
+async fn a_decimal_round_trips_exactly() {
+    use besu::expr::SumAs;
+
+    let db = fresh("besu_decimal_round_trip").await;
+    db.push([ledger.def()]).await.unwrap();
+
+    let second = db.push([ledger.def()]).await.unwrap();
+    assert!(second.is_empty(), "got {:?}", second.changes);
+
+    for (id, amount) in [(1_i64, "0.00"), (2, "1.23"), (3, "-98765432.10")] {
+        db.insert(ledger)
+            .value(ledger.insert(id, amount.to_owned()))
+            .await
+            .unwrap();
+    }
+
+    let stored: Vec<Ledger> = db.select(ledger).order_by(ledger.id.asc()).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|row| row.amount.as_str())
+            .collect::<Vec<_>>(),
+        ["0.00", "1.23", "-98765432.10"]
+    );
+
+    let found: Vec<Ledger> = db
+        .select(ledger)
+        .filter(ledger.amount.eq("1.23"))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+
+    let sum: Vec<String> = db
+        .select(ledger)
+        .pick(ledger.amount.sum_as::<Decimal<20, 2>>())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(sum[0], "-98765430.87");
 }

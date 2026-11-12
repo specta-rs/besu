@@ -651,17 +651,27 @@ fn diff_table(
     }
 
     // Removed columns.
-    for column in &current.columns {
-        let renamed_away = desired.columns.iter().any(|desired| {
-            desired.renamed_from.as_deref() == Some(column.name.as_str())
-                && current.column(&desired.name).is_none()
-        });
-        if desired.column(&column.name).is_none() && !renamed_away {
-            changes.push(Change::DropColumn {
-                table: table.clone(),
-                column: column.name.clone(),
+    // A generated column is dropped before the column its expression reads: on SQLite a
+    // drop is a plain `ALTER TABLE ... DROP COLUMN`, and the server refuses to remove a
+    // column that a generated expression still references.
+    let mut removed: Vec<&Column> = current
+        .columns
+        .iter()
+        .filter(|column| {
+            let renamed_away = desired.columns.iter().any(|desired| {
+                desired.renamed_from.as_deref() == Some(column.name.as_str())
+                    && current.column(&desired.name).is_none()
             });
-        }
+            desired.column(&column.name).is_none() && !renamed_away
+        })
+        .collect();
+    removed.sort_by_key(|column| column.generated.is_none());
+
+    for column in removed {
+        changes.push(Change::DropColumn {
+            table: table.clone(),
+            column: column.name.clone(),
+        });
     }
 
     // Changed columns.

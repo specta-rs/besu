@@ -55,6 +55,18 @@ pub trait Ddl {
             Value::Int128(v) => v.to_string(),
             Value::Float(v) => v.to_string(),
             Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
+            Value::Decimal(v) => v.clone(),
+            Value::Array { values, .. } => {
+                let mut out = String::from("ARRAY[");
+                for (i, value) in values.iter().enumerate() {
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&self.literal(value));
+                }
+                out.push(']');
+                out
+            }
             other => format!("{other:?}"),
         }
     }
@@ -545,6 +557,11 @@ pub trait Ddl {
     }
 
     /// Render a diff as statements, in order.
+    ///
+    /// Prefer [`apply_with`](Ddl::apply_with) when you have the schemas: a dialect may need a
+    /// table's column types to render a change. MySQL is the case in point — an index over a
+    /// `TEXT` column needs a prefix length, which the index alone does not carry, so this
+    /// method (which sees only the changes) cannot produce the right statement for it.
     fn apply(&self, changes: &[Change]) -> Vec<String> {
         changes
             .iter()

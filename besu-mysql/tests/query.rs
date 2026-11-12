@@ -1627,3 +1627,229 @@ async fn numeric_functions_run() {
         .unwrap();
     assert_eq!(rows[0], (25, 20, 20));
 }
+
+/// A batch runs every statement and commits them together.
+#[tokio::test]
+async fn batch_commits_every_statement() {
+    let db = setup("besu_test_batch_commits").await;
+
+    let (first, second, third) = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            db.insert(users)
+                .value(users.insert("b@example.com", "Bob", 31)),
+            db.update(users)
+                .set(users.age, 40)
+                .filter(users.email.eq("a@example.com")),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(first.rows_affected(), 1);
+    assert_eq!(second.rows_affected(), 1);
+    assert_eq!(third.rows_affected(), 1);
+
+    let all: Vec<User> = db.select(users).order_by(users.email.asc()).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].age, 40);
+    assert_eq!(all[1].age, 31);
+}
+
+/// A failure part-way through a batch leaves none of its writes behind.
+#[tokio::test]
+async fn batch_rolls_back_on_failure() {
+    let db = setup("besu_test_batch_rollback").await;
+    db.insert(users)
+        .value(users.insert("taken@example.com", "Taken", 20))
+        .await
+        .unwrap();
+
+    let result = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            // The unique index rejects this one.
+            db.insert(users)
+                .value(users.insert("taken@example.com", "Duplicate", 31)),
+            db.insert(users)
+                .value(users.insert("c@example.com", "Carol", 32)),
+        ))
+        .await;
+
+    assert!(result.is_err());
+
+    let all: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].email, "taken@example.com");
+}
+
+// ---------------------------------------------------------------------------------------
+// JSON operators and structured paths
+// ---------------------------------------------------------------------------------------
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "json_docs")]
+pub struct JsonRow {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub payload: serde_json::Value,
+}
+
+#[tokio::test]
+async fn json_paths_are_structured_and_bound() {
+    use besu::expr::{JsonPath, json_at, json_at_text, json_key_text};
+
+    let db = fresh("besu_json_paths").await;
+    db.push([json_docs.def()]).await.unwrap();
+
+    db.insert(json_docs)
+        .value(json_docs.insert(
+            1,
+            serde_json::json!({"a": 1, "user.name": "oscar", "b": {"c": [10, 20]}}),
+        ))
+        .await
+        .unwrap();
+
+    let names: Vec<String> = db
+        .select(json_docs)
+        .pick(json_at_text(
+            json_docs.payload,
+            JsonPath::root().key("user.name"),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names[0], "oscar");
+
+    let first: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_at(
+            json_docs.payload,
+            JsonPath::root().key("b").key("c").index(0),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(first[0], serde_json::json!(10));
+
+    // A bound key goes through the same path grammar, so the quoting happens once.
+    let bound: Vec<String> = db
+        .select(json_docs)
+        .pick(json_key_text(json_docs.payload, "user.name"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(bound[0], "oscar");
+}
+
+#[tokio::test]
+async fn json_operators_render_for_mysql() {
+    use besu::expr::{
+        JsonPath, contains_json, json_has_all, json_has_any, json_has_key, json_merge_patch,
+        json_overlaps, json_set, json_strip, json_value,
+    };
+
+    let db = fresh("besu_json_operators").await;
+    db.push([json_docs.def()]).await.unwrap();
+
+    db.insert(json_docs)
+        .value(json_docs.insert(1, serde_json::json!({"a": 1, "b": [1, 2]})))
+        .await
+        .unwrap();
+    db.insert(json_docs)
+        .value(json_docs.insert(2, serde_json::json!({"c": "three"})))
+        .await
+        .unwrap();
+
+    let contained: Vec<JsonRow> = db
+        .select(json_docs)
+        .filter(contains_json(
+            json_docs.payload,
+            serde_json::json!({"a": 1}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(contained.len(), 1);
+
+    let overlapping: Vec<JsonRow> = db
+        .select(json_docs)
+        .filter(json_overlaps(
+            json_docs.payload,
+            serde_json::json!({"a": 1}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(overlapping.len(), 1);
+
+    let has_key: Vec<JsonRow> = db
+        .select(json_docs)
+        .filter(json_has_key(json_docs.payload, "c"))
+        .await
+        .unwrap();
+    assert_eq!(has_key.len(), 1);
+    assert_eq!(has_key[0].id, 2);
+
+    let any: Vec<JsonRow> = db
+        .select(json_docs)
+        .filter(json_has_any(json_docs.payload, ["z", "b"]))
+        .await
+        .unwrap();
+    assert_eq!(any.len(), 1);
+
+    let all: Vec<JsonRow> = db
+        .select(json_docs)
+        .filter(json_has_all(json_docs.payload, ["a", "b"]))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+
+    // `JSON_REMOVE` under the same name PostgreSQL spells `#-`.
+    let stripped: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_strip(json_docs.payload, JsonPath::root().key("a")))
+        .filter(json_docs.id.eq(1_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(stripped[0], serde_json::json!({"b": [1, 2]}));
+
+    // `JSON_SET` creates the path when it is missing.
+    let updated: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_set(
+            json_docs.payload,
+            JsonPath::root().key("d"),
+            serde_json::json!(4),
+        ))
+        .filter(json_docs.id.eq(1_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(updated[0]["d"], serde_json::json!(4));
+
+    let scalar: Vec<String> = db
+        .select(json_docs)
+        .pick(json_value(json_docs.payload, JsonPath::root().key("c")))
+        .filter(json_docs.id.eq(2_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(scalar[0], "three");
+
+    // `JSON_QUERY` is deliberately not executed here: the 8.4 server this suite runs
+    // against rejects it with "function does not exist", even though `JSON_VALUE` beside it
+    // works. The helper still renders the MySQL spelling.
+
+    let merged: Vec<serde_json::Value> = db
+        .select(json_docs)
+        .pick(json_merge_patch(
+            json_docs.payload,
+            serde_json::json!({"a": 9}),
+        ))
+        .filter(json_docs.id.eq(1_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(merged[0]["a"], serde_json::json!(9));
+}
