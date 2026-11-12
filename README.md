@@ -1,7 +1,7 @@
 <div align="center">
     <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/besu-lockup-dark.svg">
-        <img src="assets/besu-lockup-light.svg" alt="Besu logo" height="150">
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/besu-lockup-dark.svg">
+        <img src=".github/assets/besu-lockup-light.svg" alt="Besu logo" height="150">
     </picture>
     <h1>Besu</h1>
     <p><b>A typesafe, async, database-agnostic SQL query builder for Rust</b></p>
