@@ -367,6 +367,14 @@ impl<D: Dialect> fmt::Display for Inspect<'_, D> {
                     f.write_fmt(format_args!("{ch}"))?;
                 }
                 '?' => {
+                    // A dialect with numbered placeholders never writes `?` for a parameter,
+                    // so a bare `?` here is SQL — PostgreSQL's `jsonb ? 'key'` operator. It
+                    // is only ambiguous for a dialect that spells parameters `?`, and only
+                    // there is it substituted.
+                    if D::PLACEHOLDER == crate::Placeholder::Dollar {
+                        f.write_str("?")?;
+                        continue;
+                    }
                     // Consume an optional explicit index (`?1`), which we ignore because
                     // parameters arrive in order anyway.
                     while matches!(chars.peek(), Some((_, c)) if c.is_ascii_digit()) {

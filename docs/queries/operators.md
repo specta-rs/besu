@@ -316,7 +316,7 @@ database does not have, and using it records `unsupported`.
 | `unix_timestamp`, `from_unixtime` | — | `UNIX_TIMESTAMP`, `FROM_UNIXTIME` | — |
 | `string_agg` | `STRING_AGG` | `GROUP_CONCAT(x SEPARATOR y)` | `GROUP_CONCAT` |
 | `bool_and`, `bool_or` | `BOOL_AND`, `BOOL_OR` | `MIN`, `MAX` | `MIN`, `MAX` |
-| `stddev`, `variance` | `STDDEV`, `VARIANCE` | `STDDEV`, `VARIANCE` | — |
+| `stddev`, `variance` | `STDDEV`, `VARIANCE` | `STDDEV_SAMP`, `VAR_SAMP` | — |
 | `json_agg` | `JSON_AGG` | `JSON_ARRAYAGG` | `JSON_GROUP_ARRAY` |
 | `jsonb_agg` | `JSONB_AGG` | `JSON_ARRAYAGG` | `JSON_GROUP_ARRAY` |
 | `json_object` | `JSONB_BUILD_OBJECT` | `JSON_OBJECT` | `JSON_OBJECT` |
@@ -337,8 +337,10 @@ there is no portable spelling: PostgreSQL's two-argument `log` wants `numeric`, 
 `LOG(b, x)` wants doubles, and the one-argument form means base 10 on PostgreSQL and the
 natural logarithm on MySQL.
 
-`round_to` needs a `NUMERIC` argument on PostgreSQL — a two-argument `round` over a double is
-not a function PostgreSQL has. Use it on a `Decimal` column, or `cast` the result.
+`round_to` returns a double on every dialect. PostgreSQL has no two-argument `round` over a
+double, so the dialect casts the *argument* to `numeric` itself; the result is cast back to a
+double so one Rust type decodes all three. For an exact decimal result, round a `Decimal`
+column with a cast instead.
 
 `sign` returns a whole number on every dialect, because MySQL's `SIGN` returns a `BIGINT`
 whatever the argument is; the helpers cast it so one Rust type decodes all three. `trunc`

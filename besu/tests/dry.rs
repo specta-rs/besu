@@ -1574,3 +1574,24 @@ fn a_json_path_escapes_each_dialect_correctly() {
         sql.sql()
     );
 }
+
+#[test]
+fn inspect_leaves_a_question_mark_operator_alone() {
+    // PostgreSQL spells parameters `$n`, so a bare `?` in the statement is SQL — the `jsonb ?`
+    // operator. `inspect` substituted every `?` with the next parameter, which both corrupted
+    // the text and shifted every later parameter.
+    let mut sql = besu_core::Sql::<TestDialect>::raw(r#"SELECT $1::jsonb ? 'a' AND $2 = 1"#);
+    sql.push_arg(besu::Value::Json(br#"{"a":1}"#.to_vec()));
+    sql.push_arg(besu::Value::Int(1));
+
+    let text = alloc_to_string(&sql.inspect());
+    assert!(text.contains("? 'a'"), "got: {text}");
+    assert!(text.contains("AND 1 = 1"), "got: {text}");
+}
+
+fn alloc_to_string(display: &impl core::fmt::Display) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::new();
+    let _ = write!(out, "{display}");
+    out
+}

@@ -1161,6 +1161,24 @@ async fn typed_json_paths_render_and_execute() {
         .await
         .unwrap();
     assert_eq!(value[0], serde_json::json!({ "name": "Oscar", "age": 21 }));
+
+    // A key containing a quote is part of the array literal, and the literal is a SQL string,
+    // so the quote has to be doubled or the statement is a syntax error.
+    db.insert(documents)
+        .value(documents.insert(serde_json::json!({ "it's": "quoted" })))
+        .await
+        .unwrap();
+    let quoted: Vec<String> = db
+        .select(documents)
+        .filter(besu::json_has_key(
+            documents.payload.as_expr().cast::<besu::Jsonb>(),
+            "it's",
+        ))
+        .pick(besu::json_text(documents.payload, "it's"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(quoted, ["quoted".to_string()]);
 }
 
 // ---------------------------------------------------------------------------------------

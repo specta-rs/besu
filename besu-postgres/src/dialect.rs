@@ -93,7 +93,13 @@ impl Dialect for Postgres {
                 Value::TimestampTz(_) => 'z',
                 Value::Json(_) => 'j',
                 Value::Decimal(_) => 'D',
-                Value::Array { .. } => 'A',
+                Value::Array { element, .. } => {
+                    // The element OID is part of the bytes, so it has to be part of the key:
+                    // `int8[]` and `text[]` bind differently into the same SQL text.
+                    suffix.push('A');
+                    suffix.push_str(&format!("{element:?}"));
+                    continue;
+                }
                 _ => '?',
             });
         }
