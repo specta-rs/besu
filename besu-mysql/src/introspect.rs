@@ -218,6 +218,9 @@ where
                     {
                         ty = TypeDef::Collated(Box::new(ty), collation.into());
                     }
+                    // The default has to be rendered against the column's type: MySQL
+                    // reports a literal string without the quotes the DDL needs back.
+                    let default = parse_default(default.as_deref(), &extra, &ty);
                     Column {
                         name: column_name,
                         ty,
@@ -228,7 +231,7 @@ where
                         primary_key: column_key.eq_ignore_ascii_case("PRI"),
                         // Filled in from `STATISTICS` below.
                         unique: false,
-                        default: parse_default(default.as_deref(), &extra),
+                        default,
                         generated,
                         comment: None,
                         renamed_from: None,
@@ -339,12 +342,21 @@ where
         }
 
         // InnoDB silently creates an index for a foreign key when the referencing columns
-        // are not already indexed, named after the constraint. Reporting it would make
-        // every push try to drop an index the user never wrote.
+        // are not already indexed. Reporting it would make every push try to drop an index
+        // the user never wrote. Its name is the constraint's when that was given, and the
+        // first column's when MySQL generated the constraint name itself (`*_ibfk_*`).
+        // The name has to be part of the test: when a user index already covers the
+        // columns MySQL does not create one, and that index must still be reported.
+        let auto_generated_constraint = format!("{}_ibfk_", table.name);
         if !index.unique
-            && column_names
-                .as_deref()
-                .is_some_and(|names| table.foreign_keys.iter().any(|fk| fk.columns == names))
+            && column_names.as_deref().is_some_and(|names| {
+                table.foreign_keys.iter().any(|fk| {
+                    fk.columns == names
+                        && (fk.name == index.name
+                            || (names.first().is_some_and(|first| *first == index.name)
+                                && fk.name.starts_with(&auto_generated_constraint)))
+                })
+            })
         {
             continue;
         }
@@ -710,27 +722,27 @@ fn decimal_parts(column_type: &str) -> Option<(u8, u8)> {
     Some((precision, scale.unwrap_or(0)))
 }
 
-/// Normalise a `COLUMN_DEFAULT` into the expression Besu compares defaults with.
+/// Normalise a `COLUMN_DEFAULT` into a default Besu can execute.
 ///
-/// MySQL wraps string defaults in quotes and reports the `NULL` keyword as a plain string,
-/// while an expression default comes back bare, marked by `DEFAULT_GENERATED` in `EXTRA`.
-fn parse_default(default: Option<&str>, extra: &str) -> Option<String> {
+/// `information_schema` reports a literal default as bare text — `hi` for `'hi'`,
+/// `2024-01-02` for a date, `sad` for an enum label — so a snapshot that copies it verbatim
+/// writes `DEFAULT hi`, which MySQL reads as an identifier. A literal on a string, temporal
+/// or enum column is quoted here. An expression default is marked by `DEFAULT_GENERATED` in
+/// `EXTRA` and comes back with MySQL's own escaping (`_latin1\'a\'`), which is turned back
+/// into SQL text. A real SQL `NULL` arrives as `None`, because the column is read as an
+/// `Option`; the text `NULL` is therefore the literal string.
+fn parse_default(default: Option<&str>, extra: &str, ty: &TypeDef) -> Option<String> {
     let on_update = on_update_clause(extra);
-    let base = default.map(str::trim).and_then(|default| {
-        if default.eq_ignore_ascii_case("NULL") {
-            return None;
-        }
-
-        if extra.to_ascii_lowercase().contains("default_generated") {
-            return Some(default.to_owned());
-        }
-
-        match default
-            .strip_prefix('\'')
-            .and_then(|value| value.strip_suffix('\''))
-        {
-            Some(quoted) => Some(quoted.replace("''", "'")),
-            None => Some(default.to_owned()),
+    let generated = extra.to_ascii_lowercase().contains("default_generated");
+    // The value is not trimmed: a literal default can legitimately start or end with a
+    // space, and MySQL reports it exactly as it was written.
+    let base = default.map(|default| {
+        if generated {
+            unescape_default_expression(default)
+        } else if literal_default_needs_quotes(ty) {
+            quote_default_literal(default)
+        } else {
+            default.to_owned()
         }
     });
 
@@ -745,6 +757,74 @@ fn parse_default(default: Option<&str>, extra: &str) -> Option<String> {
         (None, _) => None,
         (Some(default), None) => Some(default),
     }
+}
+
+/// Whether a literal default on this type has to be written as a quoted string.
+///
+/// Numeric, boolean, bit and binary defaults are already literals in their own spelling;
+/// text, temporal and enum defaults are the bare values MySQL reports.
+fn literal_default_needs_quotes(ty: &TypeDef) -> bool {
+    match ty {
+        TypeDef::Collated(inner, _) => literal_default_needs_quotes(inner),
+        TypeDef::Domain(def) => literal_default_needs_quotes(def.base.as_type()),
+        TypeDef::Char(_)
+        | TypeDef::VarChar(_)
+        | TypeDef::Text
+        | TypeDef::Enum(_)
+        | TypeDef::Set(_)
+        | TypeDef::Date
+        | TypeDef::Time
+        | TypeDef::TimeP(_)
+        | TypeDef::TimeTz
+        | TypeDef::TimeTzP(_)
+        | TypeDef::Timestamp
+        | TypeDef::TimestampP(_)
+        | TypeDef::TimestampTz
+        | TypeDef::TimestampTzP(_) => true,
+        _ => false,
+    }
+}
+
+/// Quote a literal default and escape it the way MySQL's SQL parser expects.
+fn quote_default_literal(value: &str) -> String {
+    // A server that already returned quotes keeps the same value after they are removed.
+    let value = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .unwrap_or(value);
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\'' => out.push_str("''"),
+            '\\' => out.push_str("\\\\"),
+            other => out.push(other),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Turn MySQL's escaped form of an expression default back into SQL text.
+///
+/// `information_schema` doubles the backslash before every quote (`_latin1\'a\'`), which is
+/// not what a `DEFAULT (...)` clause accepts. The `DEFAULT_GENERATED` expression's own
+/// parentheses are added by the DDL, not here.
+fn unescape_default_expression(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            Some('\'' | '"' | '\\') => out.push(chars.next().unwrap_or('\\')),
+            // Any other escape is not part of the quoting layer; keep it intact.
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// The `ON UPDATE ...` clause in MySQL's `EXTRA`, as SQL.
@@ -798,6 +878,85 @@ mod tests {
         assert_eq!(
             parse_type("set", "set(a,b)"),
             TypeDef::Custom("set(a,b)".into())
+        );
+    }
+
+    #[test]
+    fn a_literal_default_is_reported_as_valid_sql() {
+        // MySQL reports a literal string as bare text, so it has to be quoted before it can
+        // be written into a `DEFAULT` clause.
+        assert_eq!(
+            parse_default(Some("hi"), "", &TypeDef::VarChar(20)),
+            Some("'hi'".into())
+        );
+        assert_eq!(
+            parse_default(Some("it's"), "", &TypeDef::Text),
+            Some("'it''s'".into())
+        );
+        // A literal's own leading and trailing spaces are part of its value.
+        assert_eq!(
+            parse_default(Some("  x  "), "", &TypeDef::VarChar(10)),
+            Some("'  x  '".into())
+        );
+        assert_eq!(
+            parse_default(Some("back\\slash"), "", &TypeDef::Text),
+            Some("'back\\\\slash'".into())
+        );
+        // A literal that happens to spell `NULL` is not a SQL NULL; the latter arrives as
+        // `None` from `information_schema`.
+        assert_eq!(
+            parse_default(Some("NULL"), "", &TypeDef::VarChar(20)),
+            Some("'NULL'".into())
+        );
+        assert_eq!(parse_default(None, "", &TypeDef::VarChar(20)), None);
+        // A temporal literal is unquoted in `COLUMN_DEFAULT`.
+        assert_eq!(
+            parse_default(Some("2024-01-02"), "", &TypeDef::Date),
+            Some("'2024-01-02'".into())
+        );
+        assert_eq!(
+            parse_default(
+                Some("sad"),
+                "",
+                &TypeDef::Enum(EnumDef::owned("", ["happy", "sad"]))
+            ),
+            Some("'sad'".into())
+        );
+        // A numeric, bit or hex default is already a literal.
+        for (default, ty) in [
+            ("5", TypeDef::Int4),
+            ("1.50", TypeDef::Decimal(5, 2)),
+            ("b'1010'", TypeDef::Bit(4)),
+            ("0x6162", TypeDef::Bytes),
+            ("1", TypeDef::Bool),
+        ] {
+            assert_eq!(
+                parse_default(Some(default), "", &ty),
+                Some(default.to_owned()),
+                "{ty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expression_default_is_unescaped_and_keeps_its_on_update_clause() {
+        // `DEFAULT (concat('a','b'))` comes back with MySQL's escaped quoting.
+        assert_eq!(
+            parse_default(
+                Some("concat(_latin1\\'a\\',_latin1\\'b\\')"),
+                "DEFAULT_GENERATED",
+                &TypeDef::VarChar(20)
+            ),
+            Some("concat(_latin1'a',_latin1'b')".into())
+        );
+        // `CURRENT_TIMESTAMP(6) ON UPDATE ...` is a keyword default, not an expression.
+        assert_eq!(
+            parse_default(
+                Some("CURRENT_TIMESTAMP(6)"),
+                "DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)",
+                &TypeDef::TimestampP(6)
+            ),
+            Some("CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)".into())
         );
     }
 

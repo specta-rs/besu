@@ -148,6 +148,30 @@ impl core::fmt::Write for DecimalText {
     }
 }
 
+/// Pack a bit string the way MySQL's `BIT(n)` column reads it.
+///
+/// MySQL stores a `BIT(n)` value as an unsigned integer, so the bytes a parameter carries
+/// are interpreted as a binary number, not as a left-aligned bit sequence. `to_bytes`
+/// left-aligns the bits in `ceil(n / 8)` bytes, which is right only when the length is a
+/// multiple of eight: `BIT(12)` holding `101010101010` becomes `aaa0`, and the server sees
+/// sixteen significant bits and rejects it as too long. Shifting the packed bytes right by
+/// the padding produces `0aaa`, which is the same value right-aligned.
+fn mysql_bit_bytes(value: &BitString) -> Vec<u8> {
+    let mut bytes = value.to_bytes();
+    let padding = (8 - value.len() % 8) % 8;
+    if padding == 0 {
+        return bytes;
+    }
+    let mask = (1u8 << padding) - 1;
+    for index in (1..bytes.len()).rev() {
+        bytes[index] = (bytes[index] >> padding) | ((bytes[index - 1] & mask) << (8 - padding));
+    }
+    if let Some(first) = bytes.first_mut() {
+        *first >>= padding;
+    }
+    bytes
+}
+
 fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
     let values = sql.args();
     let mut arguments = MySqlArguments::default();
@@ -199,10 +223,10 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             // MySQL has no address type either; `TEXT` holds the canonical spelling.
             Value::Inet(v) => add(&mut arguments, v.as_str())?,
             Value::Cidr(v) => add(&mut arguments, v.as_str())?,
-            // A `BIT(n)` column is a big-endian byte string, most significant bit first. The
-            // packed bytes are what `BIT` accepts; binding them as a binary parameter is the
-            // same value as writing `b'...'` by hand.
-            Value::Bit(v) => add(&mut arguments, v.to_bytes())?,
+            // A `BIT(n)` column is an integer, so the payload is the bit pattern
+            // right-aligned in its bytes. Binding them as a binary parameter is the same
+            // value as writing `b'...'` by hand.
+            Value::Bit(v) => add(&mut arguments, mysql_bit_bytes(v))?,
             // MySQL has no range type, so the column is `TEXT` and the canonical
             // `[a,b)` spelling is exactly what is stored.
             Value::Range { range, .. } => add(&mut arguments, Value::range_text(range))?,
@@ -212,8 +236,21 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             // MySQL 8.4 has no vector type; the `[1,2,3]` text is the storage.
             Value::Vector(v) => add(&mut arguments, v.to_string())?,
             Value::Json(v) => {
-                let text = std::str::from_utf8(v).unwrap_or("null");
-                add(&mut arguments, if text.is_empty() { "null" } else { text })?
+                // JSON is text on the wire. An invalid document is a binding mistake, not a
+                // reason to store JSON `null` in its place.
+                let text = std::str::from_utf8(v).map_err(|_| {
+                    <Sqlx as Driver>::error(Error::encode(
+                        "json",
+                        "the document is not valid UTF-8",
+                    ))
+                })?;
+                if text.is_empty() {
+                    return Err(<Sqlx as Driver>::error(Error::encode(
+                        "json",
+                        "the document is empty",
+                    )));
+                }
+                add(&mut arguments, text)?
             }
             // MySQL has no array type. Binding `NULL` instead would turn a programming
             // mistake into a missing value, so the statement fails before it is sent.

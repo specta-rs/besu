@@ -146,7 +146,10 @@ impl Dialect for Postgres {
                 Value::EnumLabel(_) => 'e',
                 Value::Bytes(_) => 'x',
                 Value::Uuid(_) => 'd',
-                Value::Date(_) => 'e',
+                // A date is its own SQL type (`DATE`), just as an enum label is its own
+                // untyped shape. They must not share a character: a cached statement
+                // prepared for one would then be reused for the other.
+                Value::Date(_) => 'y',
                 Value::Time(_) => 'm',
                 Value::Timestamp(_) => 's',
                 Value::TimestampTz(_) => 'z',
@@ -346,5 +349,93 @@ impl Dialect for Postgres {
             "lead" => Named("LEAD"),
             other => return portable_function(other),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The suffix is the prepared-statement cache key, so every parameter shape has to have
+    /// its own spelling.
+    ///
+    /// `Date` and `EnumLabel` once shared the character `e`. The two are bound in different
+    /// formats (four bytes for a `DATE`, the label's UTF-8 bytes for an enum), so a statement
+    /// prepared for one and reused for the other sent bytes the server decoded as the wrong
+    /// type.
+    #[test]
+    fn every_bound_value_gets_a_distinct_statement_shape() {
+        let values = [
+            Value::Null,
+            Value::Bool(true),
+            Value::Int(1),
+            Value::UInt(1),
+            Value::UInt128(1),
+            Value::Int128(1),
+            Value::Float(1.0),
+            Value::Text("one".into()),
+            Value::EnumLabel("one".into()),
+            Value::Bytes(vec![1]),
+            Value::Uuid(uuid::Uuid::nil()),
+            Value::Date(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
+            Value::Time(chrono::NaiveTime::MIN),
+            Value::Timestamp(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+                    .unwrap()
+                    .and_time(chrono::NaiveTime::MIN),
+            ),
+            Value::TimestampTz(chrono::DateTime::UNIX_EPOCH),
+            Value::Json(br#"{"a":1}"#.to_vec()),
+            Value::Decimal("1.0".into()),
+            Value::Interval(besu_core::SqlInterval::zero()),
+            Value::Inet(besu_core::Inet::new("127.0.0.1").unwrap()),
+            Value::Cidr(besu_core::Cidr::new("10.0.0.0/8").unwrap()),
+            Value::Bit(besu_core::BitString::new("101").unwrap()),
+            Value::Range {
+                element: TypeDef::Int4,
+                range: Box::new(besu_core::Range::new(
+                    besu_core::Bound::Included(Value::Int(1)),
+                    besu_core::Bound::Excluded(Value::Int(2)),
+                )),
+            },
+            Value::Geometry(
+                besu_core::Geometry::from_hex("0101000000000000000000F03F0000000000000040")
+                    .unwrap(),
+            ),
+            Value::Vector(besu_core::Vector::new(vec![1.0])),
+            Value::Array {
+                element: TypeDef::Int4,
+                values: vec![Value::Int(1)],
+            },
+        ];
+
+        let mut seen = std::collections::BTreeMap::new();
+        for value in values {
+            let mut suffix = String::new();
+            Postgres::write_statement_suffix(&mut suffix, std::slice::from_ref(&value));
+            if let Some(previous) = seen.insert(suffix.clone(), format!("{value:?}")) {
+                panic!("`{previous}` and `{value:?}` share the statement shape `{suffix}`");
+            }
+        }
+
+        // The type of an array is part of its shape, not just that it is an array.
+        let mut integers = String::new();
+        Postgres::write_statement_suffix(
+            &mut integers,
+            &[Value::Array {
+                element: TypeDef::Int4,
+                values: Vec::new(),
+            }],
+        );
+        let mut texts = String::new();
+        Postgres::write_statement_suffix(
+            &mut texts,
+            &[Value::Array {
+                element: TypeDef::Text,
+                values: Vec::new(),
+            }],
+        );
+        assert_ne!(integers, texts);
     }
 }

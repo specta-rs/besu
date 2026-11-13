@@ -388,3 +388,146 @@ fn the_bridge_dialect_spells_like_its_inner_dialect() {
     assert!(mysql.sql().contains('?'), "{}", mysql.sql());
     assert!(!mysql.sql().contains('$'), "{}", mysql.sql());
 }
+
+// ---------------------------------------------------------------------------------------
+// The whole wire format, through JSON and back into a statement
+// ---------------------------------------------------------------------------------------
+
+/// Every value a request can carry, including the ones with no JSON number spelling.
+fn every_value() -> Vec<Value> {
+    let date = chrono::NaiveDate::from_ymd_opt(2024, 2, 29).expect("a real date");
+    let time = chrono::NaiveTime::from_hms_nano_opt(23, 59, 58, 123_456_789).expect("a real time");
+    let timestamp = date.and_time(time);
+    let timestamp_tz = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 1)
+        .expect("a real timestamp");
+
+    let mut wkb = vec![1, 1, 0, 0, 0];
+    wkb.extend_from_slice(&1.5_f64.to_le_bytes());
+    wkb.extend_from_slice(&(-2.5_f64).to_le_bytes());
+
+    vec![
+        Value::Null,
+        Value::Bool(false),
+        Value::Int(i64::MIN),
+        Value::UInt(u64::MAX),
+        Value::UInt128(u128::MAX),
+        Value::Int128(i128::MIN),
+        Value::Float(0.1),
+        Value::Float(f64::INFINITY),
+        Value::Text("héllo".to_owned()),
+        Value::EnumLabel("happy".to_owned()),
+        Value::Bytes(vec![0, 1, 254, 255]),
+        Value::Uuid(uuid::Uuid::from_u128(
+            0x1234_5678_9abc_def0_1234_5678_9abc_def0,
+        )),
+        Value::Date(date),
+        Value::Time(time),
+        Value::Timestamp(timestamp),
+        Value::TimestampTz(timestamp_tz),
+        Value::Decimal("1234.5000".to_owned()),
+        Value::Json(br#"{"a":[1,2],"b":null}"#.to_vec()),
+        Value::Array {
+            element: TypeDef::Text,
+            values: vec![Value::Text("a".to_owned()), Value::Null],
+        },
+        Value::Array {
+            element: TypeDef::Int4,
+            values: vec![
+                Value::Array {
+                    element: TypeDef::Int4,
+                    values: vec![Value::Int(1), Value::Int(2)],
+                },
+                Value::Array {
+                    element: TypeDef::Int4,
+                    values: Vec::new(),
+                },
+            ],
+        },
+        Value::Interval(besu_core::SqlInterval::new(-1, 2, 3)),
+        Value::Inet("10.0.0.1".parse::<besu_core::Inet>().expect("an address")),
+        Value::Cidr("10.0.0.0/24".parse::<besu_core::Cidr>().expect("a network")),
+        Value::Bit(besu_core::BitString::new("1010").expect("a bit string")),
+        Value::Range {
+            element: TypeDef::Int4,
+            range: Box::new(Range::new(
+                besu_core::Bound::Unbounded,
+                besu_core::Bound::Unbounded,
+            )),
+        },
+        Value::Range {
+            element: TypeDef::Text,
+            range: Box::new(Range::closed_open(
+                Value::Text("a".to_owned()),
+                Value::Text("z".to_owned()),
+            )),
+        },
+        Value::Range {
+            element: TypeDef::Int4,
+            range: Box::new(Range::empty()),
+        },
+        Value::Geometry(besu_core::Geometry::from_ewkb(wkb).expect("a point")),
+        Value::Vector(besu_core::Vector::new(vec![1.0_f32, 2.5])),
+    ]
+}
+
+/// A parameter survives being encoded, written as JSON, read back and rebuilt into a
+/// statement for the server's dialect. `Request::to_sql` is the server's first step, so a
+/// value that changes here is a value the server binds differently from what the client
+/// wrote.
+#[test]
+fn a_parameter_survives_the_wire_and_the_server_rebuild() {
+    for value in every_value() {
+        let wire = BridgeValue::from_value(value.clone()).expect("the value encodes");
+        let request = Request::query("SELECT $1", vec![wire]);
+        let json = serde_json::to_string(&request).expect("the request serialises");
+        let request: Request = serde_json::from_str(&json).expect("the request deserialises");
+
+        let sql = request
+            .to_sql::<Postgres>()
+            .unwrap_or_else(|err| panic!("{json} does not rebuild: {err}"));
+        assert_eq!(sql.args(), &[value], "{json}");
+    }
+}
+
+/// The same value, decoded straight back from its wire form rather than through a statement,
+/// and a placeholder reading for a second dialect so the rebuild is not PostgreSQL-only.
+#[test]
+fn a_parameter_survives_the_rebuild_for_every_dialect() {
+    for value in every_value() {
+        let wire = BridgeValue::from_value(value.clone()).expect("the value encodes");
+        let json = serde_json::to_string(&wire).expect("the value serialises");
+        let wire: BridgeValue = serde_json::from_str(&json).expect("the value deserialises");
+        assert_eq!(
+            wire.into_value().expect("the value decodes"),
+            value,
+            "{json}"
+        );
+    }
+
+    let request = Request::query("SELECT ?", vec![BridgeValue::Int(1)]);
+    let mysql = request
+        .to_sql::<besu_mysql::MySql>()
+        .expect("mysql rebuilds");
+    assert_eq!(mysql.args(), &[Value::Int(1)]);
+}
+
+/// A wire value that names a type it is not is an error, not a plausible-looking value.
+#[test]
+fn a_wrong_wire_tag_is_rejected() {
+    let cases = [
+        (r#"{"t":"int","v":"1"}"#, "int"),
+        (r#"{"t":"text","v":1}"#, "text"),
+        (r#"{"t":"bool","v":1}"#, "bool"),
+        (r#"{"t":"bytes","v":"not base64!"}"#, "bytes"),
+        (r#"{"t":"uint128","v":1}"#, "uint128"),
+        (r#"{"t":"float","v":"1.5"}"#, "float"),
+        (r#"{"t":"timestamp","v":"not a date"}"#, "timestamp"),
+        (r#"{"t":"nothing","v":1}"#, "nothing"),
+    ];
+    for (json, tag) in cases {
+        assert!(
+            serde_json::from_str::<BridgeValue>(json).is_err(),
+            "`{tag}` accepted {json}"
+        );
+    }
+}

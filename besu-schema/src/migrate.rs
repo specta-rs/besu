@@ -508,26 +508,42 @@ fn verify_checksums<F>(
     Ok(())
 }
 
-/// Whether the journal already has its fourth column.
+/// The query that asks whether the journal already has its fourth column.
 ///
 /// The dialects answer this differently and there is no portable spelling, so the dialect's
 /// name picks the query. Both answers are ordinary queries, which is the point: see the call
 /// site for why a failing probe is not an option.
+///
+/// The scope matters. `information_schema` spans every schema on PostgreSQL and every
+/// database on MySQL, so an unrelated application's `_besu_migrations` must not answer for
+/// this one: a `COUNT(*)` that saw its `down_checksum` would skip the `ALTER` here, and the
+/// `SELECT` that follows would then fail because this journal does not have the column.
+fn journal_column_probe(dialect: &str) -> &'static str {
+    match dialect {
+        "sqlite" => {
+            "SELECT COUNT(*) FROM pragma_table_info('_besu_migrations') WHERE name = 'down_checksum'"
+        }
+        "mysql" => concat!(
+            "SELECT COUNT(*) FROM information_schema.columns ",
+            "WHERE table_schema = DATABASE() AND table_name = '_besu_migrations' ",
+            "AND column_name = 'down_checksum'"
+        ),
+        _ => concat!(
+            "SELECT COUNT(*) FROM information_schema.columns ",
+            "WHERE table_schema = current_schema() AND table_name = '_besu_migrations' ",
+            "AND column_name = 'down_checksum'"
+        ),
+    }
+}
+
+/// Whether the journal already has its fourth column.
 async fn journal_has_down_checksum<E: Executor>(exec: &mut E) -> Result<bool, ErrorOf<E>>
 where
     i64: Decode<E::Driver>,
 {
     use besu_core::Dialect;
 
-    let sql = match <besu_core::DialectOf<E> as Dialect>::NAME {
-        "sqlite" => {
-            "SELECT COUNT(*) FROM pragma_table_info('_besu_migrations') WHERE name = 'down_checksum'"
-        }
-        _ => concat!(
-            "SELECT COUNT(*) FROM information_schema.columns ",
-            "WHERE table_name = '_besu_migrations' AND column_name = 'down_checksum'"
-        ),
-    };
+    let sql = journal_column_probe(<besu_core::DialectOf<E> as Dialect>::NAME);
 
     let rows = exec.query(&Sql::raw(sql)).await?;
     let Some(row) = rows.first() else {
@@ -619,6 +635,28 @@ mod tests {
     fn keeps_a_trailing_statement_without_a_semicolon() {
         let statements = split_statements("SELECT 1");
         assert_eq!(statements, ["SELECT 1"]);
+    }
+
+    #[test]
+    fn the_journal_probe_is_scoped_to_this_database() {
+        // `information_schema` is shared with every other schema on PostgreSQL and every
+        // other database on MySQL, so an unscoped count could see another application's
+        // journal and skip the `ALTER` that adds the column to this one.
+        let postgres = super::journal_column_probe("postgres");
+        assert!(
+            postgres.contains("table_schema = current_schema()"),
+            "{postgres}"
+        );
+
+        let mysql = super::journal_column_probe("mysql");
+        assert!(mysql.contains("table_schema = DATABASE()"), "{mysql}");
+
+        // SQLite has no information_schema: the pragma describes the one attached database.
+        let sqlite = super::journal_column_probe("sqlite");
+        assert!(
+            sqlite.contains("pragma_table_info('_besu_migrations')"),
+            "{sqlite}"
+        );
     }
 
     #[test]

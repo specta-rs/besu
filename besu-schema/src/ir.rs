@@ -106,20 +106,68 @@ impl View {
 /// to agree about what "the definition" means.
 pub fn view_body(definition: &str) -> &str {
     let trimmed = definition.trim().trim_end_matches(';').trim_end();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("create ") {
+    let header = trimmed.split_whitespace().next().unwrap_or_default();
+    if !header.eq_ignore_ascii_case("create") {
         return trimmed;
     }
-    // Find the ` AS ` that separates the header from the query. A definition written by
-    // SQLite always has one; nothing before it can contain the word in an identifier
-    // position, and the query itself comes afterwards.
+
+    /// Whether a byte continues a bare identifier, so a two-letter match inside a longer
+    /// word (`alias`) is not the `AS` keyword.
+    fn identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'.')
+    }
+
+    // Find the `AS` that separates the header from the query. It is a keyword, so it can be
+    // written with any whitespace around it — or, as SQLite stores a hand-written statement,
+    // with a newline after it. It is skipped inside a quoted name (`CREATE VIEW "a as b"`),
+    // a string and the column list (`CREATE VIEW v (a, b) AS`).
     let bytes = trimmed.as_bytes();
     let mut index = 0;
-    while index + 4 <= bytes.len() {
-        if bytes[index..index + 4].eq_ignore_ascii_case(b" as ") {
-            return trimmed[index + 4..].trim();
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        // A doubled quote is an escape, not the end of the name.
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'a' | b'A' if depth == 0 => {
+                let before = index
+                    .checked_sub(1)
+                    .is_none_or(|previous| !identifier_byte(bytes[previous]));
+                let after = bytes
+                    .get(index + 2)
+                    .is_none_or(|next| !identifier_byte(*next));
+                if before
+                    && after
+                    && bytes
+                        .get(index + 1)
+                        .is_some_and(|letter| letter.eq_ignore_ascii_case(&b's'))
+                {
+                    return trimmed[index + 2..].trim();
+                }
+                index += 1;
+            }
+            _ => index += 1,
         }
-        index += 1;
     }
     trimmed
 }
@@ -239,14 +287,67 @@ pub fn normalise_view_definition(definition: &str) -> String {
         }
     }
 
+    /// Whether the tokens read more than one table in a comma-separated `FROM` clause.
+    ///
+    /// Only a comma at the clause's own nesting level counts, so the arguments of a function
+    /// called in `FROM` and the select list's own commas do not look like sources.
+    fn comma_join(tokens: &[Token]) -> bool {
+        // Clauses that end a `FROM` list. A comma after one of them belongs to something
+        // else (a `GROUP BY` list, a window's `ORDER BY`, ...).
+        fn ends_from(word: &str) -> bool {
+            matches!(
+                word,
+                "where"
+                    | "group"
+                    | "having"
+                    | "order"
+                    | "limit"
+                    | "offset"
+                    | "union"
+                    | "except"
+                    | "intersect"
+                    | "window"
+                    | "fetch"
+                    | "for"
+                    | "returning"
+            )
+        }
+
+        let mut depth = 0usize;
+        let mut in_from = false;
+        for token in tokens {
+            match token {
+                Token::Punct('(') => depth += 1,
+                Token::Punct(')') => depth = depth.saturating_sub(1),
+                Token::Punct(',') if in_from && depth == 0 => return true,
+                Token::Word(word) if depth == 0 => {
+                    let word = word.rsplit('.').next().unwrap_or(word);
+                    if word.eq_ignore_ascii_case("from") {
+                        in_from = true;
+                    } else if ends_from(&word.to_ascii_lowercase()) {
+                        in_from = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     let tokens = tokenise(view_body(definition));
 
     // A qualifier says which table a name belongs to, which only matters once there is more
     // than one. In a single-table view it is redundant, so PostgreSQL's `users.id` folds to
     // `id`. Keeping it in a join is what stops `a.id` and `b.id` from looking equal.
+    //
+    // `JOIN` is not the only spelling of a join: `FROM a, b` reads two tables as well, and
+    // folding the qualifiers there would make `SELECT a.id FROM a, b` and `SELECT b.id FROM
+    // a, b` compare equal. A comma seen while inside a `FROM` clause is therefore treated
+    // the same way.
     let joined = tokens
         .iter()
-        .any(|token| name(token).is_some_and(|word| word.eq_ignore_ascii_case("join")));
+        .any(|token| name(token).is_some_and(|word| word.eq_ignore_ascii_case("join")))
+        || comma_join(&tokens);
     fn bare(word: &str, joined: bool) -> &str {
         if joined {
             word
@@ -256,7 +357,9 @@ pub fn normalise_view_definition(definition: &str) -> String {
     }
 
     // MySQL writes `users.id AS id`; the alias is the column's own name, so it says
-    // nothing and must not look like a change.
+    // nothing and must not look like a change. The rule only covers a select item that *is*
+    // a column: in `a + b AS b` the alias names the expression's result, and folding it away
+    // would hide a real change.
     let mut dropped = vec![false; tokens.len()];
     for index in 0..tokens.len() {
         let Some(word) = name(&tokens[index]) else {
@@ -268,11 +371,21 @@ pub fn normalise_view_definition(definition: &str) -> String {
         let Some(alias) = tokens.get(index + 1).and_then(name) else {
             continue;
         };
-        let previous = tokens[..index].iter().rev().find_map(|token| match token {
-            Token::Word(word) => Some(bare(word, joined)),
-            _ => None,
-        });
-        if previous.is_some_and(|previous| previous.eq_ignore_ascii_case(alias)) {
+        // The select item in front of the alias has to be one bare (possibly qualified)
+        // name, introduced by `SELECT`, `DISTINCT`, `ALL` or a comma. Anything else — a
+        // function call, arithmetic, a `CASE` — is an expression whose alias is meaningful.
+        let starts_item = match index.checked_sub(2).and_then(|before| tokens.get(before)) {
+            Some(Token::Punct(',')) => true,
+            Some(Token::Word(word)) => matches!(word.as_str(), "select" | "distinct" | "all"),
+            _ => false,
+        };
+        // The alias is never qualified, so compare it against the last segment of the
+        // column. Comparing against the qualified spelling (`a.id`) would keep a redundant
+        // `AS id` in every joined MySQL view and report it as changed each push.
+        let previous = index
+            .checked_sub(1)
+            .and_then(|before| name(&tokens[before]));
+        if starts_item && previous.is_some_and(|previous| previous.eq_ignore_ascii_case(alias)) {
             dropped[index] = true;
             dropped[index + 1] = true;
         }
@@ -372,7 +485,9 @@ fn view_dependencies(view: &View) -> Vec<String> {
                     }
                 }
             }
-            // A quoted identifier is a name; keep its content.
+            // A quoted identifier is a name; keep its content. A `.` between two quoted
+            // names reaches the branch below and joins them, exactly as it joins two bare
+            // ones, so `"app"."users"` stays `app.users` rather than becoming `app..users`.
             '"' | '`' => {
                 for inner in chars.by_ref() {
                     if inner == ch {
@@ -380,7 +495,6 @@ fn view_dependencies(view: &View) -> Vec<String> {
                     }
                     current.push(inner);
                 }
-                current.push('.');
             }
             ch if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' => current.push(ch),
             _ => {
@@ -1087,13 +1201,15 @@ impl Column {
     /// `normalise` folds types the dialect cannot tell apart, so a database that has a
     /// single integer type does not diff forever against a schema that distinguishes them.
     pub(crate) fn same_shape(&self, other: &Self, normalise: &dyn Fn(&TypeDef) -> TypeDef) -> bool {
-        normalise(&self.ty) == normalise(&other.ty)
+        let self_ty = normalise(&self.ty);
+        let other_ty = normalise(&other.ty);
+        self_ty == other_ty
             && self.nullable == other.nullable
             && self.auto_increment == other.auto_increment
             && self.primary_key == other.primary_key
             && self.unique == other.unique
-            && normalise_default(self.default.as_deref())
-                == normalise_default(other.default.as_deref())
+            && normalise_default_for(&self_ty, self.default.as_deref())
+                == normalise_default_for(&other_ty, other.default.as_deref())
             // `stored` is deliberately not compared. PostgreSQL has no virtual generated
             // column, so it always writes `STORED` and always reports `stored: true`; a
             // declaration asking for virtual would otherwise look different on every push
@@ -1474,15 +1590,60 @@ fn default_to_sql(value: DefaultValue) -> String {
 }
 
 /// Fold equivalent spellings of the same default together.
+///
+/// MySQL reports a string default without the quotes the declaration carries, and a literal
+/// doubles an embedded quote (`'it''s'`), so the outer quotes are dropped and the escape is
+/// undone. An empty string is a default in its own right and must not fold to "no default"
+/// — that would make adding or removing `DEFAULT ''` invisible to the differ.
 pub fn normalise_default(value: Option<&str>) -> Option<String> {
-    let value = value?.trim().trim_matches('\'').trim();
-    let lowered = value.to_ascii_lowercase();
-    let lowered = match lowered.as_str() {
-        "now()" | "current_timestamp()" | "current_timestamp" => "current_timestamp",
-        "" => return None,
-        _ => return Some(lowered),
+    let value = value?.trim();
+    let unquoted = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''));
+    let value = match unquoted {
+        Some(inner) => inner.replace("''", "'"),
+        None => value.to_owned(),
     };
-    Some(lowered.into())
+    let lowered = value.to_ascii_lowercase();
+    // MySQL reports the precision the column's type gives a keyword default
+    // (`CURRENT_TIMESTAMP(6)` on a `DATETIME(6)`), while a declaration cannot spell one. The
+    // precision is already compared as part of the type, so folding it here is what keeps
+    // `default_now` from being re-applied on every push.
+    fn keyword(value: &str) -> Option<&'static str> {
+        if matches!(value, "now()" | "current_timestamp()" | "current_timestamp") {
+            return Some("current_timestamp");
+        }
+        let (name, precision) = value.split_once('(')?;
+        let precision = precision.strip_suffix(')')?;
+        if matches!(name, "now" | "current_timestamp")
+            && !precision.is_empty()
+            && precision.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return Some("current_timestamp");
+        }
+        None
+    }
+    if let Some(keyword) = keyword(&lowered) {
+        return Some(keyword.into());
+    }
+    Some(lowered)
+}
+
+/// Fold a default against the column's type.
+///
+/// MySQL stores a boolean default as `0` or `1` whatever spelling the declaration used, so
+/// a `bool` column has to compare `FALSE` and `0` as the same default. Only a boolean column
+/// gets that fold: on a text column `'true'` and `'1'` are different values.
+fn normalise_default_for(ty: &TypeDef, value: Option<&str>) -> Option<String> {
+    let normalised = normalise_default(value)?;
+    if !matches!(ty, TypeDef::Bool) {
+        return Some(normalised);
+    }
+    Some(match normalised.as_str() {
+        "true" | "1" | "t" => "1".to_owned(),
+        "false" | "0" | "f" => "0".to_owned(),
+        _ => normalised,
+    })
 }
 
 /// Fold equivalent spellings of a `CHECK` expression together.
@@ -1498,6 +1659,7 @@ pub fn normalise_default(value: Option<&str>) -> Option<String> {
 /// meaning of `(a OR b) AND c`. A pair is removed only when it wraps the whole expression or a
 /// comparison with no boolean operator inside it, which is exactly the redundant case.
 pub fn normalise_expression(expression: &str) -> String {
+    #[derive(Clone)]
     enum Token {
         Word(String),
         Literal(String),
@@ -1534,13 +1696,15 @@ pub fn normalise_expression(expression: &str) -> String {
                     tokens.push(Token::Literal(literal));
                 }
                 // A quoted identifier is the same identifier as the bare spelling; the
-                // quote carries no meaning to the comparison.
-                '"' | '`' | '[' => {
+                // quote carries no meaning to the comparison. `[` is not a quote here:
+                // PostgreSQL spells an array literal `ARRAY[...]`, and treating the brackets
+                // as a name would hide the elements (including a literal's case) inside one
+                // opaque token.
+                '"' | '`' => {
                     flush(&mut word, &mut tokens);
-                    let close = if ch == '[' { ']' } else { ch };
                     let mut name = String::new();
                     for inner in chars.by_ref() {
-                        if inner == close {
+                        if inner == ch {
                             break;
                         }
                         name.push(inner);
@@ -1558,6 +1722,90 @@ pub fn normalise_expression(expression: &str) -> String {
         }
         flush(&mut word, &mut tokens);
         tokens
+    }
+
+    /// Rewrite PostgreSQL's deparsed spelling of `IN` into the one a declaration writes.
+    ///
+    /// The parser stores `x IN (a, b)` as `x = ANY (ARRAY[a, b])` and renders it back that
+    /// way, so the two spellings have to fold together or every check that uses an `IN` list
+    /// is dropped and re-added — destructively — on each push. `<> ALL` is `NOT IN`; the
+    /// other quantifier/operator pairs mean something different and are left alone.
+    fn fold_quantified_array(tokens: Vec<Token>) -> Vec<Token> {
+        /// Match `ANY (ARRAY[...])` at `index`, returning the range of the elements and the
+        /// index just past the closing parenthesis of the `ANY(...)` call.
+        fn array_argument(tokens: &[Token], index: usize) -> Option<(usize, usize, usize)> {
+            if !matches!(tokens.get(index + 1), Some(Token::Punct('(')))
+                || !matches!(tokens.get(index + 2), Some(Token::Word(word)) if word == "array")
+                || !matches!(tokens.get(index + 3), Some(Token::Punct('[')))
+            {
+                return None;
+            }
+            let mut depth = 0usize;
+            for cursor in index + 3..tokens.len() {
+                match tokens[cursor] {
+                    Token::Punct('[') => depth += 1,
+                    Token::Punct(']') => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            // The array literal has to be the whole argument.
+                            return match tokens.get(cursor + 1) {
+                                Some(Token::Punct(')')) => Some((index + 4, cursor, cursor + 2)),
+                                _ => None,
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+        let mut index = 0;
+        while index < tokens.len() {
+            let quantifier = match &tokens[index] {
+                Token::Word(word) if word == "any" || word == "all" => word.as_str(),
+                _ => {
+                    out.push(tokens[index].clone());
+                    index += 1;
+                    continue;
+                }
+            };
+            let Some((start, end, next)) = array_argument(&tokens, index) else {
+                out.push(tokens[index].clone());
+                index += 1;
+                continue;
+            };
+            // The operator is the last token emitted, because it comes before `ANY`/`ALL`.
+            let operators = match (quantifier, out.last()) {
+                ("any", Some(Token::Punct('='))) => Some(1),
+                ("all", Some(Token::Punct('>')))
+                    if out
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|previous| out.get(previous))
+                        .is_some_and(|token| matches!(token, Token::Punct('<'))) =>
+                {
+                    Some(2)
+                }
+                _ => None,
+            };
+            let Some(operators) = operators else {
+                out.push(tokens[index].clone());
+                index += 1;
+                continue;
+            };
+            out.truncate(out.len() - operators);
+            if operators == 2 {
+                out.push(Token::Word("not".into()));
+            }
+            out.push(Token::Word("in".into()));
+            out.push(Token::Punct('('));
+            out.extend(tokens[start..end].iter().cloned());
+            out.push(Token::Punct(')'));
+            index = next;
+        }
+        out
     }
 
     fn matching(tokens: &[Token], open: usize) -> Option<usize> {
@@ -1594,7 +1842,7 @@ pub fn normalise_expression(expression: &str) -> String {
 
     // A PostgreSQL cast is a rendering detail, not part of the expression a person wrote.
     let expression = strip_casts(expression);
-    let tokens = tokenise(&expression);
+    let tokens = fold_quantified_array(tokenise(&expression));
     let mut dropped = vec![false; tokens.len()];
 
     // A pair of parentheses that wraps the whole expression says nothing.
@@ -1616,47 +1864,100 @@ pub fn normalise_expression(expression: &str) -> String {
         dropped[close] = true;
     }
 
-    for open in 0..tokens.len() {
-        if dropped[open] || !matches!(tokens[open], Token::Punct('(')) {
-            continue;
-        }
-        let Some(close) = matching(&tokens, open) else {
-            continue;
-        };
-        if dropped[close] || !strippable(&tokens, open) {
-            continue;
-        }
-        let mut depth = 0usize;
-        let mut comparison = false;
-        let mut boolean = false;
-        for token in &tokens[open + 1..close] {
-            match token {
-                Token::Punct('(') => depth += 1,
-                Token::Punct(')') => depth = depth.saturating_sub(1),
-                Token::Punct('=' | '<' | '>' | '!') if depth == 0 => comparison = true,
-                Token::Word(word) if depth == 0 => match word.as_str() {
-                    "and" | "or" | "not" => boolean = true,
-                    "is" | "in" | "between" | "like" | "ilike" | "exists" => comparison = true,
+    // A parenthesised pair can become redundant only once the pair inside it has gone, as in
+    // `x > ((0))`, so the pass repeats until it stops folding.
+    loop {
+        let mut folded = false;
+        for open in 0..tokens.len() {
+            if dropped[open] || !matches!(tokens[open], Token::Punct('(')) {
+                continue;
+            }
+            let Some(close) = matching(&tokens, open) else {
+                continue;
+            };
+            if dropped[close] {
+                continue;
+            }
+            let mut depth = 0usize;
+            let mut comparison = false;
+            let mut boolean = false;
+            for token in &tokens[open + 1..close] {
+                match token {
+                    Token::Punct('(') => depth += 1,
+                    Token::Punct(')') => depth = depth.saturating_sub(1),
+                    Token::Punct('=' | '<' | '>' | '!') if depth == 0 => comparison = true,
+                    Token::Word(word) if depth == 0 => match word.as_str() {
+                        "and" | "or" | "not" => boolean = true,
+                        "is" | "in" | "between" | "like" | "ilike" | "exists" => {
+                            comparison = true;
+                        }
+                        _ => {}
+                    },
                     _ => {}
-                },
-                _ => {}
+                }
+            }
+            // A group of arithmetic that is directly compared is an operand: `(a + b) > 0`
+            // and `a + b > 0` are the same comparison. PostgreSQL parenthesises the left
+            // operand, so folding it is what keeps an arithmetic check from churning.
+            let compared_operand = !comparison
+                && !boolean
+                && tokens.get(close + 1).is_some_and(|token| match token {
+                    Token::Punct('=' | '<' | '>' | '!') => true,
+                    Token::Word(word) => {
+                        matches!(word.as_str(), "is" | "in" | "between" | "like" | "ilike")
+                    }
+                    _ => false,
+                });
+            // A pair around a single name or literal means nothing wherever it appears:
+            // PostgreSQL reports the numeric literal in `price > 0` as `(0)::numeric`, and
+            // the cast strip above leaves the parentheses behind. They are not a "grouping"
+            // in the sense `strippable` asks about — the token before them is the operator —
+            // so they have to be recognised separately or the check never converges.
+            //
+            // A pair directly after a word is a function call (`lower(x)`), not a grouping,
+            // unless that word is an operator keyword such as `IN`. Keeping those parens is
+            // what stops `lower(x)` from comparing equal to a column called `lowerx`.
+            let atom = {
+                let mut contents = (open + 1..close).filter(|index| !dropped[*index]);
+                let single = match (contents.next(), contents.next()) {
+                    (Some(index), None) => {
+                        matches!(tokens[index], Token::Word(_) | Token::Literal(_))
+                    }
+                    _ => false,
+                };
+                single
+                    && match open.checked_sub(1).and_then(|index| tokens.get(index)) {
+                        None => true,
+                        Some(Token::Punct(_)) | Some(Token::Literal(_)) => true,
+                        Some(Token::Word(word)) => matches!(
+                            word.as_str(),
+                            "and"
+                                | "or"
+                                | "not"
+                                | "where"
+                                | "when"
+                                | "then"
+                                | "else"
+                                | "is"
+                                | "in"
+                                | "between"
+                                | "like"
+                                | "ilike"
+                                | "any"
+                                | "all"
+                                | "some"
+                        ),
+                    }
+            };
+            if atom || (strippable(&tokens, open) && ((comparison && !boolean) || compared_operand))
+            {
+                dropped[open] = true;
+                dropped[close] = true;
+                folded = true;
             }
         }
-        // A group of arithmetic that is directly compared is an operand: `(a + b) > 0` and
-        // `a + b > 0` are the same comparison. PostgreSQL parenthesises the left operand, so
-        // folding it is what keeps an arithmetic check from churning.
-        let compared_operand = !comparison
-            && !boolean
-            && tokens.get(close + 1).is_some_and(|token| match token {
-                Token::Punct('=' | '<' | '>' | '!') => true,
-                Token::Word(word) => {
-                    matches!(word.as_str(), "is" | "in" | "between" | "like" | "ilike")
-                }
-                _ => false,
-            });
-        if (comparison && !boolean) || compared_operand {
-            dropped[open] = true;
-            dropped[close] = true;
+        if !folded {
+            break;
         }
     }
 
@@ -1855,6 +2156,21 @@ mod tests {
             "SELECT id FROM users"
         );
         assert_eq!(view_body("SELECT id FROM users"), "SELECT id FROM users");
+
+        // SQLite stores the statement exactly as it was written, so the keyword can be
+        // separated by newlines or written without the spaces the old scan required.
+        assert_eq!(
+            view_body("CREATE\nVIEW \"user_ids\"\nAS\nSELECT id\nFROM users;"),
+            "SELECT id\nFROM users"
+        );
+        assert_eq!(view_body("CREATE VIEW v AS SELECT 1"), "SELECT 1");
+
+        // `AS` inside a quoted name, a column list or a literal is not the header's.
+        assert_eq!(view_body(r#"CREATE VIEW "a as b" AS SELECT 1"#), "SELECT 1");
+        assert_eq!(view_body("CREATE VIEW v (a, b) AS SELECT 1"), "SELECT 1");
+
+        // A malformed header must not panic on the last byte.
+        assert_eq!(view_body("create A"), "create A");
     }
 
     #[test]
@@ -1882,6 +2198,75 @@ mod tests {
             normalise_view_definition("SELECT a.id FROM a JOIN b ON a.id = b.id"),
             normalise_view_definition("SELECT b.id FROM a JOIN b ON a.id = b.id")
         );
+    }
+
+    #[test]
+    fn a_comma_join_keeps_its_qualifiers_too() {
+        // `FROM a, b` reads two tables exactly as `JOIN` does. Folding the qualifier away
+        // would make a view that selects `a.id` compare equal to one that selects `b.id`.
+        assert_ne!(
+            normalise_view_definition("SELECT a.id FROM a, b WHERE a.id = b.id"),
+            normalise_view_definition("SELECT b.id FROM a, b WHERE a.id = b.id")
+        );
+        // A comma in the select list or a function's arguments is not a second source.
+        assert_eq!(
+            normalise_view_definition("SELECT a, b FROM t"),
+            normalise_view_definition("SELECT t.a, t.b FROM t")
+        );
+        assert_eq!(
+            normalise_view_definition("SELECT f(a, b) FROM t"),
+            normalise_view_definition("SELECT f(t.a, t.b) FROM t")
+        );
+    }
+
+    #[test]
+    fn a_mysql_join_alias_that_repeats_its_column_is_folded() {
+        // MySQL writes `select `a`.`id` AS `id`, ...` for a joined view, while the
+        // declaration writes the columns without an alias. Comparing against the qualified
+        // spelling would keep the alias and report the view as changed on every push.
+        assert_eq!(
+            normalise_view_definition(
+                "select `a`.`id` AS `id`, `b`.`name` AS `name` \
+                 from `a` join `b` on `a`.`id` = `b`.`id`"
+            ),
+            normalise_view_definition("SELECT a.id, b.name FROM a JOIN b ON a.id = b.id")
+        );
+
+        // An alias on an expression is not redundant, even when it repeats the last word:
+        // `SELECT a + b AS b` names the result, while `SELECT a + b` does not.
+        assert_ne!(
+            normalise_view_definition("SELECT a + b AS b FROM t"),
+            normalise_view_definition("SELECT a + b FROM t")
+        );
+        assert_ne!(
+            normalise_view_definition("SELECT coalesce(total, 0) AS total FROM t"),
+            normalise_view_definition("SELECT coalesce(total, 0) FROM t")
+        );
+    }
+
+    #[test]
+    fn a_quoted_qualified_view_dependency_is_ordered() {
+        // SQLite and MySQL quote identifiers in the definition, and a view outside the
+        // default schema is named `schema.view`. The scan has to join the quoted halves
+        // rather than produce `schema..view`, or the dependency is not found and the views
+        // are created in the wrong order.
+        let mut schema = Schema::new();
+        schema.add_view(super::View::new(
+            "app.a_second",
+            "SELECT id FROM \"app\".\"z_first\"",
+        ));
+        schema.add_view(super::View::new(
+            "app.z_first",
+            "SELECT id FROM \"app\".\"users\"",
+        ));
+        schema.views.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let names: Vec<&str> = schema
+            .ordered_views()
+            .iter()
+            .map(|view| view.name.as_str())
+            .collect();
+        assert_eq!(names, ["app.z_first", "app.a_second"]);
     }
 
     #[test]
@@ -1951,6 +2336,97 @@ mod tests {
         assert_ne!(
             normalise_expression("name = 'X'"),
             normalise_expression("name = 'x'")
+        );
+    }
+
+    #[test]
+    fn a_cast_parenthesised_literal_is_folded() {
+        use super::normalise_expression;
+
+        // PostgreSQL spells a check over a `NUMERIC` column as `(price > (0)::numeric)`.
+        // Stripping the cast leaves `(0)`, and the parentheses around a single literal are
+        // redundant wherever they appear. Without folding them the stored check never equals
+        // the declared one, so every push would report a destructive drop and re-add.
+        assert_eq!(normalise_expression("(price > (0)::numeric)"), "price>0");
+        assert_eq!(
+            normalise_expression("((total >= (0)::numeric) AND (total <= (1000)::numeric))"),
+            normalise_expression("total >= 0 AND total <= 1000")
+        );
+        // A function call's parentheses are not a redundant grouping: dropping them would
+        // make `lower(name)` compare equal to a column called `lowername`.
+        assert_ne!(
+            normalise_expression("lower(name) = 'x'"),
+            normalise_expression("lowername = 'x'")
+        );
+    }
+
+    #[test]
+    fn a_postgres_in_list_folds_to_the_declared_spelling() {
+        use super::normalise_expression;
+
+        // PostgreSQL stores `status IN ('a', 'b')` as `status = ANY (ARRAY[...])` and
+        // renders it back that way, with a cast on each literal. The declared form has to
+        // compare equal or every such check is dropped and re-added on each push.
+        assert_eq!(
+            normalise_expression("((status = ANY (ARRAY['a'::text, 'b'::text])))"),
+            normalise_expression("status IN ('a', 'b')")
+        );
+        assert_eq!(
+            normalise_expression("(status <> ALL (ARRAY['a'::text]))"),
+            normalise_expression("status NOT IN ('a')")
+        );
+
+        // Only the `=`/`ANY` and `<>`/`ALL` pairs are an `IN` list. The other quantifiers
+        // mean something else and must stay distinct.
+        assert_ne!(
+            normalise_expression("x > ANY (ARRAY[1, 2])"),
+            normalise_expression("x IN (1, 2)")
+        );
+        assert_ne!(
+            normalise_expression("x = ANY (tags)"),
+            normalise_expression("x IN (tags)")
+        );
+
+        // An array element is a literal whose case matters, not part of an identifier.
+        assert_ne!(
+            normalise_expression("x = ANY (ARRAY['A'])"),
+            normalise_expression("x = ANY (ARRAY['a'])")
+        );
+    }
+
+    #[test]
+    fn an_empty_string_default_is_a_default_of_its_own() {
+        use super::normalise_default;
+
+        assert_eq!(normalise_default(Some("''")), Some(String::new()));
+        assert_eq!(normalise_default(Some("")), Some(String::new()));
+        assert_ne!(normalise_default(Some("''")), normalise_default(None));
+
+        // MySQL reports a string default without its quotes, and a literal doubles an
+        // embedded quote; both spellings describe the same value.
+        assert_eq!(
+            normalise_default(Some("'it''s'")),
+            normalise_default(Some("it's"))
+        );
+        assert_eq!(
+            normalise_default(Some("''''")),
+            normalise_default(Some("'"))
+        );
+
+        // The keyword spellings still fold, whatever the case or parentheses.
+        assert_eq!(
+            normalise_default(Some("CURRENT_TIMESTAMP")),
+            normalise_default(Some("now()"))
+        );
+        // MySQL reports the column type's precision on the keyword default, which the
+        // declaration cannot spell; the type already carries it.
+        assert_eq!(
+            normalise_default(Some("CURRENT_TIMESTAMP(6)")),
+            normalise_default(Some("CURRENT_TIMESTAMP"))
+        );
+        assert_eq!(
+            normalise_default(Some("now(3)")),
+            normalise_default(Some("now()"))
         );
     }
 

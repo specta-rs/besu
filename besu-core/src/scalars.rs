@@ -248,46 +248,66 @@ fn add(left: i64, right: i64, text: &str) -> Result<i64, ParseValueError> {
 }
 
 /// Parse `[-]HH:MM[:SS[.ffffff]]` into microseconds.
+///
+/// The arithmetic is done in `i128` and narrowed once at the end. Doing it in `i64` would
+/// reject `i64::MIN` — the largest negative time part is one microsecond beyond `i64::MAX` in
+/// magnitude — even though [`SqlInterval`] can hold it and [`fmt::Display`] writes it.
 fn parse_time(text: &str) -> Result<i64, ParseValueError> {
+    let invalid = || ParseValueError::new(text, "an interval");
+
     let (negative, rest) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
     let mut parts = rest.split(':');
-    let hours: i64 = parts
-        .next()
-        .and_then(|part| part.parse().ok())
-        .ok_or_else(|| ParseValueError::new(text, "an interval"))?;
-    let minutes: i64 = parts
-        .next()
-        .and_then(|part| part.parse().ok())
-        .ok_or_else(|| ParseValueError::new(text, "an interval"))?;
-    let seconds = parts.next().unwrap_or("0");
-    let (whole, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
-    let whole: i64 = whole
-        .parse()
-        .map_err(|_| ParseValueError::new(text, "an interval"))?;
-    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) || fraction.len() > 6 {
-        return Err(ParseValueError::new(text, "an interval"));
-    }
-    let mut micros: i64 = if fraction.is_empty() {
-        0
-    } else {
-        fraction
-            .parse()
-            .map_err(|_| ParseValueError::new(text, "an interval"))?
+    let hours = parse_time_field(parts.next(), text)?;
+    let minutes = parse_time_field(parts.next(), text)?;
+    let seconds = match parts.next() {
+        Some(seconds) => parse_time_seconds(seconds, text)?,
+        None => 0,
     };
-    for _ in fraction.len()..6 {
-        micros *= 10;
+    // `HH:MM:SS` has three parts. A fourth would be silently dropped, so it is rejected
+    // rather than parsed as something the caller did not write.
+    if parts.next().is_some() {
+        return Err(invalid());
     }
 
-    let total = hours
-        .checked_mul(3_600_000_000)
-        .and_then(|value| value.checked_add(minutes.checked_mul(60_000_000)?))
-        .and_then(|value| value.checked_add(whole.checked_mul(1_000_000)?))
-        .and_then(|value| value.checked_add(micros))
-        .ok_or_else(|| ParseValueError::new(text, "an interval"))?;
-    Ok(if negative { -total } else { total })
+    let total = i128::from(hours) * 3_600_000_000 + i128::from(minutes) * 60_000_000 + seconds;
+    let total = if negative { -total } else { total };
+    i64::try_from(total).map_err(|_| invalid())
+}
+
+/// Parse one whole `HH` or `MM` field, which must be digits and nothing else.
+fn parse_time_field(part: Option<&str>, text: &str) -> Result<i64, ParseValueError> {
+    let part =
+        part.filter(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+    part.and_then(|part| part.parse().ok())
+        .ok_or_else(|| ParseValueError::new(text, "an interval"))
+}
+
+/// Parse the `SS[.ffffff]` field into microseconds.
+fn parse_time_seconds(seconds: &str, text: &str) -> Result<i128, ParseValueError> {
+    let invalid = || ParseValueError::new(text, "an interval");
+    let (whole, fraction) = match seconds.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (seconds, None),
+    };
+    let whole: i64 = parse_time_field(Some(whole), text)?;
+    let fraction = match fraction {
+        // A `.` with no digits after it is not a fractional part.
+        Some(fraction)
+            if fraction.is_empty()
+                || fraction.len() > 6
+                || !fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            return Err(invalid());
+        }
+        Some(fraction) => fraction,
+        None => return Ok(i128::from(whole) * 1_000_000),
+    };
+    let micros: i64 = fraction.parse().map_err(|_| invalid())?;
+    let micros = micros * 10_i64.pow(6 - u32::try_from(fraction.len()).unwrap_or(6));
+    Ok(i128::from(whole) * 1_000_000 + i128::from(micros))
 }
 
 impl From<chrono::Duration> for SqlInterval {
@@ -797,9 +817,10 @@ impl<T> Range<T> {
     /// Build a range from PostgreSQL's `[a,b)` spelling, decoding each finite bound with
     /// `parse`.
     ///
-    /// A bound wrapped in double quotes is unquoted, with `""` becoming a literal quote, so
-    /// the spelling PostgreSQL writes for a text range is understood as well as the one for a
-    /// numeric range.
+    /// A bound may be double quoted, which is how PostgreSQL writes one that contains a
+    /// character the bracket syntax uses. Inside a quoted bound a backslash escapes the next
+    /// character and `""` is one literal quote; outside quotes a backslash still escapes the
+    /// next character. Both are the spellings PostgreSQL itself writes and reads.
     pub fn parse_with<E>(
         text: &str,
         mut parse: impl FnMut(&str) -> Result<T, E>,
@@ -882,7 +903,7 @@ impl<T: FromStr> FromStr for Range<T> {
     }
 }
 
-/// Split `a,b` at the comma that is not inside a quoted bound.
+/// Split `a,b` at the comma that is not inside a quoted or backslash-escaped bound.
 fn split_bounds(text: &str) -> Option<(&str, &str)> {
     let mut quoted = false;
     let mut escaped = false;
@@ -892,7 +913,9 @@ fn split_bounds(text: &str) -> Option<(&str, &str)> {
             continue;
         }
         match ch {
-            '\\' if quoted => escaped = true,
+            // A backslash escapes the next character, inside a quoted bound and out of one,
+            // which is how PostgreSQL protects a comma that belongs to the value.
+            '\\' => escaped = true,
             '"' => quoted = !quoted,
             ',' if !quoted => return Some((&text[..index], &text[index + 1..])),
             _ => {}
@@ -901,16 +924,44 @@ fn split_bounds(text: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Strip the double quotes PostgreSQL wraps around a bound that needs them.
+/// Strip the quoting and escaping PostgreSQL wraps around a bound that needs it.
+///
+/// A quoted bound is double quoted, with a backslash escaping the next character and `""`
+/// standing for one literal quote. A backslash escapes the next character outside quotes too,
+/// which is the other spelling PostgreSQL accepts for a bound that needed no quotes.
 fn unquote(text: &str) -> String {
-    let Some(inner) = text
-        .trim()
-        .strip_prefix('"')
-        .and_then(|text| text.strip_suffix('"'))
-    else {
-        return text.trim().to_owned();
+    let text = text.trim();
+    let (inner, quoted) = match text.strip_prefix('"') {
+        Some(rest) => match rest.strip_suffix('"') {
+            Some(inner) => (inner, true),
+            None => (text, false),
+        },
+        None => (text, false),
     };
-    inner.replace("\"\"", "\"").replace("\\\\", "\\")
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                // A trailing backslash has nothing to escape; keeping it is the honest
+                // reading, and the value's own parser decides whether it is valid.
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                } else {
+                    out.push('\\');
+                }
+            }
+            '"' if quoted => {
+                // `""` inside a quoted bound is one literal quote.
+                if chars.as_str().starts_with('"') {
+                    chars.next();
+                }
+                out.push('"');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// The shape of a spatial column, as PostgreSQL's `geometry(Point,4326)` names it.
@@ -1469,6 +1520,40 @@ mod tests {
     }
 
     #[test]
+    fn a_time_part_with_fields_it_cannot_hold_is_rejected() {
+        // `HH:MM:SS` is the whole spelling. A fourth field used to be parsed and then
+        // dropped, which silently accepted a value as something it was not.
+        assert!("01:02:03:04".parse::<SqlInterval>().is_err());
+        // A fractional part needs digits on both sides of the point.
+        assert!("00:00:03.".parse::<SqlInterval>().is_err());
+        assert!("00:00:00.1234567".parse::<SqlInterval>().is_err());
+        assert!("00:00:00.abc".parse::<SqlInterval>().is_err());
+        // A field that is not digits: PostgreSQL writes a sign once, at the front.
+        assert!("1:-2:03".parse::<SqlInterval>().is_err());
+        assert!("1::03".parse::<SqlInterval>().is_err());
+        assert!(":02:03".parse::<SqlInterval>().is_err());
+        // `HH:MM` is still a time part with no seconds.
+        assert_eq!(
+            "01:30".parse::<SqlInterval>(),
+            Ok(SqlInterval::new(0, 0, 5_400_000_000))
+        );
+    }
+
+    #[test]
+    fn the_largest_time_parts_round_trip_through_their_text() {
+        // The magnitude of `i64::MIN` is one more than `i64::MAX`, so parsing it back used to
+        // overflow and reject the string `Display` itself had just written.
+        for microseconds in [i64::MIN, i64::MAX, -1, 1] {
+            let value = SqlInterval::new(0, 0, microseconds);
+            assert_eq!(
+                value.to_string().parse::<SqlInterval>(),
+                Ok(value),
+                "{microseconds}"
+            );
+        }
+    }
+
+    #[test]
     fn durations_become_intervals_without_months() {
         let interval = SqlInterval::from(chrono::Duration::seconds(90_000));
         assert_eq!(interval, SqlInterval::new(0, 1, 3_600_000_000));
@@ -1571,6 +1656,35 @@ mod tests {
             "[\"a,b\",\"c\")".parse::<Range<String>>(),
             Ok(range.clone())
         );
+    }
+
+    #[test]
+    fn a_range_bound_is_unescaped_the_way_postgres_escapes_it() {
+        let quoted = |text: &str| {
+            Range::new(
+                Bound::Included(text.to_owned()),
+                Bound::Excluded("c".to_owned()),
+            )
+        };
+        // PostgreSQL escapes a quote and a backslash inside a quoted bound with a backslash.
+        assert_eq!(
+            "[\"a\\\"b\",c)".parse::<Range<String>>(),
+            Ok(quoted("a\"b"))
+        );
+        assert_eq!(
+            "[\"a\\\\b\",c)".parse::<Range<String>>(),
+            Ok(quoted("a\\b"))
+        );
+        // A pair of quotes inside a quoted bound is also one literal quote, which PostgreSQL
+        // accepts too.
+        assert_eq!(
+            "[\"a\"\"b\",c)".parse::<Range<String>>(),
+            Ok(quoted("a\"b"))
+        );
+        // A backslash protects the delimiter outside quotes as well.
+        assert_eq!("[a\\,b,c)".parse::<Range<String>>(), Ok(quoted("a,b")));
+        // `""` is the spelling of an empty bound, and must not read as an unbounded one.
+        assert_eq!("[\"\",c)".parse::<Range<String>>(), Ok(quoted("")));
     }
 
     #[test]

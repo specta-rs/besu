@@ -448,6 +448,14 @@ fn the_database_can_be_wrapped_in_place() {
     assert_eq!(recorder.take().len(), 1);
 }
 
+/// Wrapping a prefixed database used to build a fresh `Database` around the logged driver,
+/// which dropped the tenant prefix: every table name rendered unprefixed afterwards.
+#[test]
+fn wrapping_in_place_keeps_the_table_prefix() {
+    let db = Database::prefixed(Fake::default(), "tenant_42_").logged(Policy::new());
+    assert_eq!(db.prefix(), Some("tenant_42_"));
+}
+
 /// A statement's comment is part of its text, so the event that reports the statement
 /// reports the label too — no extra field, and no way for the two to disagree.
 #[cfg(feature = "derive")]

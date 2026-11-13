@@ -161,8 +161,17 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             Value::Vector(v) => add(&mut arguments, v.to_string())?,
             // `add` takes a `&str`, and sqlx stores it as `Cow::Borrowed`, so the JSON bytes
             // are not copied. Binding the `&[u8]` instead would cost the same and lose the
-            // column's `TEXT` affinity, which JSON functions rely on.
-            Value::Json(v) => add(&mut arguments, from_utf8(v).unwrap_or("null"))?,
+            // column's `TEXT` affinity, which JSON functions rely on. Bytes that are not
+            // UTF-8 are not a JSON document, so they fail rather than becoming `NULL`.
+            Value::Json(v) => add(
+                &mut arguments,
+                from_utf8(v).map_err(|_| {
+                    <Sqlx as Driver>::error(Error::encode(
+                        value.display(),
+                        "the JSON value is not valid UTF-8",
+                    ))
+                })?,
+            )?,
             // SQLite has no array type. Binding `NULL` instead would turn a programming
             // mistake into a missing value, so the statement fails before it is sent.
             Value::Array { .. } => {
@@ -267,7 +276,16 @@ impl besu::SchemaDriver for Sqlx {
     async fn execute_statements(&self, statements: &[String]) -> Result<(), Self::Error> {
         let mut connection = self.pool.acquire().await?;
         for statement in statements {
-            sqlx::query(statement).execute(&mut *connection).await?;
+            if let Err(err) = sqlx::query(statement).execute(&mut *connection).await {
+                // A rebuild switches enforcement off at its start and on at its end. A
+                // statement that fails in between would otherwise hand the connection back
+                // to the pool with foreign keys off, silently accepting every violation.
+                // Every connection opens with them on, so that is the state to restore.
+                let _ = sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *connection)
+                    .await;
+                return Err(err);
+            }
         }
         Ok(())
     }

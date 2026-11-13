@@ -24,7 +24,7 @@ pub mod ir;
 /// Applying migration files.
 pub mod migrate;
 
-pub use ddl::Ddl;
+pub use ddl::{Ddl, normalise_schema};
 pub use diff::{Change, Safety, diff_with};
 pub use ir::{
     Check, Column, Default, Domain, Enum, ForeignKey, Generated, Index, IndexColumn, IndexKind,

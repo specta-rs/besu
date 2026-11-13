@@ -141,6 +141,12 @@ mod native;
 #[cfg(feature = "sqlx")]
 mod sqlx;
 
+/// The suffix a table rebuild gives its scratch copy.
+///
+/// `ddl` creates the new table under this name and renames it into place at the end, and
+/// `introspect` recognises a leftover one after a rebuild that failed part way through.
+pub(crate) const REBUILD_SUFFIX: &str = "__besu_tmp";
+
 pub use ddl::SQLiteDdl;
 pub use dialect::SQLite;
 #[cfg(any(feature = "sqlx", feature = "native"))]

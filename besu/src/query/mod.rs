@@ -825,7 +825,11 @@ pub(crate) fn render_order<D: Dialect>(out: &mut Sql<D>, clause: &mut OrderClaus
     if !D::SUPPORTS_NULLS_ORDER {
         if let Some(nulls) = clause.nulls {
             out.push_raw("(");
-            clause.expr.render(out);
+            // Render a copy for the `IS NULL` test: rendering moves the expression's bound
+            // values into the statement, so rendering the same node twice would bind `NULL`
+            // for every parameter the second time.
+            let mut null_test = clause.expr.clone();
+            null_test.render(out);
             out.push_raw(" IS NULL) ");
             out.push_raw(match nulls {
                 NullsOrder::First => "DESC, ",

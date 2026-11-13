@@ -38,6 +38,16 @@ pub trait Ddl {
         ty.clone()
     }
 
+    /// Fold the parts of an index this dialect cannot express, so diffing converges.
+    ///
+    /// SQLite has only b-trees and no operator classes or partial indexes; MySQL has
+    /// b-trees, `FULLTEXT` and `SPATIAL` but no operator classes or partial indexes. A
+    /// snapshot taken from PostgreSQL and pushed to either would otherwise report a
+    /// `DropIndex`/`AddIndex` pair on every push. The default is the identity.
+    fn normalise_index(&self, index: &Index) -> Index {
+        index.clone()
+    }
+
     /// The full definition of a column, as it appears in `CREATE TABLE`.
     ///
     /// `inline_pk` is true when the table has exactly one primary key column, which is when
@@ -385,6 +395,17 @@ pub trait Ddl {
         false
     }
 
+    /// Whether the dialect has standalone sequences.
+    ///
+    /// Only PostgreSQL does. SQLite and MySQL have auto-increment columns but no sequence
+    /// object a schema can create, so `push` leaves [`Schema::sequences`] out of the
+    /// comparison for a dialect that cannot express them. Without that, a PostgreSQL
+    /// snapshot pushed to SQLite or MySQL would report a `CreateSequence` on every push even
+    /// though no statement is ever rendered for it.
+    fn expresses_sequences(&self) -> bool {
+        false
+    }
+
     /// Statements that create a domain.
     ///
     /// The default returns nothing; see [`Ddl::expresses_domains`].
@@ -624,9 +645,49 @@ pub trait Ddl {
     /// `ALTER TABLE ... ALTER COLUMN`: the change carries both the old and the new column.
     /// A dialect that has to rebuild the whole table also needs the table's other columns,
     /// and no [`Change`] carries those, so it overrides this instead. The default ignores
-    /// the schemas and defers to [`Ddl::apply`].
-    fn apply_with(&self, changes: &[Change], _current: &Schema, _desired: &Schema) -> Vec<String> {
-        self.apply(changes)
+    /// the schemas except for one case: a view that changes between plain and materialised
+    /// has to be dropped with the spelling of the object that exists, and only the schema
+    /// says what that is.
+    fn apply_with(&self, changes: &[Change], current: &Schema, _desired: &Schema) -> Vec<String> {
+        let mut statements = Vec::new();
+        for change in changes {
+            if let Change::ReplaceView(view) = change
+                && let Some(existing) = current.view(&view.name)
+                && existing.materialised != view.materialised
+            {
+                // `CREATE OR REPLACE` cannot turn one kind into the other, and a
+                // `DROP MATERIALIZED VIEW` against a plain view (or the reverse) fails.
+                statements.extend(self.drop_view(&existing.name, existing.materialised));
+                statements.extend(self.create_view(view));
+                continue;
+            }
+            statements.extend(self.change(change));
+        }
+        statements
+    }
+}
+
+/// Fold a schema into the shape this dialect can actually represent.
+///
+/// A snapshot is dialect-independent, so one taken from PostgreSQL can name a sequence, a
+/// domain, a named enum or a GIN index that SQLite or MySQL has no object for. Leaving those
+/// in a diff makes `push` report a change it can never apply, on every run. This helper
+/// removes or folds exactly those parts using the dialect's own capability methods, and both
+/// `push` and the CLI's `--dry-run`/`generate` paths use it so they agree.
+pub fn normalise_schema<D: Ddl>(ddl: &D, schema: &mut Schema) {
+    if ddl.inline_enums() {
+        schema.enums.clear();
+    }
+    if !ddl.expresses_domains() {
+        schema.domains.clear();
+    }
+    if !ddl.expresses_sequences() {
+        schema.sequences.clear();
+    }
+    for table in &mut schema.tables {
+        for index in &mut table.indexes {
+            *index = ddl.normalise_index(index);
+        }
     }
 }
 
@@ -670,6 +731,25 @@ mod tests {
         fn column_sql(&self, column: &Column, _inline_pk: bool) -> String {
             self.quote(&column.name)
         }
+    }
+
+    #[test]
+    fn normalising_a_schema_drops_what_the_dialect_cannot_express() {
+        let mut schema = Schema {
+            tables: vec![accounts(Vec::new())],
+            sequences: vec![Sequence::new("orders_seq")],
+            domains: vec![Domain {
+                name: "positive".into(),
+                base: TypeDef::Int8,
+            }],
+            ..Schema::default()
+        };
+
+        // `TestDdl` leaves every optional object at its default: no domains and no
+        // standalone sequences. Both lists must therefore disappear before the diff.
+        normalise_schema(&TestDdl, &mut schema);
+        assert!(schema.sequences.is_empty());
+        assert!(schema.domains.is_empty());
     }
 
     #[test]
@@ -822,6 +902,49 @@ mod tests {
                 r#"CREATE TYPE "mood" AS ENUM ('happy', 'meh', 'sad')"#,
                 r#"CREATE TABLE "reviews" ("mood" "mood")"#,
             ]
+        );
+    }
+
+    #[test]
+    fn a_view_that_changes_between_plain_and_materialised_is_dropped_as_it_exists() {
+        // `CREATE OR REPLACE` cannot change a view's kind, and dropping with the desired
+        // kind fails: a `DROP MATERIALIZED VIEW` against a plain view (or the reverse) is
+        // an error. The plan has to drop the object that is there and create the wanted one.
+        let mut current = Schema::new();
+        current.add_view(View::new("daily", "SELECT 1"));
+
+        let mut materialised = View::new("daily", "SELECT 1");
+        materialised.materialised = true;
+        let mut desired = Schema::new();
+        desired.add_view(materialised);
+
+        let changes = crate::diff::diff(&current, &desired);
+        assert!(matches!(&changes[..], [Change::ReplaceView(_)]));
+        assert_eq!(
+            TestDdl.apply_with(&changes, &current, &desired),
+            [
+                r#"DROP VIEW "daily""#,
+                r#"CREATE MATERIALIZED VIEW "daily" AS SELECT 1"#,
+            ]
+        );
+
+        // The other direction drops the materialised object with its own spelling.
+        let changes = crate::diff::diff(&desired, &current);
+        assert_eq!(
+            TestDdl.apply_with(&changes, &desired, &current),
+            [
+                r#"DROP MATERIALIZED VIEW "daily""#,
+                r#"CREATE VIEW "daily" AS SELECT 1"#,
+            ]
+        );
+
+        // A same-kind replacement still uses the dialect's `replace_view`.
+        let mut changed = current.clone();
+        changed.views[0].definition = "SELECT 2".into();
+        let changes = crate::diff::diff(&current, &changed);
+        assert_eq!(
+            TestDdl.apply_with(&changes, &current, &changed),
+            [r#"CREATE OR REPLACE VIEW "daily" AS SELECT 2"#]
         );
     }
 }

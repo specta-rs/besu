@@ -400,6 +400,13 @@ fn worker(connection: Connection, receiver: mpsc::Receiver<Request>) {
                     // connection state the next statement sees, which is why the table
                     // rebuild can turn foreign keys off and back on in one request.
                     if let Err(err) = connection.execute_batch(statement) {
+                        // A rebuild switches enforcement off at its start and on at its end.
+                        // A statement that fails in between would leave the connection with
+                        // foreign keys off for the rest of its life, silently accepting
+                        // every violation, so restore the state every connection opens with
+                        // before replying. The two statements are independent, so the
+                        // original error is the one worth reporting.
+                        let _ = connection.execute_batch("PRAGMA foreign_keys = ON");
                         result = Err(err.into());
                         break;
                     }
@@ -733,7 +740,18 @@ fn arguments(sql: &Sql<SQLite>) -> Result<Vec<SqlValue>, NativeError> {
             Value::TimestampTz(v) => {
                 SqlValue::Text(v.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false))
             }
-            Value::Json(v) => SqlValue::Text(std::str::from_utf8(v).unwrap_or("null").to_owned()),
+            // Binding `NULL` or an empty string would turn a programming mistake into a
+            // missing value, so bytes that are not UTF-8 fail before the statement runs.
+            Value::Json(v) => SqlValue::Text(
+                std::str::from_utf8(v)
+                    .map_err(|_| {
+                        NativeError::Core(Error::encode(
+                            value.display(),
+                            "the JSON value is not valid UTF-8",
+                        ))
+                    })?
+                    .to_owned(),
+            ),
             Value::Interval(v) => SqlValue::Text(v.to_string()),
             Value::Inet(v) => SqlValue::Text(v.as_str().to_owned()),
             Value::Cidr(v) => SqlValue::Text(v.as_str().to_owned()),

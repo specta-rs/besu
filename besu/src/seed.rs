@@ -678,7 +678,7 @@ impl<Dr: TransactionDriver, T: Seedable> SeedPlan<Dr> for TablePlan<T> {
                     &values,
                 );
                 generated.push(SeedRow::<T::Insert> {
-                    values: pad_to_row(T::DEF, <T::Insert as Insertable>::COLUMNS, values),
+                    values,
                     phantom: PhantomData,
                 });
             }
@@ -694,33 +694,6 @@ impl<Dr: TransactionDriver, T: Seedable> SeedPlan<Dr> for TablePlan<T> {
             Ok(count)
         })
     }
-}
-
-/// Expand an insert struct's values to one entry per table column.
-///
-/// The insert struct omits columns the database computes, while the statement's value buffer
-/// is indexed by [`TableDef::columns`]. Padding the computed positions with `None` keeps the
-/// two aligned; the insert builder leaves an all-`None` column out of the statement, which is
-/// exactly the behaviour a generated column needs.
-fn pad_to_row(
-    def: &'static TableDef,
-    columns: &'static [&'static str],
-    values: Vec<Option<Value>>,
-) -> Vec<Option<Value>> {
-    if def.columns.len() == columns.len() {
-        return values;
-    }
-
-    let mut values = values.into_iter();
-    let mut out = Vec::with_capacity(def.columns.len());
-    for column in def.columns {
-        if columns.contains(&column.name) {
-            out.push(values.next().unwrap_or(None));
-        } else {
-            out.push(None);
-        }
-    }
-    out
 }
 
 /// A row already converted to bound values, so an override can be applied by name.
@@ -926,13 +899,13 @@ string_length_seed!(VarChar, N);
 
 impl<const PRECISION: u8, const SCALE: u8> SeedValue for Decimal<PRECISION, SCALE> {
     fn generate(rng: &mut Rng, _column: &SeedColumn) -> String {
-        decimal_text(rng, SCALE, None)
+        decimal_text(rng, PRECISION, SCALE, None)
     }
 
     fn generate_unique(rng: &mut Rng, column: &SeedColumn) -> String {
         // A unique decimal is told apart by its integer part, which is the row number. The
         // fractional digits stay random so the value still looks like a measurement.
-        decimal_text(rng, SCALE, Some(column.row))
+        decimal_text(rng, PRECISION, SCALE, Some(column.row))
     }
 
     fn generate_primary(rng: &mut Rng, column: &SeedColumn) -> String {
@@ -1281,22 +1254,128 @@ fn clamp(text: String, max: Option<usize>) -> String {
 
 /// Render an exact decimal with `scale` digits after the point.
 ///
-/// `unique_row` makes the integer part the row number, which is what keeps a unique decimal
-/// column distinct without abandoning the requested scale.
-fn decimal_text(rng: &mut Rng, scale: u8, unique_row: Option<usize>) -> String {
+/// `precision` bounds the whole part: `DECIMAL(5, 2)` can hold at most `999.99`, so a random
+/// value has to stay inside the declaration the schema will enforce. `unique_row` makes the
+/// integer part the row number, which is what keeps a unique decimal column distinct without
+/// abandoning the requested scale.
+fn decimal_text(rng: &mut Rng, precision: u8, scale: u8, unique_row: Option<usize>) -> String {
+    let whole_limit = decimal_whole_limit(precision, scale);
     let whole = match unique_row {
-        Some(row) => (row + 1) as u64,
-        None => 1 + rng.next_u64() % 100_000,
+        // The row number is the discriminator. A type too narrow to hold every row is the
+        // same limitation a narrow integer has; the insert reports the collision.
+        Some(row) if whole_limit > 1 => (row as u64).wrapping_add(1) % whole_limit,
+        Some(_) => 0,
+        None => rng.next_u64() % whole_limit,
     };
     if scale == 0 {
         return whole.to_string();
     }
 
     let digits = usize::from(scale.min(18));
-    let fraction = rng.next_u64() % 10_u64.pow(digits as u32);
+    let modulus = 10_u64.pow(digits as u32);
+    let fraction = match unique_row {
+        // There is no integer digit to put the counter in (`DECIMAL(2, 2)`), so the
+        // fractional digits carry it instead.
+        Some(row) if whole_limit <= 1 => (row as u64) % modulus,
+        _ => rng.next_u64() % modulus,
+    };
     let mut fraction = alloc::format!("{fraction:0width$}", width = digits);
     while fraction.len() < usize::from(scale) {
         fraction.push('0');
     }
     alloc::format!("{whole}.{fraction}")
+}
+
+/// The largest whole part a `DECIMAL(precision, scale)` can hold, plus one.
+///
+/// A precision of zero is a dialect's "unconstrained numeric", so it keeps the old, wider
+/// range instead of collapsing every value to zero.
+fn decimal_whole_limit(precision: u8, scale: u8) -> u64 {
+    if precision == 0 {
+        return 100_000;
+    }
+    let digits = usize::from(precision.saturating_sub(scale));
+    if digits == 0 {
+        return 1;
+    }
+    10_u64.checked_pow(digits as u32).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// A generated decimal must be representable by the declaration it was generated for.
+    fn assert_fits(text: &str, precision: u8, scale: u8) {
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        assert_eq!(
+            fraction.len(),
+            usize::from(scale),
+            "`{text}` has the wrong number of fractional digits for DECIMAL({precision}, {scale})"
+        );
+        assert!(!whole.is_empty(), "`{text}` has no integer part");
+        assert!(
+            whole.bytes().all(|byte| byte.is_ascii_digit()),
+            "`{text}` is not a decimal"
+        );
+        if precision != 0 {
+            let integer_digits = usize::from(precision.saturating_sub(scale));
+            let bare = whole.trim_start_matches('0');
+            assert!(
+                bare.len() <= integer_digits,
+                "`{text}` overflows the integer part of DECIMAL({precision}, {scale})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generated_decimal_fits_its_precision() {
+        let mut rng = Rng::new(0);
+        for row in 0..100 {
+            let value = <Decimal<5, 2> as SeedValue>::generate(
+                &mut rng,
+                &SeedColumn::new("amount", row, false),
+            );
+            assert_fits(&value, 5, 2);
+
+            let value = <Decimal<2, 2> as SeedValue>::generate(
+                &mut rng,
+                &SeedColumn::new("amount", row, false),
+            );
+            assert_fits(&value, 2, 2);
+
+            let value = <Decimal<3, 0> as SeedValue>::generate(
+                &mut rng,
+                &SeedColumn::new("amount", row, false),
+            );
+            assert_fits(&value, 3, 0);
+        }
+    }
+
+    #[test]
+    fn a_unique_decimal_fits_and_does_not_collide() {
+        let mut values = HashSet::new();
+        for row in 0..100 {
+            let mut rng = Rng::new(row as u64);
+            let value = <Decimal<5, 2> as SeedValue>::generate_unique(
+                &mut rng,
+                &SeedColumn::new("amount", row, true),
+            );
+            assert_fits(&value, 5, 2);
+            assert!(values.insert(value), "row {row} repeated a unique decimal");
+        }
+
+        // With no integer digit to hold the counter, the fractional digits carry it.
+        let mut values = HashSet::new();
+        for row in 0..50 {
+            let mut rng = Rng::new(row as u64);
+            let value = <Decimal<2, 2> as SeedValue>::generate_unique(
+                &mut rng,
+                &SeedColumn::new("amount", row, true),
+            );
+            assert_fits(&value, 2, 2);
+            assert!(values.insert(value), "row {row} repeated a unique decimal");
+        }
+    }
 }

@@ -578,3 +578,60 @@ async fn an_index_is_a_b_tree() {
     );
     assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
+
+/// A rebuild turns foreign keys off for the length of the statement list and back on at its
+/// end. A statement that fails in between used to hand the pooled connection back with
+/// enforcement still off, so every later statement silently accepted a violation.
+#[tokio::test]
+async fn a_failed_rebuild_restores_foreign_keys() {
+    // One connection, so the statement list that fails and the `PRAGMA` that reads the
+    // setting afterwards use the same one.
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!("CREATE TABLE parent (id INTEGER PRIMARY KEY)"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent (id))"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE people (id INTEGER PRIMARY KEY, nickname TEXT)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO people (id, nickname) VALUES (1, 'Ada')"))
+        .await
+        .unwrap();
+
+    // A rebuild (the nullable change) plus a new `NOT NULL` column with no default: the copy
+    // has no value for the column, so the rebuild fails after it created its scratch table.
+    let current: Schema = db.introspect().await.unwrap();
+    let mut doomed = current.clone();
+    let table = doomed.table_mut("people").unwrap();
+    table.columns[1].nullable = false;
+    let mut required = table.columns[0].clone();
+    required.name = "required".to_owned();
+    required.nullable = false;
+    required.primary_key = false;
+    required.auto_increment = false;
+    table.columns.push(required);
+
+    assert!(db.push_schema(&doomed).await.is_err());
+
+    let enabled: Vec<(i64,)> = db.execute(sql!("PRAGMA foreign_keys")).all().await.unwrap();
+    assert_eq!(enabled, [(1,)], "a failed rebuild must restore the pragma");
+
+    let violation = db
+        .execute(sql!("INSERT INTO child (id, parent_id) VALUES (9, 999)"))
+        .await;
+    assert!(violation.is_err(), "foreign keys must still be enforced");
+
+    // The scratch table is not reported while the table it copies still exists, so a fixed
+    // diff can be pushed without dropping it by hand.
+    let introspected: Schema = db.introspect().await.unwrap();
+    assert!(introspected.table("people__besu_tmp").is_none());
+    let mut fixed = current.clone();
+    fixed.table_mut("people").unwrap().columns[1].nullable = false;
+    db.push_schema(&fixed).await.unwrap();
+}

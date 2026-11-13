@@ -694,4 +694,93 @@ mod tests {
             assert_eq!(decoded, ty, "{json}");
         }
     }
+
+    #[test]
+    fn every_type_survives_a_serde_round_trip() {
+        // A snapshot is written as JSON and read back as `owned` types, so every variant has
+        // to compare equal to itself once it has been through the wire — including the ones
+        // holding a `Cow`, a boxed type or a nested type reference.
+        let types = [
+            TypeDef::Bool,
+            TypeDef::Int2,
+            TypeDef::Int4,
+            TypeDef::Int8,
+            TypeDef::UInt(8),
+            TypeDef::Float4,
+            TypeDef::Float8,
+            TypeDef::Text,
+            TypeDef::Char(5),
+            TypeDef::VarChar(7),
+            TypeDef::Bytes,
+            TypeDef::Uuid,
+            TypeDef::Json,
+            TypeDef::Jsonb,
+            TypeDef::Date,
+            TypeDef::Time,
+            TypeDef::TimeP(3),
+            TypeDef::TimeTz,
+            TypeDef::TimeTzP(2),
+            TypeDef::Timestamp,
+            TypeDef::TimestampP(4),
+            TypeDef::TimestampTz,
+            TypeDef::TimestampTzP(1),
+            TypeDef::Decimal(10, 2),
+            TypeDef::Bit(8),
+            TypeDef::VarBit(0),
+            TypeDef::Interval,
+            TypeDef::Inet,
+            TypeDef::Cidr,
+            TypeDef::Collated(Box::new(TypeDef::Text), "C".into()),
+            TypeDef::Array(TypeRef::from_static(&TypeDef::Int4)),
+            TypeDef::Array(TypeRef::owned(TypeDef::Array(TypeRef::owned(
+                TypeDef::Text,
+            )))),
+            TypeDef::Range(TypeRef::from_static(&TypeDef::Date)),
+            TypeDef::Geometry {
+                kind: crate::scalars::GeometryKind::Point,
+                srid: Some(4326),
+            },
+            TypeDef::Geography {
+                kind: crate::scalars::GeometryKind::Geometry,
+                srid: None,
+            },
+            TypeDef::Vector(0),
+            TypeDef::Enum(EnumDef::new("mood", &["a", "b"])),
+            TypeDef::Set(EnumLabels::from_static(&["read", "write"])),
+            TypeDef::Domain(DomainDef::new("positive", &TypeDef::Int4)),
+            TypeDef::Custom("citext".into()),
+        ];
+        for ty in &types {
+            let json = serde_json::to_string(ty).expect("the type must serialise");
+            let decoded: TypeDef = serde_json::from_str(&json).expect("the type must deserialise");
+            assert_eq!(&decoded, ty, "{json}");
+
+            use core::hash::{Hash as _, Hasher as _};
+            let mut before = std::hash::DefaultHasher::new();
+            ty.hash(&mut before);
+            let mut after = std::hash::DefaultHasher::new();
+            decoded.hash(&mut after);
+            assert_eq!(before.finish(), after.finish(), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_nested_type_reference_compares_and_hashes_by_its_type() {
+        // An array of an array is the deepest holding the two shapes of `TypeRef` can nest,
+        // and introspection builds every level as owned while a declaration borrows.
+        static INNER: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::Int4));
+        static BORROWED: TypeDef = TypeDef::Array(TypeRef::from_static(&INNER));
+        let borrowed = BORROWED.clone();
+        let owned = TypeDef::Array(TypeRef::owned(TypeDef::Array(TypeRef::owned(
+            TypeDef::Int4,
+        ))));
+        assert_eq!(borrowed, owned);
+
+        use core::hash::{Hash as _, Hasher as _};
+        let mut a = std::hash::DefaultHasher::new();
+        borrowed.hash(&mut a);
+        let mut b = std::hash::DefaultHasher::new();
+        owned.hash(&mut b);
+        assert_eq!(a.finish(), b.finish());
+    }
 }

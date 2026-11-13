@@ -2089,3 +2089,22 @@ async fn self_join_with_two_aliases() {
     assert_eq!(rows[1].0.name, "Carol");
     assert_eq!(rows[1].1.name, "Bob");
 }
+
+/// A `Value::Json` that is not valid UTF-8 is not a JSON document: it must be reported, not
+/// bound as `NULL`.
+#[tokio::test]
+async fn a_json_parameter_that_is_not_utf8_is_rejected() {
+    use besu::Driver as _;
+    use besu_core::{Sql, Value};
+
+    let sqlx = Sqlx::memory().await.unwrap();
+    let mut statement = Sql::<besu_sqlite::SQLite>::raw("SELECT ?");
+    statement.push_arg(Value::Json(vec![b'{', 0xff, b'}']));
+    let statement = statement.finish().unwrap();
+
+    let error = match sqlx.query(&statement).await {
+        Ok(_) => panic!("an invalid JSON parameter was bound"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+}

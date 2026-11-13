@@ -19,19 +19,32 @@ pub trait CliDatabase {
 
 impl CliDatabase for AnyDatabase {
     fn diff(&self, current: &Schema, desired: &Schema) -> Vec<Change> {
+        // `push` folds objects a dialect cannot express before diffing; the CLI has to do the
+        // same or `--dry-run`/`generate` would report changes that a real push never makes.
+        let mut current = current.clone();
+        let mut desired = desired.clone();
         match self.backend() {
-            Backend::Sqlite => diff_with(current, desired, &|ty| {
-                besu_sqlite::SQLiteDdl.normalise_type(ty)
-            }),
-            Backend::Postgres => diff_with(current, desired, &|ty| {
-                besu_postgres::PostgresDdl.normalise_type(ty)
-            }),
-            Backend::MySql => diff_with(current, desired, &|ty| {
-                besu_mysql::MySqlDdl.normalise_type(ty)
-            }),
+            Backend::Sqlite => {
+                let ddl = besu_sqlite::SQLiteDdl;
+                besu::schema::normalise_schema(&ddl, &mut current);
+                besu::schema::normalise_schema(&ddl, &mut desired);
+                diff_with(&current, &desired, &|ty| ddl.normalise_type(ty))
+            }
+            Backend::Postgres => {
+                let ddl = besu_postgres::PostgresDdl;
+                besu::schema::normalise_schema(&ddl, &mut current);
+                besu::schema::normalise_schema(&ddl, &mut desired);
+                diff_with(&current, &desired, &|ty| ddl.normalise_type(ty))
+            }
+            Backend::MySql => {
+                let ddl = besu_mysql::MySqlDdl;
+                besu::schema::normalise_schema(&ddl, &mut current);
+                besu::schema::normalise_schema(&ddl, &mut desired);
+                diff_with(&current, &desired, &|ty| ddl.normalise_type(ty))
+            }
             // `Backend` is `#[non_exhaustive]`: a backend the library learns about before the
             // CLI does compares types exactly, which is conservative but never wrong.
-            _ => diff_with(current, desired, &|ty| ty.clone()),
+            _ => diff_with(&current, &desired, &|ty| ty.clone()),
         }
     }
 

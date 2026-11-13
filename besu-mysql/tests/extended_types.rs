@@ -111,6 +111,52 @@ async fn every_bit_of_a_byte_round_trips() {
     }
 }
 
+/// A `BIT(n)` whose width is not a whole number of bytes.
+///
+/// MySQL stores `BIT(n)` as an integer, so the parameter is the value right-aligned in its
+/// bytes. The left-aligned packing that works for `BIT(8)` turns `BIT(12)` holding
+/// `101010101010` into `0xaaa0`, which the server rejects as too wide.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "narrow_bits")]
+pub struct NarrowBits {
+    #[besu(primary_key)]
+    pub id: i64,
+    #[besu(sql_type = "besu::Bit<12>")]
+    pub flags: BitString,
+    #[besu(sql_type = "besu::Bit<5>")]
+    pub small: BitString,
+}
+
+#[tokio::test]
+async fn a_bit_width_that_is_not_a_whole_byte_round_trips() {
+    let db = fresh("besu_narrow_bits").await;
+    db.push([narrow_bits.def()]).await.unwrap();
+    assert!(db.push([narrow_bits.def()]).await.unwrap().is_empty());
+
+    for (id, flags, small) in [
+        (1_i64, "101010101010", "10101"),
+        (2, "111111111111", "11111"),
+        (3, "100000000000", "10000"),
+    ] {
+        db.insert(narrow_bits)
+            .value(narrow_bits.insert(
+                id,
+                BitString::new(flags).unwrap(),
+                BitString::new(small).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let stored: Vec<NarrowBits> = db
+            .select(narrow_bits)
+            .filter(narrow_bits.id.eq(id))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].flags.as_str(), flags);
+        assert_eq!(stored[0].small.as_str(), small);
+    }
+}
+
 #[tokio::test]
 async fn the_set_and_bit_types_are_in_the_schema_and_introspect_back() {
     let db = fresh("besu_set_and_bit_schema").await;

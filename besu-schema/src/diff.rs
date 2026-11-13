@@ -95,7 +95,7 @@ pub enum Change {
         /// The column as it should be.
         to: Column,
     },
-    /// A table-level unique constraint is gone and must be re-created as an index.
+    /// An index was added.
     AddIndex {
         /// The table.
         table: String,
@@ -219,11 +219,23 @@ impl Change {
             // are already handed out, and rewrites the catalogue.
             Self::AlterSequence { .. } => Safety::Risky,
             Self::AlterColumn { from, to, .. } => {
+                // A drop of a uniqueness or primary-key guarantee is the same loss as the
+                // `DropUnique` this code already refuses, however it is spelled.
+                let loses_guarantee = (from.unique && !to.unique)
+                    || (from.primary_key && !to.primary_key);
+                if loses_guarantee {
+                    return Safety::Destructive;
+                }
                 if from.ty == to.ty
                     && from.nullable == to.nullable
                     && from.default == to.default
                     && from.auto_increment == to.auto_increment
                     && from.generated == to.generated
+                    // Adding `UNIQUE` or a primary key validates every existing row and
+                    // builds an index, exactly as `AddUnique` does, so it is not safe even
+                    // when no stored value changes.
+                    && from.unique == to.unique
+                    && from.primary_key == to.primary_key
                 {
                     Safety::Safe
                 } else {
@@ -470,8 +482,9 @@ pub fn diff_with(
     }
 
     // Views: a view over a table created in this same run is safe because every
-    // `CreateView` sorts after every `CreateTable`. The order among the views themselves
-    // follows their dependencies.
+    // `CreateView`/`ReplaceView` sorts after every `CreateTable`. Both are emitted in one
+    // pass over `ordered_views`, which is what keeps a replaced view from being created
+    // before a new view it now reads (or the reverse), and the stable sort preserves that.
     for view in desired.ordered_views() {
         match current.view(&view.name) {
             None => changes.push(Change::CreateView(view.clone())),
@@ -592,10 +605,15 @@ pub fn diff_with(
         // A domain can be built on an enum, so it follows the enum creation.
         Change::CreateDomain(_) => 2,
         Change::CreateTable(_) => 3,
-        Change::AddColumn { .. } => 4,
-        Change::RenameColumn { .. } => 5,
+        // A rename runs before an add: renaming `a` to `b` while adding a new `a` would
+        // otherwise try to add a column that still exists under its old name.
+        Change::RenameColumn { .. } => 4,
+        Change::AddColumn { .. } => 5,
         Change::AlterColumn { .. } => 6,
-        Change::AddEnumValue { .. } => 7,
+        // A label has to exist before any statement that can name it: a new table or column,
+        // or an altered column, whose default may be the new value. It still follows every
+        // `CreateEnum` above because the type has to exist first.
+        Change::AddEnumValue { .. } => 2,
         Change::AlterSequence { .. } => 8,
         Change::DropForeignKey { .. } => 9,
         // Dropping a check before the column it names avoids "constraint does not exist":
@@ -608,13 +626,13 @@ pub fn diff_with(
         Change::AddForeignKey { .. } => 15,
         // A check may name a column added above, so it comes after every additive change.
         Change::AddCheck { .. } => 16,
-        // A replaced view may name a column added above, and must stop naming one that is
-        // about to be dropped, so it sits between the additive and destructive tails.
-        Change::ReplaceView(_) => 17,
-        // A new view needs every table it reads, and their indexes, to exist first. The
-        // relative order among the views comes from `ordered_views` and is preserved by the
-        // stable sort.
-        Change::CreateView(_) => 18,
+        // Views come in dependency order, whether they are new or replaced. A replaced view
+        // may name a column added above and must stop naming one that is about to be
+        // dropped, so they sit between the additive and destructive tails; within that
+        // group the relative order comes from `ordered_views` and is preserved by the
+        // stable sort. Sorting every replaced view before every new one would create a
+        // replacement before a dependency it now reads.
+        Change::ReplaceView(_) | Change::CreateView(_) => 17,
         Change::DropColumn { .. } => 20,
         Change::DropTable { .. } => 21,
         // A domain's columns are gone with the table, and an enum it is built on has to
@@ -627,16 +645,6 @@ pub fn diff_with(
     });
 
     changes
-}
-
-/// The name a column used to have, if that name still exists on the live table.
-fn renamed_previous<'a>(column: &'a Column, current: &Table) -> Option<&'a str> {
-    let previous = column.renamed_from.as_deref()?;
-    if current.column(previous).is_some() && current.column(&column.name).is_none() {
-        Some(previous)
-    } else {
-        None
-    }
 }
 
 /// Whether two indexes describe the same object.
@@ -686,6 +694,7 @@ fn same_index_column(a: &crate::IndexColumn, b: &crate::IndexColumn) -> bool {
     }
 }
 
+/// Work out the column-level changes for a table that exists on both sides.
 fn diff_table(
     current: &Table,
     desired: &Table,
@@ -695,25 +704,45 @@ fn diff_table(
     let table = desired.qualified_name();
 
     // Renames first: a declared `renamed_from` turns what would be a drop plus an add into
-    // one statement that keeps the data.
+    // one statement that keeps the data. The old name is consumed by the rename, so a
+    // desired column that reuses it is a new column rather than the one being renamed away.
+    let mut renames: Vec<(&Column, &str)> = Vec::new();
     for column in &desired.columns {
         if current.column(&column.name).is_some() {
             continue;
         }
-        if let Some(previous) = &column.renamed_from
-            && current.column(previous).is_some()
+        let Some(previous) = column.renamed_from.as_deref() else {
+            continue;
+        };
+        if current.column(previous).is_none() || renames.iter().any(|(_, taken)| *taken == previous)
         {
-            changes.push(Change::RenameColumn {
-                table: table.clone(),
-                from: previous.clone(),
-                to: column.name.clone(),
-            });
+            continue;
         }
+        renames.push((column, previous));
+        changes.push(Change::RenameColumn {
+            table: table.clone(),
+            from: previous.to_owned(),
+            to: column.name.clone(),
+        });
     }
+    let moved_away = |name: &str| renames.iter().any(|(_, previous)| *previous == name);
+    let previous_of = |name: &str| {
+        renames
+            .iter()
+            .find(|(column, _)| column.name == name)
+            .map(|(_, previous)| *previous)
+    };
+    let available = |name: &str| {
+        if moved_away(name) {
+            None
+        } else {
+            current.column(name)
+        }
+    };
 
     // Added columns.
     for column in &desired.columns {
-        if current.column(&column.name).is_none() && renamed_previous(column, current).is_none() {
+        if available(&column.name).is_none() && previous_of(&column.name).is_none() {
             changes.push(Change::AddColumn {
                 table: table.clone(),
                 column: column.clone(),
@@ -728,13 +757,7 @@ fn diff_table(
     let mut removed: Vec<&Column> = current
         .columns
         .iter()
-        .filter(|column| {
-            let renamed_away = desired.columns.iter().any(|desired| {
-                desired.renamed_from.as_deref() == Some(column.name.as_str())
-                    && current.column(&desired.name).is_none()
-            });
-            desired.column(&column.name).is_none() && !renamed_away
-        })
+        .filter(|column| desired.column(&column.name).is_none() && !moved_away(&column.name))
         .collect();
     removed.sort_by_key(|column| column.generated.is_none());
 
@@ -748,21 +771,22 @@ fn diff_table(
     // Changed columns.
     for column in &desired.columns {
         let mut renamed_existing;
-        let existing = match current.column(&column.name) {
+        let existing = match available(&column.name) {
             Some(existing) => existing,
             // After a rename the definition lives under the old name, so compare against
             // that — with the column's new name in place, because that is what the table
             // will have by the time the alter runs.
-            None => match renamed_previous(column, current)
-                .and_then(|previous| current.column(previous))
-            {
-                Some(previous) => {
-                    renamed_existing = previous.clone();
-                    renamed_existing.name = column.name.clone();
-                    &renamed_existing
-                }
-                None => continue,
-            },
+            None => {
+                let Some(previous) = previous_of(&column.name) else {
+                    continue;
+                };
+                let Some(previous) = current.column(previous) else {
+                    continue;
+                };
+                renamed_existing = previous.clone();
+                renamed_existing.name = column.name.clone();
+                &renamed_existing
+            }
         };
         if !existing.same_shape(column, normalise) {
             changes.push(Change::AlterColumn {
@@ -1352,6 +1376,213 @@ mod tests {
     }
 
     #[test]
+    fn a_numeric_check_converges_despite_postgres_casts_and_parentheses() {
+        // PostgreSQL reports a check over a `NUMERIC` column as
+        // `(price > (0)::numeric)`: a cast on the literal and parentheses around both the
+        // literal and the comparison. Both are folded, so the pushed check is not dropped
+        // and re-added — which would be refused as destructive — on every push.
+        let mut current = table("prices", vec![column("price", TypeDef::Decimal(10, 2))]);
+        current
+            .checks
+            .push(check("prices_price_check", "(price > (0)::numeric)"));
+
+        let mut desired = current.clone();
+        desired.checks[0].expression = "price > 0".into();
+
+        assert!(diff(&schema(vec![current]), &schema(vec![desired])).is_empty());
+    }
+
+    #[test]
+    fn a_column_unique_change_is_not_safe() {
+        // `AlterColumn` used to compare only the stored value, so turning `UNIQUE` on or
+        // off looked `Safe`. Adding one validates every row, and removing one loses a
+        // guarantee, exactly as the `AddUnique`/`DropUnique` pair does.
+        let plain = column("email", TypeDef::Text);
+        let mut unique = plain.clone();
+        unique.unique = true;
+        let plain_schema = schema(vec![table("users", vec![plain.clone()])]);
+        let unique_schema = schema(vec![table("users", vec![unique.clone()])]);
+
+        let added = diff(&plain_schema, &unique_schema);
+        assert_eq!(
+            added,
+            [Change::AlterColumn {
+                table: "users".into(),
+                from: plain.clone(),
+                to: unique.clone(),
+            }]
+        );
+        assert_eq!(added[0].safety(), Safety::Risky);
+
+        let removed = diff(&unique_schema, &plain_schema);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].safety(), Safety::Destructive);
+
+        // The same holds for a primary-key guarantee.
+        let mut keyed = plain.clone();
+        keyed.primary_key = true;
+        let keyed_schema = schema(vec![table("users", vec![keyed])]);
+        assert_eq!(
+            diff(&plain_schema, &keyed_schema)[0].safety(),
+            Safety::Risky
+        );
+        assert_eq!(
+            diff(&keyed_schema, &plain_schema)[0].safety(),
+            Safety::Destructive
+        );
+    }
+
+    #[test]
+    fn a_column_with_an_empty_default_differs_from_one_without() {
+        // `DEFAULT ''` is a default, not "no default": folding the empty literal away made
+        // adding or removing it invisible to `push`.
+        let plain = column("label", TypeDef::Text);
+        let mut empty = plain.clone();
+        empty.default = Some("''".into());
+
+        let changes = diff(
+            &schema(vec![table("tags", vec![plain])]),
+            &schema(vec![table("tags", vec![empty])]),
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0], Change::AlterColumn { .. }));
+    }
+
+    #[test]
+    fn a_boolean_default_folds_the_numeric_spelling() {
+        // MySQL stores a `BOOL` default as `0`/`1` whatever the declaration wrote, while the
+        // declaration renders `FALSE`/`TRUE`. Without folding the pair, every push reports
+        // the same alter and `push` never converges.
+        let boolean = |default: &str| {
+            let mut column = column("published", TypeDef::Bool);
+            column.default = Some(default.into());
+            schema(vec![table("posts", vec![column])])
+        };
+        assert!(diff(&boolean("0"), &boolean("FALSE")).is_empty());
+        assert!(diff(&boolean("1"), &boolean("TRUE")).is_empty());
+        assert!(!diff(&boolean("0"), &boolean("TRUE")).is_empty());
+
+        // A text default is data, so its value is compared as written.
+        let text = |default: &str| {
+            let mut column = column("flag", TypeDef::Text);
+            column.default = Some(default.into());
+            schema(vec![table("flags", vec![column])])
+        };
+        assert!(!diff(&text("'true'"), &text("'1'")).is_empty());
+    }
+
+    #[test]
+    fn a_rename_precedes_an_add_that_reuses_the_old_name() {
+        // Renaming `a` to `b` while adding a new `a` has to run the rename first: the add
+        // would otherwise collide with the column that is still called `a`.
+        let before = schema(vec![table("things", vec![column("a", TypeDef::Int8)])]);
+        let mut renamed = column("b", TypeDef::Int8);
+        renamed.renamed_from = Some("a".into());
+        let after = schema(vec![table(
+            "things",
+            vec![renamed, column("a", TypeDef::Text)],
+        )]);
+
+        let changes = diff(&before, &after);
+        assert_eq!(
+            changes,
+            [
+                Change::RenameColumn {
+                    table: "things".into(),
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+                Change::AddColumn {
+                    table: "things".into(),
+                    column: column("a", TypeDef::Text),
+                },
+            ],
+            "the old column keeps its data under the new name and `a` is a fresh column"
+        );
+    }
+
+    #[test]
+    fn a_second_rename_of_the_same_old_column_is_not_invented() {
+        // Two declarations cannot both take `a`; the first wins and the second is a new
+        // column, never a second `RENAME` that would fail.
+        let before = schema(vec![table("things", vec![column("a", TypeDef::Int8)])]);
+        let mut first = column("b", TypeDef::Int8);
+        first.renamed_from = Some("a".into());
+        let mut second = column("c", TypeDef::Int8);
+        second.renamed_from = Some("a".into());
+        let after = schema(vec![table("things", vec![first, second])]);
+
+        let changes = diff(&before, &after);
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|change| matches!(change, Change::RenameColumn { .. }))
+                .count(),
+            1,
+            "got {changes:?}"
+        );
+        assert!(matches!(
+            changes.last(),
+            Some(Change::AddColumn { column, .. }) if column.name == "c"
+        ));
+    }
+
+    #[test]
+    fn an_added_enum_value_precedes_the_objects_that_can_name_it() {
+        // The new label has to exist before a default that names it is written, so the
+        // `ALTER TYPE ... ADD VALUE` cannot sort after the `CREATE TABLE` or `ADD COLUMN`
+        // that uses it.
+        let current = Schema {
+            tables: vec![table("reviews", vec![column("id", TypeDef::Int8)])],
+            enums: vec![mood(&["sad"])],
+            views: Vec::new(),
+            ..Schema::default()
+        };
+        let mut created = column("mood", TypeDef::Custom("mood".into()));
+        created.default = Some("'happy'".into());
+        let mut added = column("mood", TypeDef::Custom("mood".into()));
+        added.default = Some("'happy'".into());
+        let desired = Schema {
+            tables: vec![
+                table("reviews", vec![column("id", TypeDef::Int8)]),
+                table("replies", vec![added]),
+                table("notes", vec![created]),
+            ],
+            enums: vec![mood(&["sad", "happy"])],
+            views: Vec::new(),
+            ..Schema::default()
+        };
+
+        let changes = diff(&current, &desired);
+        let added_value = changes
+            .iter()
+            .position(|change| matches!(change, Change::AddEnumValue { .. }))
+            .expect("the new label must be planned");
+        let created_table = changes
+            .iter()
+            .position(|change| matches!(change, Change::CreateTable(_)))
+            .expect("the new tables must be planned");
+        assert!(added_value < created_table, "got {changes:?}");
+
+        // The same is true for a column added to an existing table.
+        let mut desired = desired;
+        desired.tables.retain(|table| table.name == "reviews");
+        desired.tables[0]
+            .columns
+            .push(column("mood", TypeDef::Custom("mood".into())));
+        let changes = diff(&current, &desired);
+        let added_value = changes
+            .iter()
+            .position(|change| matches!(change, Change::AddEnumValue { .. }))
+            .expect("the new label must be planned");
+        let added_column = changes
+            .iter()
+            .position(|change| matches!(change, Change::AddColumn { .. }))
+            .expect("the new column must be planned");
+        assert!(added_value < added_column, "got {changes:?}");
+    }
+
+    #[test]
     fn a_changed_check_is_replaced() {
         let mut before = table("accounts", vec![column("balance", TypeDef::Int8)]);
         before
@@ -1446,6 +1677,29 @@ mod tests {
 
         assert!(diff(&current, &desired).is_empty());
         assert!(diff(&desired, &current).is_empty());
+    }
+
+    #[test]
+    fn a_replaced_view_is_ordered_after_a_new_view_it_reads() {
+        // The replacement now reads a view that does not exist yet. Emitting every
+        // replacement before every new view would try to create it against a missing
+        // dependency.
+        let mut current = schema(Vec::new());
+        current.add_view(crate::View::new("active_users", "SELECT id FROM users"));
+
+        let mut desired = current.clone();
+        desired.views[0].definition = "SELECT id FROM verified_users".into();
+        desired.add_view(crate::View::new("verified_users", "SELECT id FROM users"));
+
+        let changes = diff(&current, &desired);
+        assert!(
+            matches!(&changes[0], Change::CreateView(view) if view.name == "verified_users"),
+            "got {changes:?}"
+        );
+        assert!(
+            matches!(&changes[1], Change::ReplaceView(view) if view.name == "active_users"),
+            "got {changes:?}"
+        );
     }
 
     #[test]

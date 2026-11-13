@@ -1,7 +1,7 @@
 use besu_core::{TypeDef, Value};
-use besu_schema::{Change, Check, Column, Ddl, Schema, Table};
+use besu_schema::{Change, Check, Column, Ddl, Index, Schema, Table};
 
-use crate::SQLite;
+use crate::{REBUILD_SUFFIX, SQLite};
 
 /// DDL generation for SQLite.
 #[derive(Debug, Clone, Copy, Default)]
@@ -15,7 +15,7 @@ impl SQLiteDdl {
         // The temporary table keeps the schema, so a table in an attached database is
         // rebuilt there rather than in the main one.
         let mut temporary = desired.clone();
-        temporary.name = format!("{}__besu_tmp", desired.name);
+        temporary.name = format!("{}{REBUILD_SUFFIX}", desired.name);
 
         let mut statements = vec![
             // `DROP TABLE` would fail while another table's foreign key points at this
@@ -24,6 +24,13 @@ impl SQLiteDdl {
             // pragma inside a transaction, and `Database::push` executes statements one at
             // a time without opening one, so the setting takes effect.
             "PRAGMA foreign_keys = OFF".to_owned(),
+            // A rebuild that failed after this point left the temporary table behind, and
+            // creating it again would then be the error the next push reports. It is always
+            // this rebuild's own scratch table, so whatever is there is a leftover copy.
+            format!(
+                "DROP TABLE IF EXISTS {}",
+                self.quote_table(&temporary.qualified_name())
+            ),
             self.create_table(&temporary),
         ];
 
@@ -31,21 +38,42 @@ impl SQLiteDdl {
         // therefore not selected, and a column added by the same push keeps the default
         // that `CREATE TABLE` gave it. A generated column is never written: the database
         // computes it, and SQLite rejects an `INSERT` into one.
-        let columns: Vec<String> = desired
+        //
+        // A column the declaration renamed is copied from its old name: the rebuild is what
+        // performs the rename, so selecting the new name from the old table would fail to
+        // find it and lose the column's values.
+        let columns: Vec<(String, String)> = desired
             .columns
             .iter()
             .filter(|column| column.generated.is_none())
-            .filter(|column| current.column(&column.name).is_some())
-            .map(|column| self.quote(&column.name))
+            .filter_map(|column| {
+                if current.column(&column.name).is_some() {
+                    return Some((self.quote(&column.name), self.quote(&column.name)));
+                }
+                let previous = column.renamed_from.as_deref()?;
+                current
+                    .column(previous)
+                    .is_some()
+                    .then(|| (self.quote(&column.name), self.quote(previous)))
+            })
             .collect();
 
         // An `INSERT` with an empty column list is not valid SQL. It cannot happen for a
         // diff: an `AlterColumn` means the column exists on both sides, so at least one
         // name is always shared.
         if !columns.is_empty() {
-            let columns = columns.join(", ");
+            let target = columns
+                .iter()
+                .map(|(target, _)| target.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = columns
+                .iter()
+                .map(|(_, source)| source.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             statements.push(format!(
-                "INSERT INTO {} ({columns}) SELECT {columns} FROM {}",
+                "INSERT INTO {} ({target}) SELECT {source} FROM {}",
                 self.quote_table(&temporary.qualified_name()),
                 self.quote_table(&desired.qualified_name()),
             ));
@@ -139,6 +167,20 @@ impl Ddl for SQLiteDdl {
         }
     }
 
+    /// SQLite has only b-trees, no operator classes and no partial indexes in the IR.
+    ///
+    /// Expression indexes are supported and introspection reads them back, so the entries
+    /// themselves are kept; only the parts SQLite cannot express are folded away.
+    fn normalise_index(&self, index: &Index) -> Index {
+        let mut index = index.clone();
+        index.kind = besu_core::IndexKind::Btree;
+        index.predicate = None;
+        for column in &mut index.columns {
+            column.opclass = None;
+        }
+        index
+    }
+
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
         let mut sql = format!(
             "{} {}",
@@ -183,7 +225,18 @@ impl Ddl for SQLiteDdl {
             && let Some(default) = &column.default
         {
             sql.push_str(" DEFAULT ");
-            sql.push_str(default);
+            // An expression is only a valid default inside parentheses: SQLite reads
+            // `DEFAULT (1 + 1)` back as `1 + 1`, so the text introspection stores has no
+            // brackets, and rendering it verbatim would be a syntax error. A literal must
+            // stay bare, because `DEFAULT (0)` reads back as `0` and the bracketed spelling
+            // would differ from the declaration on every push.
+            if is_simple_default(default) {
+                sql.push_str(default);
+            } else {
+                sql.push('(');
+                sql.push_str(default);
+                sql.push(')');
+            }
         }
 
         sql
@@ -196,10 +249,10 @@ impl Ddl for SQLiteDdl {
     }
 
     fn apply_with(&self, changes: &[Change], current: &Schema, desired: &Schema) -> Vec<String> {
-        // A table that has an altered column or a changed check is rebuilt once, from its full
-        // desired definition, so every other change for that table is skipped: the rebuild
-        // already creates the desired columns, inline constraints, foreign keys and indexes,
-        // and a later `ADD COLUMN`, `ADD INDEX` or `DROP INDEX` would fail or apply twice.
+        // A table that has an altered column is rebuilt once, from its full desired
+        // definition, so every other change for that table is skipped: the rebuild already
+        // creates the desired columns, inline constraints, foreign keys and indexes, and a
+        // later `ADD COLUMN`, `ADD INDEX` or `DROP INDEX` would fail or apply twice.
         let altered: Vec<String> = changes
             .iter()
             .filter_map(|change| match change {
@@ -212,12 +265,18 @@ impl Ddl for SQLiteDdl {
                 {
                     Some(table.clone())
                 }
-                // SQLite has no `ALTER TABLE ... ADD/DROP CONSTRAINT`, so a check added,
-                // removed or changed on an existing table is applied by the same rebuild.
-                // `create_table` writes the desired checks, and the copy keeps every row.
-                Change::AddCheck { table, .. } | Change::DropCheck { table, .. } => {
-                    Some(table.clone())
-                }
+                // SQLite has no `ALTER TABLE ... ADD/DROP CONSTRAINT`, so a check, a foreign
+                // key or a multi-column unique added or removed on an existing table is
+                // applied by the same rebuild. `create_table` writes the desired ones, and
+                // the copy keeps every row. Without this the change would render as an empty
+                // statement: the constraint would silently not exist, and every later push
+                // would report it again.
+                Change::AddCheck { table, .. }
+                | Change::DropCheck { table, .. }
+                | Change::AddUnique { table, .. }
+                | Change::DropUnique { table, .. }
+                | Change::AddForeignKey { table, .. }
+                | Change::DropForeignKey { table, .. } => Some(table.clone()),
                 _ => None,
             })
             .collect();
@@ -319,23 +378,24 @@ impl Ddl for SQLiteDdl {
     }
 
     fn add_foreign_key(&self, _table: &str, _fk: &besu_schema::ForeignKey) -> String {
-        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`.
+        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`; `apply_with` notices the change and
+        // rebuilds the table, which writes the foreign key inside the new `CREATE TABLE`.
         String::new()
     }
 
     fn drop_foreign_key(&self, _table: &str, _fk: &besu_schema::ForeignKey) -> String {
+        // See `add_foreign_key`: `apply_with` rebuilds the table instead.
         String::new()
     }
 
     fn add_unique(&self, _table: &str, _unique: &besu_schema::Unique) -> String {
         // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`; a unique constraint can only be
-        // written inside `CREATE TABLE`. Adding one to an existing table therefore means
-        // rebuilding it, which `push` does not do for this change.
+        // written inside `CREATE TABLE`, so `apply_with` rebuilds the table.
         String::new()
     }
 
     fn drop_unique(&self, _table: &str, _unique: &besu_schema::Unique) -> String {
-        // See `add_unique`. Dropping the constraint would need the same rebuild.
+        // See `add_unique`: `apply_with` rebuilds the table instead.
         String::new()
     }
 
@@ -360,10 +420,90 @@ impl Ddl for SQLiteDdl {
     }
 }
 
+/// Whether `text` may follow `DEFAULT` without being parenthesised.
+///
+/// That is a literal or one of SQLite's bare keywords; anything else is an expression, and an
+/// expression default only parses inside parentheses.
+pub(crate) fn is_simple_default(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "NULL" | "TRUE" | "FALSE" | "CURRENT_DATE" | "CURRENT_TIME" | "CURRENT_TIMESTAMP"
+    ) {
+        return true;
+    }
+
+    // A string literal (`'x'`) or a blob literal (`x'00'`).
+    if text.len() >= 2 && text.starts_with('\'') && text.ends_with('\'') {
+        return true;
+    }
+    if text.len() >= 3 && (text.starts_with("x'") || text.starts_with("X'")) && text.ends_with('\'')
+    {
+        return true;
+    }
+
+    // A numeric literal, including its sign and an exponent.
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    if matches!(bytes.first(), Some(b'+') | Some(b'-')) {
+        index += 1;
+    }
+    let mut digits = 0;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+        digits += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+    if matches!(bytes.get(index), Some(b'e') | Some(b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+') | Some(b'-')) {
+            index += 1;
+        }
+        let exponent = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use besu_schema::{IndexColumn, IndexKind, Unique};
+
+    #[test]
+    fn an_index_is_folded_to_what_sqlite_can_express() {
+        let index = Index {
+            name: "search".into(),
+            columns: vec![
+                IndexColumn::column("email").with_opclass("text_pattern_ops"),
+                IndexColumn::expression("lower(name)"),
+            ],
+            unique: false,
+            kind: IndexKind::Gin,
+            predicate: Some("active".into()),
+        };
+
+        let folded = Ddl::normalise_index(&SQLiteDdl, &index);
+        assert_eq!(folded.kind, IndexKind::Btree);
+        assert_eq!(folded.predicate, None);
+        assert_eq!(folded.columns[0].opclass, None);
+        // Expression entries survive: SQLite understands them and introspection reads them.
+        assert_eq!(folded.columns[1].as_expression(), Some("lower(name)"));
+    }
 
     fn table() -> Table {
         Table {
@@ -402,11 +542,85 @@ mod tests {
 
     #[test]
     fn a_unique_cannot_be_added_or_dropped_after_the_fact() {
-        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so the change renders as nothing
-        // and only a table rebuild can apply it.
+        // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so the change itself renders as
+        // nothing; `apply_with` is what applies it, by rebuilding the table.
         let unique = &table().uniques[0];
         assert!(SQLiteDdl.add_unique("memberships", unique).is_empty());
         assert!(SQLiteDdl.drop_unique("memberships", unique).is_empty());
+    }
+
+    /// A default is written bare only when SQLite parses it bare; everything else has to be
+    /// parenthesised or the `CREATE TABLE` is a syntax error.
+    #[test]
+    fn only_a_literal_default_is_written_without_parentheses() {
+        for literal in [
+            "1",
+            "-1",
+            "+1",
+            "2.5",
+            ".5",
+            "1.",
+            "1e5",
+            "-1.5e-3",
+            "'x'",
+            "'it''s'",
+            "x'00'",
+            "NULL",
+            "true",
+            "CURRENT_TIMESTAMP",
+        ] {
+            assert!(is_simple_default(literal), "`{literal}` is a literal");
+        }
+
+        for expression in ["1 + 1", "1+1", "datetime('now')", "now()", "", "0x10"] {
+            assert!(
+                !is_simple_default(expression),
+                "`{expression}` is an expression"
+            );
+        }
+    }
+
+    /// `apply_with` is what turns a constraint the table cannot `ALTER` into a rebuild.
+    #[test]
+    fn a_constraint_change_rebuilds_the_table() {
+        use besu_schema::{Change, Schema};
+
+        let mut current = Schema::new();
+        current.tables.push(table());
+        let desired = current.clone();
+        let unique = desired.tables[0].uniques[0].clone();
+        let changes = [
+            Change::DropForeignKey {
+                table: "memberships".into(),
+                foreign_key: besu_schema::ForeignKey {
+                    name: "memberships_user_id_fkey".into(),
+                    columns: vec!["user_id".into()],
+                    references_table: "users".into(),
+                    references_columns: vec!["id".into()],
+                    on_delete: besu_schema::ReferenceAction::Default,
+                    on_update: besu_schema::ReferenceAction::Default,
+                },
+            },
+            Change::AddUnique {
+                table: "memberships".into(),
+                unique: unique.clone(),
+            },
+            Change::DropUnique {
+                table: "memberships".into(),
+                unique,
+            },
+        ];
+
+        for change in changes {
+            let statements =
+                SQLiteDdl.apply_with(std::slice::from_ref(&change), &current, &desired);
+            assert!(
+                statements
+                    .iter()
+                    .any(|statement| statement.contains("__besu_tmp")),
+                "{change:?} must rebuild the table: {statements:?}"
+            );
+        }
     }
 
     #[test]

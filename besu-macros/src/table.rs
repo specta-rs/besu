@@ -67,17 +67,14 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
 
     let table_name = table_attrs.name.clone().unwrap_or_else(|| {
         LitStr::new(
-            &struct_ident.to_string().to_snake_case(),
+            &ident_str(&struct_ident).to_snake_case(),
             struct_ident.span(),
         )
     });
-    let handle_ident = Ident::new(
-        &sanitise_ident(&table_name.value().to_snake_case()),
-        struct_ident.span(),
-    );
+    let module_ident = format_ident!("__besu_table_{}", ident_str(&struct_ident).to_snake_case());
+    let handle_ident = handle_ident(&table_name.value(), struct_ident.span());
     let table_struct_ident = format_ident!("{}Table", struct_ident);
     let insert_struct_ident = format_ident!("{}Insert", struct_ident);
-    let module_ident = format_ident!("__besu_table_{}", struct_ident.to_string().to_snake_case());
 
     let mut columns = Vec::new();
     let mut skipped = Vec::new();
@@ -112,6 +109,38 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     .finish())
 }
 
+/// The text of an identifier, without the `r#` of a raw identifier.
+///
+/// `syn::Ident::to_string` keeps the prefix, so a field declared `r#type` would otherwise name
+/// its SQL column `r#type`. A raw identifier is a Rust spelling of a name that happens to be a
+/// keyword, not part of the name.
+pub(crate) fn ident_str(ident: &Ident) -> String {
+    let ident = ident.to_string();
+    match ident.strip_prefix("r#") {
+        Some(ident) => ident.to_owned(),
+        None => ident,
+    }
+}
+
+/// The identifier a table's handle constant is given.
+///
+/// The handle is named after the table, so a table whose SQL name is a Rust keyword —
+/// `#[besu(table = "type")]` — would otherwise emit `const type: ...`, which is not Rust. A
+/// raw identifier spells those names; the handful that cannot be raw (`self`, `Self`, `crate`
+/// and `super`) get a prefix instead.
+fn handle_ident(name: &str, span: Span) -> Ident {
+    let name = sanitise_ident(&name.to_snake_case());
+    // `syn` parses a keyword as a `Path` segment but refuses it as an `Ident`, which is
+    // exactly the distinction between a name a constant may have and one it may not.
+    if syn::parse_str::<Ident>(&name).is_ok() {
+        Ident::new(&name, span)
+    } else if matches!(name.as_str(), "self" | "Self" | "crate" | "super" | "_") {
+        Ident::new(&format!("r_{name}"), span)
+    } else {
+        Ident::new_raw(&name, span)
+    }
+}
+
 fn sanitise_ident(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for (i, ch) in name.chars().enumerate() {
@@ -124,7 +153,7 @@ fn sanitise_ident(name: &str) -> String {
             out.push('_');
         }
     }
-    if out.is_empty() {
+    if out.is_empty() || out == "_" {
         out.push_str("table");
     }
     out
@@ -358,11 +387,12 @@ impl IndexDecl {
         }
 
         for (column, opclass) in opclasses {
+            let column = ident_str(&column);
             let entry = this
                 .entries
                 .iter_mut()
                 .find(|entry| {
-                    matches!(&entry.target, IndexTargetDecl::Column(name) if name == &column.to_string())
+                    matches!(&entry.target, IndexTargetDecl::Column(name) if name == &column)
                 })
                 .ok_or_else(|| {
                     Error::new(
@@ -397,7 +427,7 @@ fn index_entry(expr: &Expr) -> Result<IndexEntryDecl> {
                 && path.path.segments[0].arguments.is_none() =>
         {
             Ok(IndexEntryDecl {
-                target: IndexTargetDecl::Column(path.path.segments[0].ident.to_string()),
+                target: IndexTargetDecl::Column(ident_str(&path.path.segments[0].ident)),
                 opclass: None,
                 span: path.span(),
             })
@@ -426,30 +456,49 @@ fn index_entry(expr: &Expr) -> Result<IndexEntryDecl> {
 ///
 /// `syn` does not keep the whitespace the caller wrote, so the token stream is printed and
 /// then tidied: the spaces `to_string` puts around parentheses, commas and dots are removed,
-/// while the spaces around an operator are kept so the expression still resembles SQL. A
-/// string literal is data and is never touched.
+/// while the spaces around an operator are kept so the expression still resembles SQL.
+///
+/// A literal is data, not tokens to tidy: everything between its quotes is copied exactly,
+/// including the whitespace a string literal contains. `quote!` prints a Rust literal, so the
+/// delimiters to respect are `"` for a string and `'` for a character, with `\` escaping the
+/// next character inside either.
 fn render_expression(expr: &Expr) -> String {
     let raw = quote!(#expr).to_string();
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
-    let mut in_string = false;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
 
     while let Some(ch) = chars.next() {
-        if in_string {
+        if let Some(open) = quote {
             out.push(ch);
-            if ch == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    out.push(chars.next().unwrap_or('\''));
-                } else {
-                    in_string = false;
-                }
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open {
+                quote = None;
             }
             continue;
         }
-        if ch == '\'' {
-            in_string = true;
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
             out.push(ch);
             continue;
+        }
+        // A raw identifier's `r#` is a Rust spelling of the name, not part of it. A raw
+        // *string* literal also starts with `r#`, so the prefix only comes off when a name
+        // follows it.
+        if ch == 'r' && chars.peek() == Some(&'#') {
+            let mut lookahead = chars.clone();
+            lookahead.next();
+            if lookahead
+                .peek()
+                .is_some_and(|next| next.is_alphabetic() || *next == '_')
+            {
+                chars.next();
+                continue;
+            }
         }
         if ch.is_whitespace() {
             let next = *chars.peek().unwrap_or(&' ');
@@ -627,12 +676,34 @@ enum Default {
 }
 
 fn default_literal(expr: &Expr) -> Result<TokenStream> {
-    let Expr::Lit(lit) = expr else {
-        return Err(Error::new(
+    match expr {
+        Expr::Lit(lit) => literal_default(lit),
+        // `-1` is a unary minus applied to an integer literal rather than a literal on its
+        // own, and a negative default is an ordinary thing to write.
+        Expr::Unary(unary) => match (&unary.op, unary.expr.as_ref()) {
+            (syn::UnOp::Neg(_), Expr::Lit(lit)) => match &lit.lit {
+                Lit::Int(value) => Ok(quote!(Int(-#value))),
+                Lit::Float(value) => Ok(quote!(Float(-#value))),
+                other => Err(Error::new(
+                    other.span(),
+                    "besu: `default` must be a string, integer, float or boolean literal",
+                )),
+            },
+            _ => Err(Error::new(
+                expr.span(),
+                "besu: `default` must be a literal; use `default_sql` for an expression",
+            )),
+        },
+        Expr::Paren(paren) => default_literal(&paren.expr),
+        _ => Err(Error::new(
             expr.span(),
             "besu: `default` must be a literal; use `default_sql` for an expression",
-        ));
-    };
+        )),
+    }
+}
+
+/// Turn one literal into the `DefaultValue` variant that holds it.
+fn literal_default(lit: &syn::ExprLit) -> Result<TokenStream> {
     match &lit.lit {
         Lit::Str(value) => Ok(quote!(Text(#value))),
         Lit::Int(value) => Ok(quote!(Int(#value))),
@@ -693,8 +764,8 @@ impl Column {
 struct Reference {
     table: String,
     column: String,
-    on_delete: Option<String>,
-    on_update: Option<String>,
+    on_delete: TokenStream,
+    on_update: TokenStream,
 }
 
 impl Column {
@@ -711,7 +782,7 @@ impl Column {
         let sql_name = attrs
             .name
             .clone()
-            .unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+            .unwrap_or_else(|| LitStr::new(&ident_str(&ident), ident.span()));
 
         let (nullable, inner) = unwrap_option(&field.ty);
 
@@ -823,12 +894,29 @@ impl Column {
                 Some(Reference {
                     table: table.to_owned(),
                     column: column.to_owned(),
-                    on_delete: attrs.on_delete.clone(),
-                    on_update: attrs.on_update.clone(),
+                    on_delete: reference_action(
+                        besu,
+                        attrs.on_delete.as_deref(),
+                        "on_delete",
+                        value.span(),
+                    )?,
+                    on_update: reference_action(
+                        besu,
+                        attrs.on_update.as_deref(),
+                        "on_update",
+                        value.span(),
+                    )?,
                 })
             }
             None => None,
         };
+        if reference.is_none() && (attrs.on_delete.is_some() || attrs.on_update.is_some()) {
+            return Err(Error::new(
+                ident.span(),
+                "besu: `on_delete` and `on_update` only apply to a `references` column, so \
+                 they would have no constraint to act on",
+            ));
+        }
 
         Ok(Parsed::Column(Box::new(Column {
             ident,
@@ -1032,18 +1120,34 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
     Ok(tokens)
 }
 
-fn reference_action(besu: &TokenStream, value: Option<&str>) -> TokenStream {
-    match value {
-        None => quote!(#besu::ReferenceAction::Default),
-        Some(value) => match value.to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
-            "cascade" => quote!(#besu::ReferenceAction::Cascade),
-            "set_null" | "setnull" => quote!(#besu::ReferenceAction::SetNull),
-            "set_default" | "setdefault" => quote!(#besu::ReferenceAction::SetDefault),
-            "restrict" => quote!(#besu::ReferenceAction::Restrict),
-            "no_action" | "noaction" => quote!(#besu::ReferenceAction::NoAction),
-            _ => quote!(#besu::ReferenceAction::Default),
-        },
-    }
+fn reference_action(
+    besu: &TokenStream,
+    value: Option<&str>,
+    attribute: &'static str,
+    span: Span,
+) -> Result<TokenStream> {
+    let Some(value) = value else {
+        return Ok(quote!(#besu::ReferenceAction::Default));
+    };
+    let action = match value.to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
+        "cascade" => quote!(#besu::ReferenceAction::Cascade),
+        "set_null" | "setnull" => quote!(#besu::ReferenceAction::SetNull),
+        "set_default" | "setdefault" => quote!(#besu::ReferenceAction::SetDefault),
+        "restrict" => quote!(#besu::ReferenceAction::Restrict),
+        "no_action" | "noaction" => quote!(#besu::ReferenceAction::NoAction),
+        // Silently falling back to the database's default would turn a typo into a
+        // constraint that deletes the wrong rows, so it is a compile error.
+        _ => {
+            return Err(Error::new(
+                span,
+                format!(
+                    "besu: `{attribute} = \"{value}\"` is not a reference action; expected \
+                     `cascade`, `set null`, `set default`, `restrict` or `no action`"
+                ),
+            ));
+        }
+    };
+    Ok(action)
 }
 
 struct Codegen {
@@ -1229,8 +1333,8 @@ impl Codegen {
             let column_name = &column.sql_name;
             let referenced_table = LitStr::new(&reference.table, column.ident.span());
             let referenced_column = LitStr::new(&reference.column, column.ident.span());
-            let on_delete = reference_action(besu, reference.on_delete.as_deref());
-            let on_update = reference_action(besu, reference.on_update.as_deref());
+            let on_delete = &reference.on_delete;
+            let on_update = &reference.on_update;
             Some(quote! {
                 #besu::ForeignKey {
                     name: #name,
@@ -1522,5 +1626,239 @@ impl Codegen {
 
             pub use #module_ident::{#handle_ident, #insert_struct_ident, #table_struct_ident};
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use proc_macro2::TokenStream;
+    use syn::parse_quote;
+
+    fn expand(tokens: TokenStream) -> syn::Result<TokenStream> {
+        let input: syn::DeriveInput = syn::parse2(tokens).unwrap();
+        super::expand(input)
+    }
+
+    /// Generated code has to be Rust, whatever the table is called.
+    fn assert_parses(tokens: TokenStream) {
+        let text = tokens.to_string();
+        if let Err(err) = syn::parse2::<syn::File>(tokens) {
+            panic!("the derive emitted invalid Rust ({err}):\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_table_named_after_a_keyword_still_emits_a_handle() {
+        // The handle constant is named after the table, and `const type: ...` is not Rust.
+        for table in [
+            "type", "match", "self", "Self", "crate", "super", "loop", "move",
+        ] {
+            let tokens = expand(parse_quote! {
+                #[besu(table = #table)]
+                pub struct Keyword {
+                    pub id: i64,
+                }
+            })
+            .unwrap();
+            assert_parses(tokens);
+        }
+    }
+
+    #[test]
+    fn a_table_name_that_is_not_an_identifier_still_emits_a_handle() {
+        for table in ["!", "-", "1 table", "with space", "_"] {
+            let tokens = expand(parse_quote! {
+                #[besu(table = #table)]
+                pub struct Odd {
+                    pub id: i64,
+                }
+            })
+            .unwrap();
+            assert_parses(tokens);
+        }
+    }
+
+    #[test]
+    fn a_raw_field_name_is_not_the_column_name() {
+        // `r#type` is how a Rust field is spelled; the column it declares is `type`.
+        let tokens = expand(parse_quote! {
+            #[besu(table = "kinds")]
+            pub struct Kind {
+                #[besu(primary_key)]
+                pub id: i64,
+                pub r#type: String,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(
+            !text.contains("\"r#type\""),
+            "the raw prefix leaked into the SQL name: {text}"
+        );
+        assert!(text.contains("name : \"type\""), "{text}");
+        assert_parses(tokens);
+    }
+
+    #[test]
+    fn a_table_name_defaults_from_a_raw_struct_name() {
+        let tokens = expand(parse_quote! {
+            pub struct r#Type {
+                pub id: i64,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("name : \"type\""), "{text}");
+        assert_parses(tokens);
+    }
+
+    #[test]
+    fn an_unknown_reference_action_is_an_error() {
+        // A typo used to mean "let the database decide", which changes what a delete does.
+        let error = expand(parse_quote! {
+            #[besu(table = "posts")]
+            pub struct Post {
+                #[besu(primary_key)]
+                pub id: i64,
+                #[besu(references = "users.id", on_delete = "casacde")]
+                pub user_id: i64,
+            }
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not a reference action"),
+            "{error}"
+        );
+
+        let error = expand(parse_quote! {
+            #[besu(table = "posts")]
+            pub struct Post {
+                #[besu(primary_key)]
+                pub id: i64,
+                #[besu(references = "users.id", on_update = "explode")]
+                pub user_id: i64,
+            }
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not a reference action"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_action_without_a_reference_is_an_error() {
+        let error = expand(parse_quote! {
+            #[besu(table = "posts")]
+            pub struct Post {
+                #[besu(primary_key, on_delete = "cascade")]
+                pub id: i64,
+            }
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("only apply to a `references`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_reference_action_is_still_spelled_every_way_it_was() {
+        for (action, expected) in [
+            ("cascade", "Cascade"),
+            ("SET NULL", "SetNull"),
+            ("set-default", "SetDefault"),
+            ("restrict", "Restrict"),
+            ("no action", "NoAction"),
+            ("setnull", "SetNull"),
+        ] {
+            let tokens = expand(parse_quote! {
+                #[besu(table = "posts")]
+                pub struct Post {
+                    #[besu(primary_key)]
+                    pub id: i64,
+                    #[besu(references = "users.id", on_delete = #action)]
+                    pub user_id: i64,
+                }
+            })
+            .unwrap();
+            let text = tokens.to_string();
+            assert!(
+                text.contains(&format!("ReferenceAction :: {expected}")),
+                "{action} rendered as {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_default_is_a_literal() {
+        let tokens = super::default_literal(&parse_quote!(-1)).unwrap();
+        assert_eq!(tokens.to_string(), "Int (- 1)");
+        let tokens = super::default_literal(&parse_quote!(-1.5)).unwrap();
+        assert_eq!(tokens.to_string(), "Float (- 1.5)");
+        let tokens = super::default_literal(&parse_quote!("text")).unwrap();
+        assert_eq!(tokens.to_string(), "Text (\"text\")");
+        assert!(super::default_literal(&parse_quote!(1 + 1)).is_err());
+        assert!(super::default_literal(&parse_quote!(-true)).is_err());
+    }
+
+    #[test]
+    fn a_negative_default_emits_a_default_value() {
+        let tokens = expand(parse_quote! {
+            #[besu(table = "scores")]
+            pub struct Score {
+                #[besu(primary_key)]
+                pub id: i64,
+                #[besu(default = -1)]
+                pub value: i32,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("DefaultValue :: Int (- 1)"), "{text}");
+        assert_parses(tokens);
+    }
+
+    #[test]
+    fn an_index_expression_names_a_raw_column_without_its_prefix() {
+        let tokens = expand(parse_quote! {
+            #[besu(table = "kinds", index(columns(lower(r#type))))]
+            pub struct Kind {
+                #[besu(primary_key)]
+                pub id: i64,
+                pub r#type: String,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        // The Rust field keeps its raw spelling; the SQL expression does not.
+        assert!(
+            !text.contains("\"r#type\""),
+            "the raw prefix leaked: {text}"
+        );
+        assert!(text.contains("lower(type)"), "{text}");
+        assert_parses(tokens);
+    }
+
+    #[test]
+    fn an_index_expression_keeps_a_string_literal_intact() {
+        // The tidying that turns a printed token stream back into SQL must not touch the
+        // inside of a literal, which is data.
+        let tokens = expand(parse_quote! {
+            #[besu(table = "docs", index(columns(coalesce(body, "  a , b  "))))]
+            pub struct Doc {
+                #[besu(primary_key)]
+                pub id: i64,
+                pub body: String,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(
+            text.contains("  a , b  "),
+            "the literal was rewritten: {text}"
+        );
+        assert_parses(tokens);
     }
 }

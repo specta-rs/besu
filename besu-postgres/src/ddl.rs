@@ -257,6 +257,11 @@ impl Ddl for PostgresDdl {
         true
     }
 
+    /// PostgreSQL is the only shipped dialect with standalone sequences.
+    fn expresses_sequences(&self) -> bool {
+        true
+    }
+
     /// `CREATE DOMAIN name AS base_type`.
     ///
     /// The constraints and default a domain can carry are not part of the IR, so they are not

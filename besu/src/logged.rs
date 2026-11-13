@@ -284,7 +284,13 @@ impl<Dr: Driver> Database<Dr> {
     /// The driver handle is cloned, which for every driver shipped with Besu is a cheap
     /// pointer clone of a pool. The returned database has exactly the same dialect.
     pub fn logged(&self, policy: Policy) -> Database<Logged<Dr>> {
-        Database::new(Logged::with_policy(self.driver().clone(), policy))
+        let driver = Logged::with_policy(self.driver().clone(), policy);
+        // The wrapper is a new `Database`, so carry the tenant prefix across rather than
+        // silently rendering unprefixed table names for a prefixed database.
+        match self.prefix() {
+            Some(prefix) => Database::prefixed(driver, prefix.to_owned()),
+            None => Database::new(driver),
+        }
     }
 }
 

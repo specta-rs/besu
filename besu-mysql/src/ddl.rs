@@ -64,17 +64,58 @@ fn uniqueness(ty: &TypeDef) -> Uniqueness {
     }
 }
 
+/// Whether a default is already a self-contained literal rather than an expression.
+///
+/// `DEFAULT 5`, `DEFAULT 'x'`, `DEFAULT b'1010'`, `DEFAULT 0x00` and an already
+/// parenthesised expression all parse without another pair of parentheses. A function call
+/// such as `concat(...)` or `curdate()` does not.
+fn is_literal_default(default: &str) -> bool {
+    let value = default.trim();
+    if value.is_empty() {
+        return false;
+    }
+    value.starts_with('(')
+        || value.starts_with('\'')
+        || value.starts_with("b'")
+        || value.starts_with("B'")
+        || value.starts_with("x'")
+        || value.starts_with("X'")
+        || value.starts_with("0x")
+        || value.starts_with("0X")
+        || value.eq_ignore_ascii_case("null")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("false")
+        || value.parse::<f64>().is_ok()
+}
+
 impl MySqlDdl {
-    /// Whether a default for this type has to be written as a parenthesised expression.
+    /// Whether a default has to be written as a parenthesised expression.
     ///
     /// MySQL 8 only accepts a literal default on `TEXT`, `BLOB` and `JSON` if it is
     /// spelled as an expression, because those types did not support defaults at all
-    /// before 8.0.13.
-    fn default_needs_expression(ty: &TypeDef) -> bool {
-        matches!(
+    /// before 8.0.13. Any other expression default — `concat(...)`, `curdate()`, `uuid()` —
+    /// also needs the parentheses; only a literal (or the special temporal keywords) can be
+    /// written bare.
+    fn default_needs_expression(ty: &TypeDef, default: &str) -> bool {
+        if matches!(
             bare_type(ty),
             TypeDef::Text | TypeDef::Bytes | TypeDef::Json | TypeDef::Jsonb
-        )
+        ) {
+            return true;
+        }
+
+        // `CURRENT_TIMESTAMP` and its synonyms are the one expression form MySQL accepts
+        // without parentheses, and wrapping them changes how the server reports the default
+        // (`now(6)` instead of `CURRENT_TIMESTAMP(6)`), which would never converge.
+        let head = default.split('(').next().unwrap_or(default).trim();
+        if ["CURRENT_TIMESTAMP", "NOW", "LOCALTIME", "LOCALTIMESTAMP"]
+            .iter()
+            .any(|keyword| head.eq_ignore_ascii_case(keyword))
+        {
+            return false;
+        }
+
+        !is_literal_default(default)
     }
 
     /// Render a key-part list with the key lengths and functional spellings MySQL needs.
@@ -153,6 +194,22 @@ impl Ddl for MySqlDdl {
     /// create or drop.
     fn inline_enums(&self) -> bool {
         true
+    }
+
+    /// MySQL has b-trees, `FULLTEXT` and `SPATIAL`, but no operator classes and no partial
+    /// indexes. A PostgreSQL access method folds to a b-tree so a snapshot pushed here
+    /// converges instead of recreating the index on every run.
+    fn normalise_index(&self, index: &Index) -> Index {
+        let mut index = index.clone();
+        index.kind = match index.kind {
+            IndexKind::FullText | IndexKind::Spatial => index.kind,
+            _ => IndexKind::Btree,
+        };
+        index.predicate = None;
+        for column in &mut index.columns {
+            column.opclass = None;
+        }
+        index
     }
 
     fn quote(&self, ident: &str) -> String {
@@ -242,65 +299,7 @@ impl Ddl for MySqlDdl {
     }
 
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
-        let mut sql = format!(
-            "{} {}",
-            self.quote(&column.name),
-            self.type_name(&column.ty)
-        );
-
-        if let Some(generated) = &column.generated {
-            // MySQL implements both spellings. A stored column occupies space and can be
-            // indexed; a virtual one is computed when read.
-            sql.push_str(" GENERATED ALWAYS AS (");
-            sql.push_str(&generated.expression);
-            sql.push_str(if generated.stored {
-                ") STORED"
-            } else {
-                ") VIRTUAL"
-            });
-        }
-
-        // MySQL makes primary key columns `NOT NULL` implicitly, but spelling it out keeps
-        // the generated `CREATE TABLE` readable and matches `SHOW CREATE TABLE`.
-        if !column.nullable && (!column.primary_key || column.auto_increment) {
-            sql.push_str(" NOT NULL");
-        }
-
-        // `AUTO_INCREMENT` requires the column to be a key, which the inline `PRIMARY KEY`
-        // below provides. A generated column owns its value, so it can never have one.
-        if column.auto_increment && column.generated.is_none() {
-            sql.push_str(" AUTO_INCREMENT");
-        }
-
-        if inline_pk && column.primary_key {
-            sql.push_str(" PRIMARY KEY");
-        }
-
-        if column.unique
-            && column.generated.is_none()
-            && matches!(uniqueness(&column.ty), Uniqueness::Inline)
-        {
-            sql.push_str(" UNIQUE");
-        }
-
-        // A generated column is computed from its expression and MySQL rejects a default
-        // beside one.
-        if column.generated.is_none()
-            && let Some(default) = &column.default
-        {
-            sql.push_str(" DEFAULT ");
-            // An `ON UPDATE` clause is never an expression, even on a type that otherwise
-            // needs the parenthesised form.
-            if Self::default_needs_expression(&column.ty) && !default.contains(" ON UPDATE ") {
-                sql.push('(');
-                sql.push_str(default);
-                sql.push(')');
-            } else {
-                sql.push_str(default);
-            }
-        }
-
-        sql
+        column_definition(column, inline_pk, true)
     }
 
     fn alter_column(&self, table: &str, from: &Column, to: &Column) -> Vec<String> {
@@ -318,12 +317,25 @@ impl Ddl for MySqlDdl {
         // MySQL has no `ALTER COLUMN ... TYPE`: `MODIFY COLUMN` replaces the whole
         // definition, so the new column is rendered exactly as it would be in
         // `CREATE TABLE`. `inline_pk` is false because indexes (including the primary key)
-        // survive a `MODIFY COLUMN` on their own.
-        vec![format!(
+        // survive a `MODIFY COLUMN` on their own. The same holds for a column's `UNIQUE`
+        // constraint, so it is only written when the column is becoming unique: repeating
+        // it would add a second unique key and leave the column with two.
+        let mut statements = Vec::new();
+        if from.unique && !to.unique {
+            // A single-column `UNIQUE` declared on the column is named after it, which is
+            // also how introspection recognises it.
+            statements.push(format!(
+                "DROP INDEX {} ON {}",
+                self.quote(&from.name),
+                self.quote_table(table)
+            ));
+        }
+        statements.push(format!(
             "ALTER TABLE {} MODIFY COLUMN {}",
             self.quote_table(table),
-            self.column_sql(to, false)
-        )]
+            column_definition(to, false, to.unique && !from.unique)
+        ));
+        statements
     }
 
     fn drop_index(&self, table: &str, index: &besu_schema::Index) -> String {
@@ -578,10 +590,101 @@ impl Ddl for MySqlDdl {
     }
 }
 
+/// Render one column definition, optionally repeating its `UNIQUE` clause.
+///
+/// `MODIFY COLUMN` replaces the column definition but leaves its indexes in place, so
+/// repeating `UNIQUE` there adds a second key beside the one that already exists (MySQL names
+/// it `<column>_2`). The alter path therefore passes `inline_unique: false` unless the column
+/// is becoming unique for the first time.
+fn column_definition(column: &Column, inline_pk: bool, inline_unique: bool) -> String {
+    let mut sql = format!(
+        "{} {}",
+        MySqlDdl.quote(&column.name),
+        MySqlDdl.type_name(&column.ty)
+    );
+
+    if let Some(generated) = &column.generated {
+        // MySQL implements both spellings. A stored column occupies space and can be
+        // indexed; a virtual one is computed when read.
+        sql.push_str(" GENERATED ALWAYS AS (");
+        sql.push_str(&generated.expression);
+        sql.push_str(if generated.stored {
+            ") STORED"
+        } else {
+            ") VIRTUAL"
+        });
+    }
+
+    // MySQL makes primary key columns `NOT NULL` implicitly, but spelling it out keeps the
+    // generated `CREATE TABLE` readable and matches `SHOW CREATE TABLE`.
+    if !column.nullable && (!column.primary_key || column.auto_increment) {
+        sql.push_str(" NOT NULL");
+    }
+
+    // `AUTO_INCREMENT` requires the column to be a key, which the inline `PRIMARY KEY` below
+    // provides. A generated column owns its value, so it can never have one.
+    if column.auto_increment && column.generated.is_none() {
+        sql.push_str(" AUTO_INCREMENT");
+    }
+
+    if inline_pk && column.primary_key {
+        sql.push_str(" PRIMARY KEY");
+    }
+
+    if inline_unique
+        && column.unique
+        && column.generated.is_none()
+        && matches!(uniqueness(&column.ty), Uniqueness::Inline)
+    {
+        sql.push_str(" UNIQUE");
+    }
+
+    // A generated column is computed from its expression and MySQL rejects a default beside
+    // one.
+    if column.generated.is_none()
+        && let Some(default) = &column.default
+    {
+        sql.push_str(" DEFAULT ");
+        if MySqlDdl::default_needs_expression(&column.ty, default) {
+            sql.push('(');
+            sql.push_str(default);
+            sql.push(')');
+        } else {
+            sql.push_str(default);
+        }
+    }
+
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use besu_schema::Unique;
+
+    #[test]
+    fn an_index_is_folded_to_what_mysql_can_express() {
+        let index = Index {
+            name: "search".into(),
+            columns: vec![IndexColumn::column("email").with_opclass("text_pattern_ops")],
+            unique: false,
+            kind: IndexKind::Gin,
+            predicate: Some("active".into()),
+        };
+        let folded = Ddl::normalise_index(&MySqlDdl, &index);
+        assert_eq!(folded.kind, IndexKind::Btree);
+        assert_eq!(folded.predicate, None);
+        assert_eq!(folded.columns[0].opclass, None);
+
+        // The two access methods MySQL does have survive; anything else folds to b-tree.
+        for kind in [IndexKind::FullText, IndexKind::Spatial] {
+            let index = Index {
+                kind,
+                ..index.clone()
+            };
+            assert_eq!(Ddl::normalise_index(&MySqlDdl, &index).kind, kind);
+        }
+    }
 
     #[test]
     fn a_range_vector_and_spatial_type_have_their_storage_spelling() {
@@ -727,6 +830,109 @@ mod tests {
             checks: Vec::new(),
             comment: None,
         }
+    }
+
+    #[test]
+    fn a_column_keep_its_unique_index_when_its_type_changes() {
+        // `MODIFY COLUMN` leaves existing indexes alone. Repeating `UNIQUE` in the new
+        // definition made MySQL create a *second* unique key (`email_2`) beside the first.
+        let from = Column {
+            name: "age".into(),
+            ty: TypeDef::Int4,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: true,
+            default: None,
+            generated: None,
+            comment: None,
+            renamed_from: None,
+        };
+        let to = Column {
+            ty: TypeDef::Int8,
+            ..from.clone()
+        };
+        assert_eq!(
+            MySqlDdl.alter_column("users", &from, &to),
+            ["ALTER TABLE `users` MODIFY COLUMN `age` BIGINT NOT NULL"]
+        );
+
+        // Becoming unique is the one case that has to write it.
+        let not_unique = Column {
+            unique: false,
+            ..from.clone()
+        };
+        assert_eq!(
+            MySqlDdl.alter_column("users", &not_unique, &from),
+            ["ALTER TABLE `users` MODIFY COLUMN `age` INT NOT NULL UNIQUE"]
+        );
+
+        // Losing it has to drop the key, which is named after the column.
+        assert_eq!(
+            MySqlDdl.alter_column("users", &from, &not_unique),
+            [
+                "DROP INDEX `age` ON `users`",
+                "ALTER TABLE `users` MODIFY COLUMN `age` INT NOT NULL"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_default_that_is_an_expression_is_parenthesised() {
+        let column = |ty: TypeDef, default: &str| Column {
+            name: "value".into(),
+            ty,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: Some(default.into()),
+            generated: None,
+            comment: None,
+            renamed_from: None,
+        };
+
+        // A literal stays bare.
+        assert!(
+            MySqlDdl
+                .column_sql(&column(TypeDef::VarChar(10), "'hi'"), false)
+                .ends_with("`value` VARCHAR(10) NOT NULL DEFAULT 'hi'")
+        );
+        assert!(
+            MySqlDdl
+                .column_sql(&column(TypeDef::Int4, "5"), false)
+                .ends_with("DEFAULT 5")
+        );
+        // An expression default needs the parentheses MySQL's grammar requires.
+        assert!(
+            MySqlDdl
+                .column_sql(&column(TypeDef::VarChar(10), "concat('a','b')"), false)
+                .ends_with("DEFAULT (concat('a','b'))")
+        );
+        assert!(
+            MySqlDdl
+                .column_sql(&column(TypeDef::Date, "curdate()"), false)
+                .ends_with("DEFAULT (curdate())")
+        );
+        // The temporal keywords are the exception, and wrapping one would make the server
+        // report `now()` and never converge.
+        assert!(
+            MySqlDdl
+                .column_sql(
+                    &column(
+                        TypeDef::TimestampP(6),
+                        "CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)"
+                    ),
+                    false
+                )
+                .ends_with("DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)")
+        );
+        // A text column can only take its default as an expression.
+        assert!(
+            MySqlDdl
+                .column_sql(&column(TypeDef::Text, "'hi'"), false)
+                .ends_with("DEFAULT ('hi')")
+        );
     }
 
     #[test]

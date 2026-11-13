@@ -279,8 +279,9 @@ impl Dialect for MySql {
         use FunctionStyle::{Bare, Named, Separator, WithSuffix};
         Some(match name {
             // `CHAR_LENGTH` counts characters and `LENGTH` counts bytes, which is the
-            // opposite of what the names suggest on `TEXT`.
-            "char_length" => Named("CHAR_LENGTH"),
+            // opposite of what the names suggest on `TEXT`. Besu's `length` is documented
+            // as characters everywhere else, so it must not fall through to `LENGTH`.
+            "length" | "char_length" => Named("CHAR_LENGTH"),
             "octet_length" => Named("LENGTH"),
             "substr" => Named("SUBSTR"),
             "replace" => Named("REPLACE"),
@@ -357,6 +358,24 @@ impl Dialect for MySql {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn length_counts_characters_not_bytes() {
+        // MySQL's `LENGTH` counts bytes while PostgreSQL and SQLite count characters, so the
+        // portable `length` must use `CHAR_LENGTH` here. `octet_length` is the byte count.
+        assert_eq!(
+            MySql::function("length"),
+            Some(FunctionStyle::Named("CHAR_LENGTH"))
+        );
+        assert_eq!(
+            MySql::function("char_length"),
+            Some(FunctionStyle::Named("CHAR_LENGTH"))
+        );
+        assert_eq!(
+            MySql::function("octet_length"),
+            Some(FunctionStyle::Named("LENGTH"))
+        );
+    }
 
     #[test]
     fn identifiers_are_quoted_with_backticks() {

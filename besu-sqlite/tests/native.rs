@@ -793,3 +793,458 @@ async fn a_file_database_persists_across_reopen() {
     assert_eq!(stored[0].email, "file@example.com");
     assert_eq!(stored[0].age, 42);
 }
+
+// ---------------------------------------------------------------------------------------
+// Introspection and rebuild regressions.
+// ---------------------------------------------------------------------------------------
+
+/// Two foreign keys can start on the same column, so `PRAGMA foreign_key_list` reports them
+/// as two constraints whose rows differ only in their `id`. Grouping them by the name derived
+/// from the column merged them into one malformed constraint and lost a target.
+#[tokio::test]
+async fn two_foreign_keys_on_one_column_stay_apart() {
+    let db = memory().await;
+    db.execute(sql!("CREATE TABLE a (id INTEGER PRIMARY KEY)"))
+        .await
+        .unwrap();
+    db.execute(sql!("CREATE TABLE b (id INTEGER PRIMARY KEY)"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE links (\
+           id INTEGER PRIMARY KEY, \
+           target INTEGER NOT NULL, \
+           CONSTRAINT links_one FOREIGN KEY (target) REFERENCES a (id), \
+           CONSTRAINT links_two FOREIGN KEY (target) REFERENCES b (id))"
+    ))
+    .await
+    .unwrap();
+
+    let schema: Schema = db.introspect().await.unwrap();
+    let table = schema.table("links").unwrap();
+    assert_eq!(table.foreign_keys.len(), 2, "{:?}", table.foreign_keys);
+    assert_eq!(
+        table
+            .foreign_keys
+            .iter()
+            .map(|fk| (fk.columns.clone(), fk.references_table.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (vec!["target".to_owned()], "a"),
+            (vec!["target".to_owned()], "b"),
+        ]
+    );
+    assert_ne!(
+        table.foreign_keys[0].name, table.foreign_keys[1].name,
+        "two constraints on one table need two names"
+    );
+
+    // The snapshot it read is itself a no-op against the database it came from.
+    assert!(db.push_schema(&schema).await.unwrap().is_empty());
+
+    // And it recreates the same two constraints in a database that has none.
+    let fresh = memory().await;
+    fresh.push_schema(&schema).await.unwrap();
+    let reread: Schema = fresh.introspect().await.unwrap();
+    assert_eq!(
+        reread
+            .table("links")
+            .unwrap()
+            .foreign_keys
+            .iter()
+            .map(|fk| (fk.columns.clone(), fk.references_table.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (vec!["target".to_owned()], "a"),
+            (vec!["target".to_owned()], "b"),
+        ]
+    );
+}
+
+/// A foreign key written without a parent column list matches the parent's primary key, which
+/// `PRAGMA foreign_key_list` reports as `NULL`. Guessing `id` produced a constraint over a
+/// column that need not exist.
+#[tokio::test]
+async fn a_foreign_key_without_a_parent_column_list_reads_the_primary_key() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE parents (key INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE kids (id INTEGER PRIMARY KEY, parent_key INTEGER REFERENCES parents)"
+    ))
+    .await
+    .unwrap();
+
+    let schema: Schema = db.introspect().await.unwrap();
+    let foreign_keys = &schema.table("kids").unwrap().foreign_keys;
+    assert_eq!(foreign_keys.len(), 1);
+    assert_eq!(foreign_keys[0].references_columns, ["key"]);
+
+    // A database built from that snapshot enforces the constraint against the right column,
+    // which it could not do if the snapshot had guessed `parents.id`.
+    let fresh = memory().await;
+    fresh.push_schema(&schema).await.unwrap();
+    fresh
+        .execute(sql!("INSERT INTO parents (key, name) VALUES (1, 'one')"))
+        .await
+        .unwrap();
+    fresh
+        .execute(sql!("INSERT INTO kids (id, parent_key) VALUES (1, 1)"))
+        .await
+        .unwrap();
+    let error = fresh
+        .execute(sql!("INSERT INTO kids (id, parent_key) VALUES (2, 2)"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("FOREIGN KEY constraint failed"),
+        "{error}"
+    );
+}
+
+/// A failed rebuild used to leave `PRAGMA foreign_keys = OFF` on the connection, so every
+/// later statement silently accepted a violation. It also left its scratch table behind,
+/// which the next push reported as a destructive drop.
+#[tokio::test]
+async fn a_failed_rebuild_restores_foreign_keys_and_can_be_retried() {
+    let db = memory().await;
+    db.execute(sql!("CREATE TABLE parent (id INTEGER PRIMARY KEY)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO parent (id) VALUES (1)"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent (id))"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE people (id INTEGER PRIMARY KEY, nickname TEXT)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO people (id, nickname) VALUES (1, 'Ada')"))
+        .await
+        .unwrap();
+
+    // A rebuild (the nullable change) plus a new `NOT NULL` column with no default: the copy
+    // has no value for the column, so the rebuild fails after it created its scratch table.
+    let current: Schema = db.introspect().await.unwrap();
+    let mut doomed = current.clone();
+    let table = doomed.table_mut("people").unwrap();
+    table.columns[1].nullable = false;
+    let mut required = table.columns[0].clone();
+    required.name = "required".to_owned();
+    required.nullable = false;
+    required.primary_key = false;
+    required.auto_increment = false;
+    table.columns.push(required);
+
+    assert!(db.push_schema(&doomed).await.is_err());
+
+    // Foreign keys are still enforced.
+    let enabled: Vec<(i64,)> = db.execute(sql!("PRAGMA foreign_keys")).all().await.unwrap();
+    assert_eq!(enabled, [(1,)], "a failed rebuild must restore the pragma");
+    let violation = db
+        .execute(sql!("INSERT INTO child (id, parent_id) VALUES (9, 999)"))
+        .await
+        .unwrap_err();
+    assert!(
+        violation
+            .to_string()
+            .contains("FOREIGN KEY constraint failed"),
+        "{violation}"
+    );
+
+    // The scratch table is not part of the schema while the table it copies still exists, so
+    // a retry with a valid diff is not reported as a destructive drop.
+    let retried: Schema = db.introspect().await.unwrap();
+    assert!(retried.table("people__besu_tmp").is_none());
+
+    let mut fixed = current.clone();
+    fixed.table_mut("people").unwrap().columns[1].nullable = false;
+    db.push_schema(&fixed).await.unwrap();
+
+    let rows: Vec<(i64, String)> = db
+        .execute(sql!("SELECT id, nickname FROM people"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(1, "Ada".to_owned())]);
+    let leftover: Vec<(String,)> = db
+        .execute(sql!(
+            "SELECT name FROM sqlite_master WHERE name LIKE '%__besu_tmp'"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(leftover.is_empty(), "{leftover:?}");
+}
+
+/// A rebuild performs a declared rename by copying the old column into the new one. Selecting
+/// the new name from the old table dropped the column from the copy, so its values became the
+/// new column's default instead of the data.
+#[tokio::test]
+async fn a_rebuild_keeps_a_renamed_columns_data() {
+    // The derive re-exports the model from inside each module; nothing outside names it
+    // through that path, so the re-export is legitimately unused.
+    #[allow(unused_imports)]
+    mod members_v1 {
+        use besu::Table;
+
+        #[derive(Table, Debug, Clone)]
+        #[besu(table = "members")]
+        pub struct Member {
+            #[besu(primary_key, auto_increment)]
+            pub id: i64,
+            pub full_name: String,
+        }
+    }
+
+    #[allow(unused_imports)]
+    mod members_v2 {
+        use besu::Table;
+
+        #[derive(Table, Debug, Clone)]
+        #[besu(table = "members")]
+        #[besu(check = "length(name) > 0")]
+        pub struct Member {
+            #[besu(primary_key, auto_increment)]
+            pub id: i64,
+            #[besu(column = "name", renamed_from = "full_name", default = "unknown")]
+            pub name: String,
+        }
+    }
+
+    let db = memory().await;
+    db.push([members_v1::members.def()]).await.unwrap();
+    db.execute(sql!(
+        "INSERT INTO members (id, full_name) VALUES (1, 'Ada')"
+    ))
+    .await
+    .unwrap();
+
+    // The check is added in the same push, which is what makes the differ rebuild the table
+    // rather than issue a plain `RENAME COLUMN`.
+    let result = db.push([members_v2::members.def()]).await.unwrap();
+    assert!(
+        result
+            .statements
+            .iter()
+            .any(|statement| statement.contains("__besu_tmp")),
+        "expected a rebuild: {:?}",
+        result.statements
+    );
+
+    let rows: Vec<(i64, String)> = db
+        .execute(sql!("SELECT id, name FROM members"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(1, "Ada".to_owned())],
+        "the rename must keep the value, not fall back to the default"
+    );
+
+    // The check the rebuild added is enforced.
+    let error = db
+        .execute(sql!("INSERT INTO members (id, name) VALUES (2, '')"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "{error}"
+    );
+}
+
+/// SQLite reports `DEFAULT (1 + 1)` as the bare expression, which is only valid inside
+/// parentheses. Dropping them turned a table rebuild into a syntax error.
+#[tokio::test]
+async fn a_rebuild_keeps_an_expression_default() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE computed (\
+           id INTEGER PRIMARY KEY, \
+           total INTEGER DEFAULT (1 + 1), \
+           created_at TEXT DEFAULT (datetime('now')))"
+    ))
+    .await
+    .unwrap();
+
+    let schema: Schema = db.introspect().await.unwrap();
+    let mut desired = schema.clone();
+    // A nullable change forces the rebuild without touching the defaults.
+    desired.table_mut("computed").unwrap().columns[1].nullable = false;
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(
+        pushed
+            .statements
+            .iter()
+            .any(|statement| statement.contains("__besu_tmp")),
+        "expected a rebuild: {:?}",
+        pushed.statements
+    );
+
+    db.execute(sql!("INSERT INTO computed (id) VALUES (1)"))
+        .await
+        .unwrap();
+    let rows: Vec<(i64, String)> = db
+        .execute(sql!("SELECT total, created_at FROM computed"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 2);
+    assert!(rows[0].1.starts_with("20"), "{}", rows[0].1);
+}
+
+/// A `Value::Json` that is not valid UTF-8 is not a JSON document. Binding it as `NOTHING`
+/// used to store `"null"`, silently replacing the value instead of reporting the mistake.
+#[tokio::test]
+async fn a_json_parameter_that_is_not_utf8_is_rejected() {
+    use besu::Driver as _;
+    use besu_core::{Sql, Value};
+
+    let native = Native::in_memory().unwrap();
+    let mut statement = Sql::<besu_sqlite::SQLite>::raw("SELECT ?");
+    statement.push_arg(Value::Json(vec![b'{', 0xff, b'}']));
+    let statement = statement.finish().unwrap();
+
+    let error = native.query(&statement).await.unwrap_err();
+    assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+}
+
+/// SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so a foreign key added to an existing
+/// table has to be applied by a rebuild. Without one the change rendered as an empty
+/// statement: `push` reported it as applied, but the database never had the constraint.
+#[tokio::test]
+async fn a_foreign_key_added_by_a_push_is_created() {
+    #[allow(unused_imports)]
+    mod posts_v1 {
+        use besu::Table;
+
+        #[derive(Table, Debug, Clone)]
+        #[besu(table = "posts")]
+        pub struct Post {
+            #[besu(primary_key, auto_increment)]
+            pub id: i64,
+            pub title: String,
+            pub author_id: i64,
+        }
+    }
+
+    #[allow(unused_imports)]
+    mod posts_v2 {
+        use besu::Table;
+
+        #[derive(Table, Debug, Clone)]
+        #[besu(table = "posts")]
+        pub struct Post {
+            #[besu(primary_key, auto_increment)]
+            pub id: i64,
+            pub title: String,
+            #[besu(references = "users.id")]
+            pub author_id: i64,
+        }
+    }
+
+    let db = memory().await;
+    db.push([users.def(), posts_v1::posts.def()]).await.unwrap();
+    db.execute(sql!(
+        "INSERT INTO users (id, email, name, age) VALUES (1, 'a@example.com', 'A', 1)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO posts (id, title, author_id) VALUES (1, 'Hello', 1)"
+    ))
+    .await
+    .unwrap();
+
+    let added = db.push([users.def(), posts_v2::posts.def()]).await.unwrap();
+    assert!(
+        added
+            .statements
+            .iter()
+            .any(|statement| statement.contains("__besu_tmp")),
+        "adding a foreign key must rebuild the table: {:?}",
+        added.statements
+    );
+
+    // The constraint is enforced, and the row that was already there kept its values.
+    let error = db
+        .execute(sql!(
+            "INSERT INTO posts (id, title, author_id) VALUES (2, 'Orphan', 999)"
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("FOREIGN KEY constraint failed"),
+        "{error}"
+    );
+    let titles: Vec<(String,)> = db
+        .execute(sql!("SELECT title FROM posts"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(titles, [("Hello".to_owned(),)]);
+
+    assert!(
+        db.push([users.def(), posts_v2::posts.def()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The same for a multi-column unique constraint, which the differ reports as a `Unique`
+/// entry rather than as a change to one column.
+#[tokio::test]
+async fn a_multi_column_unique_added_by_a_push_is_created() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE pairs (a INTEGER NOT NULL, b INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO pairs (a, b) VALUES (1, 1)"))
+        .await
+        .unwrap();
+
+    let current: Schema = db.introspect().await.unwrap();
+    let mut desired = current.clone();
+    desired
+        .table_mut("pairs")
+        .unwrap()
+        .uniques
+        .push(besu::schema::Unique {
+            name: "pairs_a_b_key".to_owned(),
+            columns: vec!["a".to_owned(), "b".to_owned()],
+        });
+
+    let added = db.push_schema(&desired).await.unwrap();
+    assert!(
+        added
+            .statements
+            .iter()
+            .any(|statement| statement.contains("UNIQUE (\"a\", \"b\")")),
+        "adding a unique constraint must rebuild the table: {:?}",
+        added.statements
+    );
+
+    let error = db
+        .execute(sql!("INSERT INTO pairs (a, b) VALUES (1, 1)"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("UNIQUE constraint failed"),
+        "{error}"
+    );
+
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}

@@ -551,8 +551,9 @@ fn encode(sql: &Sql<MySql>) -> Result<Vec<MySqlValue>, NativeError> {
                 // MySQL has no address type either; `TEXT` holds the canonical spelling.
                 Value::Inet(value) => MySqlValue::Bytes(value.as_str().as_bytes().to_vec()),
                 Value::Cidr(value) => MySqlValue::Bytes(value.as_str().as_bytes().to_vec()),
-                // A `BIT(n)` column is a big-endian byte string, most significant bit first.
-                Value::Bit(value) => MySqlValue::Bytes(value.to_bytes()),
+                // A `BIT(n)` column is an integer, so the payload is the bit pattern
+                // right-aligned in its bytes.
+                Value::Bit(value) => MySqlValue::Bytes(mysql_bit_bytes(value)),
                 // MySQL has no range type, so the column is `TEXT` and the canonical
                 // `[a,b)` spelling is exactly what is stored.
                 Value::Range { range, .. } => {
@@ -564,8 +565,17 @@ fn encode(sql: &Sql<MySql>) -> Result<Vec<MySqlValue>, NativeError> {
                 // MySQL 8.4 has no vector type; the `[1,2,3]` text is the storage.
                 Value::Vector(value) => MySqlValue::Bytes(value.to_string().into_bytes()),
                 Value::Json(value) => {
-                    let text = std::str::from_utf8(value).unwrap_or("null");
-                    let text = if text.is_empty() { "null" } else { text };
+                    // JSON is text on the wire. An invalid document is a binding mistake,
+                    // not a reason to store JSON `null` in its place.
+                    let text = std::str::from_utf8(value).map_err(|_| {
+                        NativeError::Core(Error::encode("json", "the document is not valid UTF-8"))
+                    })?;
+                    if text.is_empty() {
+                        return Err(NativeError::Core(Error::encode(
+                            "json",
+                            "the document is empty",
+                        )));
+                    }
                     MySqlValue::Bytes(text.as_bytes().to_vec())
                 }
                 // MySQL has no array type. Binding `NULL` instead would turn a programming
@@ -587,6 +597,32 @@ fn encode(sql: &Sql<MySql>) -> Result<Vec<MySqlValue>, NativeError> {
             })
         })
         .collect()
+}
+
+/// Pack a bit string the way MySQL's `BIT(n)` column reads it.
+///
+/// MySQL stores a `BIT(n)` value as an unsigned integer, so the bytes a parameter carries
+/// are interpreted as a binary number, not as a left-aligned bit sequence. `to_bytes`
+/// left-aligns the bits in `ceil(n / 8)` bytes, which is right only when the length is a
+/// multiple of eight: `BIT(12)` holding `101010101010` becomes `aaa0`, and the server sees
+/// sixteen significant bits and rejects it as too long. Shifting the packed bytes right by
+/// the padding produces `0aaa`, which is the same value right-aligned.
+fn mysql_bit_bytes(value: &BitString) -> Vec<u8> {
+    let mut bytes = value.to_bytes();
+    let padding = (8 - value.len() % 8) % 8;
+    if padding == 0 {
+        return bytes;
+    }
+    let mask = (1u8 << padding) - 1;
+    // Right-shifting the big-endian sequence moves the low bits of each byte into the high
+    // bits of the next one.
+    for index in (1..bytes.len()).rev() {
+        bytes[index] = (bytes[index] >> padding) | ((bytes[index - 1] & mask) << (8 - padding));
+    }
+    if let Some(first) = bytes.first_mut() {
+        *first >>= padding;
+    }
+    bytes
 }
 
 /// Build the seven-field date value `mysql_async` serialises.
@@ -1106,6 +1142,26 @@ impl Decode<Native> for Vector {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bit_string_is_right_aligned_for_mysql() {
+        // A byte-wide value is already right-aligned.
+        assert_eq!(
+            mysql_bit_bytes(&BitString::new("10110011").unwrap()),
+            [0b1011_0011]
+        );
+        // Twelve bits pack into two bytes left-aligned, which MySQL reads as a number that
+        // is too large for `BIT(12)`. The value has to sit in the low twelve bits instead.
+        assert_eq!(
+            mysql_bit_bytes(&BitString::new("101010101010").unwrap()),
+            [0x0a, 0xaa]
+        );
+        assert_eq!(
+            mysql_bit_bytes(&BitString::new("10101").unwrap()),
+            [0b0001_0101]
+        );
+        assert_eq!(mysql_bit_bytes(&BitString::new("0").unwrap()), [0]);
+    }
 
     #[test]
     fn decimal_text_truncates_toward_zero() {

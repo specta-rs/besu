@@ -2,7 +2,8 @@ use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
 use besu_schema::{Check, Column, ForeignKey, Index, IndexColumn, Schema, Table, Unique, View};
 
-use crate::SQLite;
+use crate::ddl::is_simple_default;
+use crate::{REBUILD_SUFFIX, SQLite};
 
 /// Read the database's schema from SQLite's own catalogue.
 ///
@@ -23,6 +24,12 @@ use crate::SQLite;
 ///
 /// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
 /// ignores that list, so they never appear as tables and `push` never touches them.
+///
+/// A table whose name carries the rebuild's `__besu_tmp` suffix is a leftover from a rebuild
+/// that failed part way through. While the table it was copying still exists, the leftover is
+/// only a stale copy and is skipped, so a failed push can be retried rather than being
+/// reported as a destructive table to drop. If the original table is gone the leftover is the
+/// only copy of the rows, so it is reported like any other table.
 pub async fn introspect<Dr>(db: &besu::Database<Dr>) -> Result<Schema, Dr::Error>
 where
     Dr: besu::Driver<Dialect = SQLite>,
@@ -37,6 +44,17 @@ where
         ))
         .all::<(String, Option<String>)>()
         .await?;
+
+    let names = tables
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let tables = tables.into_iter().filter(|(name, _)| {
+        let Some(original) = rebuild_original(name) else {
+            return true;
+        };
+        !names.iter().any(|existing| existing == original)
+    });
 
     let mut schema = Schema::new();
     for (name, create_sql) in tables {
@@ -707,6 +725,53 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
+/// One foreign-key constraint, as SQLite's pragma reports it.
+///
+/// The pragma has one row per key column, and `id` says which constraint the row belongs to.
+/// The rows of one constraint arrive in `seq` order, but the constraints themselves are
+/// ordered by the database's own identifier, which is why nothing about the name is derived
+/// from the order they arrive in.
+///
+/// The parts of a foreign key that decide the order constraints are named in: the referenced
+/// table, the key columns and the two actions together identify a constraint independently of
+/// the order SQLite reports it in.
+type ForeignKeySignature = (
+    String,
+    Vec<(String, Option<String>)>,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
+struct PendingForeignKey {
+    references_table: String,
+    on_delete: ReferenceAction,
+    on_update: ReferenceAction,
+    /// `(seq, from, to)`; `to` is `None` when the constraint named no parent columns.
+    columns: Vec<(i64, String, Option<String>)>,
+}
+
+impl PendingForeignKey {
+    /// A stable key for naming, independent of the order the pragma reports constraints in.
+    ///
+    /// Two constraints can start on the same column and reference different tables, so the
+    /// name they are given has to come from their definitions rather than from their
+    /// position, or a rename of the whole table would churn them on every push.
+    fn signature(&self) -> ForeignKeySignature {
+        let mut columns = self
+            .columns
+            .iter()
+            .map(|(_, from, to)| (from.clone(), to.clone()))
+            .collect::<Vec<_>>();
+        columns.sort();
+        (
+            self.references_table.clone(),
+            columns,
+            self.on_delete.as_sql(),
+            self.on_update.as_sql(),
+        )
+    }
+}
+
 async fn introspect_foreign_keys<Dr>(
     db: &besu::Database<Dr>,
     table: &mut Table,
@@ -732,35 +797,126 @@ where
         )>()
         .await?;
 
-    let mut current: Option<ForeignKey> = None;
-    for (id, _, references_table, from, to, on_update, on_delete, _) in rows {
-        let key = current.as_ref().map(|fk| fk.name.clone());
-        let expected = format!("{}_{}_fkey", table.name, from);
-        if key.as_deref() != Some(expected.as_str()) {
-            if let Some(fk) = current.take() {
-                table.foreign_keys.push(fk);
-            }
-            current = Some(ForeignKey {
-                name: expected,
-                columns: Vec::new(),
-                references_table: references_table.clone(),
-                references_columns: Vec::new(),
-                on_delete: parse_action(&on_delete),
-                on_update: parse_action(&on_update),
-            });
+    // Group by the constraint's `id`, not by the name derived from its first column: two
+    // constraints can both start on the same column, and merging them would report one
+    // constraint with that column listed twice and one of the two targets lost.
+    let mut pending: Vec<(i64, PendingForeignKey)> = Vec::new();
+    for (id, seq, references_table, from, to, on_update, on_delete, _) in rows {
+        match pending.iter_mut().find(|(owner, _)| *owner == id) {
+            Some((_, foreign_key)) => foreign_key.columns.push((seq, from, to)),
+            None => pending.push((
+                id,
+                PendingForeignKey {
+                    references_table,
+                    on_delete: parse_action(&on_delete),
+                    on_update: parse_action(&on_update),
+                    columns: vec![(seq, from, to)],
+                },
+            )),
         }
-        if let Some(fk) = &mut current {
-            fk.columns.push(from);
-            fk.references_columns
-                .push(to.unwrap_or_else(|| "id".into()));
-        }
-        let _ = id;
     }
-    if let Some(fk) = current {
-        table.foreign_keys.push(fk);
+
+    pending.sort_by(|a, b| a.1.signature().cmp(&b.1.signature()));
+
+    let mut names: Vec<String> = Vec::new();
+    for (_, mut pending) in pending {
+        pending.columns.sort_by_key(|(seq, _, _)| *seq);
+        let Some((_, first, _)) = pending.columns.first() else {
+            continue;
+        };
+        let base = format!("{}_{}_fkey", table.name, first);
+        let name = unique_constraint_name(&base, &pending.references_table, &names);
+        names.push(name.clone());
+
+        // A constraint written without a parent column list matches the parent's primary key
+        // in order, and the pragma reports `NULL` for every `to`. Reading the primary key is
+        // the only way to name the columns, and guessing `id` would produce a constraint the
+        // database rejects on the next `CREATE TABLE`.
+        let parents = if pending.columns.iter().any(|(_, _, to)| to.is_none()) {
+            primary_key_columns(db, &pending.references_table).await?
+        } else {
+            Vec::new()
+        };
+
+        let mut foreign_key = ForeignKey {
+            name,
+            columns: Vec::new(),
+            references_table: pending.references_table,
+            references_columns: Vec::new(),
+            on_delete: pending.on_delete,
+            on_update: pending.on_update,
+        };
+        let mut resolvable = true;
+        for (position, (_, from, to)) in pending.columns.into_iter().enumerate() {
+            foreign_key.columns.push(from);
+            match to.or_else(|| parents.get(position).cloned()) {
+                Some(to) => foreign_key.references_columns.push(to),
+                // A parent with no primary key cannot be referenced, so the constraint can
+                // never be enforced. Reporting it as a constraint on the wrong columns would
+                // be worse than leaving it out, which is what this module does with every
+                // object the IR cannot express.
+                None => {
+                    resolvable = false;
+                    break;
+                }
+            }
+        }
+        if resolvable {
+            table.foreign_keys.push(foreign_key);
+        }
     }
 
     Ok(())
+}
+
+/// A constraint name that is unique among `used`.
+///
+/// Besu's derive names a foreign key `{table}_{column}_fkey`, and that is the name a matching
+/// declaration has. Only when two constraints on one table would share it does the referenced
+/// table join the name, which is the shape the database itself cannot report.
+fn unique_constraint_name(base: &str, references_table: &str, used: &[String]) -> String {
+    if !used.iter().any(|name| name == base) {
+        return base.to_owned();
+    }
+
+    let qualified = format!("{base}_{references_table}");
+    if !used.iter().any(|name| name == &qualified) {
+        return qualified;
+    }
+
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{qualified}_{suffix}");
+        if !used.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+/// The columns of `table`'s primary key, in key order.
+///
+/// Used to resolve a foreign key that named no parent columns. A table with no primary key
+/// reports none, and a constraint that references it is skipped by the caller.
+async fn primary_key_columns<Dr>(
+    db: &besu::Database<Dr>,
+    table: &str,
+) -> Result<Vec<String>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+{
+    let pragma = format!("PRAGMA table_xinfo({})", quote_literal(table));
+    let mut columns = db
+        .execute(besu::Fragment::new(pragma))
+        .all::<(i64, String, String, i64, Option<String>, i64, i64)>()
+        .await?
+        .into_iter()
+        .filter(|(_, _, _, _, _, primary_key, _)| *primary_key > 0)
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|(_, _, _, _, _, primary_key, _)| *primary_key);
+    Ok(columns.into_iter().map(|(_, name, ..)| name).collect())
 }
 
 fn parse_action(value: &str) -> ReferenceAction {
@@ -801,18 +957,36 @@ fn parse_type(declared: &str) -> TypeDef {
     }
 }
 
-/// SQLite reports defaults verbatim, wrapped in parentheses.
+/// SQLite reports defaults verbatim, sometimes wrapped in parentheses.
+///
+/// One layer is removed only when what is inside does not need it: `DEFAULT ((1))` reads back
+/// as `(1)`, which means the same thing as `1`, while `DEFAULT (1 + 1)` reads back as
+/// `1 + 1`, which is an expression and is re-parenthesised when the DDL renders it.
 fn normalise_default(value: String) -> String {
     let trimmed = value.trim();
-    let trimmed = trimmed
+    if let Some(inner) = trimmed
         .strip_prefix('(')
-        .and_then(|v| v.strip_suffix(')'))
-        .unwrap_or(trimmed);
-    trimmed.trim().to_owned()
+        .and_then(|value| value.strip_suffix(')'))
+        .map(str::trim)
+        && is_simple_default(inner)
+    {
+        return inner.to_owned();
+    }
+    trimmed.to_owned()
 }
 
 fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Whether `name` is a table rebuild's scratch table.
+fn is_leftover_rebuild(name: &str) -> bool {
+    name.len() > REBUILD_SUFFIX.len() && name.ends_with(REBUILD_SUFFIX)
+}
+
+/// The name of the table a rebuild scratch table was copying, if `name` is one.
+fn rebuild_original(name: &str) -> Option<&str> {
+    is_leftover_rebuild(name).then(|| &name[..name.len() - REBUILD_SUFFIX.len()])
 }
 
 #[cfg(test)]

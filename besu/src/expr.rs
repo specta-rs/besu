@@ -1317,6 +1317,14 @@ impl ExprKind {
     pub(crate) fn unqualify(&mut self) {
         match self {
             Self::Column { table, .. } => *table = "",
+            // A name in the statement — an alias, a derived table or a common table expression
+            // — is a *column* of the compound's output too, so it is unqualified the same way.
+            // Leaving the qualifier would make `ORDER BY "recent"."id"` name a table the
+            // compound does not select from.
+            Self::UnprefixedColumn { column, .. } => {
+                let column = *column;
+                *self = Self::Column { table: "", column };
+            }
             Self::Binary { left, right, .. } => {
                 left.unqualify();
                 right.unqualify();
@@ -1415,7 +1423,6 @@ impl ExprKind {
             | Self::Star
             | Self::Exists { .. }
             | Self::ScalarSubquery { .. }
-            | Self::UnprefixedColumn { .. }
             | Self::UpsertRef { .. } => {}
         }
     }

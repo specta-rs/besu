@@ -17,9 +17,11 @@ pub enum Value {
     Bool(bool),
     /// A signed integer that fits in `i64`.
     Int(i64),
-    /// An unsigned integer that fits in `u64`. Only used when the value does not fit in
-    /// `i64`; smaller unsigned values are normalised to [`Value::Int`] so that dialects
-    /// with a single integer type behave predictably.
+    /// An unsigned integer that fits in `u64`.
+    ///
+    /// This is always used for a `u64`, even when the value happens to fit in an `i64`: a
+    /// column has one SQL type, and a prepared statement must not receive two different
+    /// parameter types for the same SQL.
     UInt(u64),
     /// An unsigned 128-bit integer.
     ///
@@ -508,15 +510,25 @@ from_range! {
 ///
 /// A date, a timestamp and a decimal are written in a form their own `FromStr` accepts, which
 /// is what lets a dialect without ranges store the text and decode it again. Text is quoted
-/// when it contains a character the bracket syntax uses.
+/// whenever the bracket syntax could take one of its characters, or when it is empty — an
+/// empty unquoted bound is an infinite one — and inside the quotes a `"` or a `\` is escaped
+/// with a backslash, exactly as PostgreSQL writes it.
 fn range_bound_text(value: &Value) -> String {
     match value {
         Value::Text(text) => {
-            let needs_quotes = text.chars().any(|ch| {
-                matches!(ch, ',' | '"' | '\\' | '(' | ')' | '[' | ']') || ch.is_whitespace()
-            });
+            let needs_quotes = text.is_empty()
+                || text.chars().any(|ch| {
+                    matches!(ch, ',' | '"' | '\\' | '(' | ')' | '[' | ']') || ch.is_whitespace()
+                });
             if needs_quotes {
-                alloc::format!("\"{}\"", text.replace('"', "\"\""))
+                let mut escaped = String::with_capacity(text.len());
+                for ch in text.chars() {
+                    if matches!(ch, '"' | '\\') {
+                        escaped.push('\\');
+                    }
+                    escaped.push(ch);
+                }
+                alloc::format!("\"{escaped}\"")
             } else {
                 text.clone()
             }
@@ -536,5 +548,52 @@ fn range_bound_text(value: &Value) -> String {
         // Every value a range can hold is covered above; the diagnostic form is the honest
         // fallback for anything else.
         other => other.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::scalars::{Bound, ParseValueError, Range};
+
+    /// Read a rendered range back as text, which is what a dialect without ranges does.
+    fn parse_text_range(text: &str) -> Result<Range<Value>, ParseValueError> {
+        Range::parse_with(text, |bound| {
+            Ok::<_, core::convert::Infallible>(Value::Text(bound.to_owned()))
+        })
+    }
+
+    #[test]
+    fn a_text_range_bound_survives_the_text_spelling() {
+        // A bound is text the bracket syntax has to be told apart from; an empty bound is the
+        // one that used to be written bare and then read back as an unbounded range.
+        for bound in ["", "a,b", "a\"b", "a\\b", "a\\", "a b", "[x]", "a\\\\b"] {
+            let range = Range::new(
+                Bound::Included(Value::Text(bound.to_owned())),
+                Bound::Unbounded,
+            );
+            let rendered = Value::range_text(&range);
+            assert_eq!(
+                parse_text_range(&rendered).as_ref(),
+                Ok(&range),
+                "`{bound}` rendered as `{rendered}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_numeric_range_survives_the_text_spelling() {
+        let range = Range::closed(Value::Int(1), Value::Int(5));
+        let rendered = Value::range_text(&range);
+        assert_eq!(rendered, "[1,5]");
+        let parsed = Range::parse_with(&rendered, |bound| {
+            bound
+                .parse::<i64>()
+                .map(Value::Int)
+                .map_err(|_| ParseValueError::new(bound, "an integer"))
+        });
+        assert_eq!(parsed, Ok(range));
+        assert_eq!(Value::range_text(&Range::<Value>::empty()), "empty");
     }
 }

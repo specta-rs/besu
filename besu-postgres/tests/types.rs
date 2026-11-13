@@ -598,6 +598,51 @@ async fn array_operators_are_rendered_for_postgres() {
     assert_eq!(appended[0], ["go", "db"]);
 }
 
+/// Arrays whose elements are not one of PostgreSQL's four- or eight-byte integers.
+///
+/// A `u64` is `NUMERIC(20,0)` here, and a time is an eight-byte microsecond count inside a
+/// day. Both used to be decoded with the wrong arithmetic even though the scalar forms
+/// worked.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "numeric_time_arrays")]
+pub struct NumericTimeArrays {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub bigs: Vec<u64>,
+    pub clocks: Vec<chrono::NaiveTime>,
+}
+
+#[tokio::test]
+async fn arrays_of_wide_integers_and_times_round_trip() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([numeric_time_arrays.def()]).await.unwrap();
+
+    let original = NumericTimeArrays {
+        id: 1,
+        // A `u64` array element is a `NUMERIC`, not a `BIGINT`.
+        bigs: vec![0, 1, i64::MAX as u64 + 1, u64::MAX],
+        // The first value is after 01:11:34, where the microseconds no longer fit in a
+        // `u32`; the last is the end of the day.
+        clocks: vec![
+            chrono::NaiveTime::from_hms_opt(13, 45, 6).unwrap(),
+            chrono::NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999).unwrap(),
+            chrono::NaiveTime::MIN,
+        ],
+    };
+    db.insert(numeric_time_arrays)
+        .value(numeric_time_arrays.insert(
+            original.id,
+            original.bigs.clone(),
+            original.clocks.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let stored: Vec<NumericTimeArrays> = db.select(numeric_time_arrays).await.unwrap();
+    assert_eq!(stored, [original]);
+}
+
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "arrays_of_numbers")]
 pub struct Numbers {
@@ -621,4 +666,38 @@ async fn array_elements_use_the_declared_element_type() {
 
     let stored: Vec<Numbers> = db.select(arrays_of_numbers).all().await.unwrap();
     assert_eq!(stored[0].amounts, [0, u128::MAX]);
+}
+
+/// Two statements with the same SQL text but different parameter types must not share a
+/// prepared statement.
+///
+/// `sqlx` caches a statement by its SQL text, and PostgreSQL fixes a parameter's type when a
+/// statement is prepared. The dialect appends a comment describing each argument's shape for
+/// exactly this reason, so a `DATE` and an enum label cannot land on the same cache entry.
+#[tokio::test]
+async fn a_date_and_an_enum_label_are_different_cached_statements() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    // A transaction keeps both statements on one connection, which is where the cache lives.
+    let mut tx = db.begin().await.unwrap();
+
+    let mut date = Sql::<Postgres>::raw("SELECT $1");
+    date.push_arg(Value::Date(
+        chrono::NaiveDate::from_ymd_opt(2024, 5, 17).unwrap(),
+    ));
+    let date = date.seal();
+    let stored: Vec<(chrono::NaiveDate,)> = tx.execute(Fragment::from(date)).all().await.unwrap();
+    assert_eq!(
+        stored,
+        [(chrono::NaiveDate::from_ymd_opt(2024, 5, 17).unwrap(),)]
+    );
+
+    let mut label = Sql::<Postgres>::raw("SELECT $1");
+    label.push_arg(Value::EnumLabel("happy".into()));
+    let label = label.seal();
+    let stored: Vec<(String,)> = tx.execute(Fragment::from(label)).all().await.unwrap();
+    assert_eq!(stored, [("happy".to_owned(),)]);
+
+    tx.commit().await.unwrap();
 }

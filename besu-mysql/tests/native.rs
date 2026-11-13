@@ -574,6 +574,58 @@ async fn a_set_and_a_bit_round_trip() {
     assert_eq!(table.column("flags").unwrap().ty, TypeDef::Bit(8));
 }
 
+/// A `BIT(n)` whose width is not a whole number of bytes.
+///
+/// MySQL stores a `BIT(n)` as an integer, so the parameter has to be the value right-aligned
+/// in its bytes. The left-aligned packing that works for `BIT(8)` turns `BIT(12)` holding
+/// `101010101010` into `0xaaa0`, which the server rejects as too wide.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "native_narrow_bits")]
+pub struct NarrowBits {
+    #[besu(primary_key)]
+    pub id: i64,
+    #[besu(sql_type = "besu::Bit<12>")]
+    pub flags: BitString,
+    #[besu(sql_type = "besu::Bit<5>")]
+    pub small: BitString,
+}
+
+#[tokio::test]
+async fn a_bit_width_that_is_not_a_whole_byte_round_trips() {
+    let db = fresh("besu_native_narrow_bits").await;
+    db.push([native_narrow_bits.def()]).await.unwrap();
+    assert!(
+        db.push([native_narrow_bits.def()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // The top bit of the width is set, so the left-aligned bytes would exceed the column.
+    for (id, flags, small) in [
+        (1_i64, "101010101010", "10101"),
+        (2, "111111111111", "11111"),
+        (3, "100000000000", "10000"),
+    ] {
+        db.insert(native_narrow_bits)
+            .value(native_narrow_bits.insert(
+                id,
+                BitString::new(flags).unwrap(),
+                BitString::new(small).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let stored: Vec<NarrowBits> = db
+            .select(native_narrow_bits)
+            .filter(native_narrow_bits.id.eq(id))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].flags.as_str(), flags);
+        assert_eq!(stored[0].small.as_str(), small);
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------------------
@@ -1168,6 +1220,15 @@ async fn a_value_that_does_not_match_its_rust_type_is_an_error() {
     let error = db.driver().query(&statement).await.unwrap_err();
     assert!(
         error.to_string().contains("has no array type"),
+        "unexpected error: {error}"
+    );
+
+    // Invalid JSON is rejected rather than replaced with the JSON `null` document.
+    let mut statement = besu::Sql::<MySql>::raw("SELECT ?");
+    statement.push_arg(Value::Json(vec![0xff]));
+    let error = db.driver().query(&statement).await.unwrap_err();
+    assert!(
+        error.to_string().contains("json"),
         "unexpected error: {error}"
     );
 }

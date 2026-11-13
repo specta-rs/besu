@@ -231,6 +231,110 @@ fn table(name: &str, columns: Vec<Column>) -> TableIr {
     }
 }
 
+/// A user index that happens to cover a foreign key's columns is still a user index.
+///
+/// InnoDB creates an index for a foreign key only when no existing index can serve it. The
+/// index it creates (when it does) is named after the constraint, so a differently named
+/// index over the same columns is something the user wrote and has to be reported.
+#[tokio::test]
+async fn a_user_index_over_foreign_key_columns_is_reported() {
+    let db = fresh("besu_test_fk_index").await;
+    db.execute(sql!("CREATE TABLE `parents` (`id` BIGINT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE `children` (\
+             `id` BIGINT PRIMARY KEY, \
+             `parent_id` BIGINT NOT NULL, \
+             CONSTRAINT `children_parent_fk` FOREIGN KEY (`parent_id`) \
+               REFERENCES `parents` (`id`), \
+             KEY `children_parent_idx` (`parent_id`))"
+    ))
+    .await
+    .unwrap();
+
+    let introspected = db.introspect().await.unwrap();
+    let children = introspected.table("children").unwrap();
+    assert!(
+        children
+            .indexes
+            .iter()
+            .any(|index| index.name == "children_parent_idx"),
+        "the user's index was hidden as if InnoDB created it: {:?}",
+        children.indexes
+    );
+    // The snapshot is what push compares against, so it must not report drift either way.
+    assert!(db.push_schema(&introspected).await.unwrap().is_empty());
+}
+
+/// Changing the type of a unique column keeps the unique key it already has.
+///
+/// `MODIFY COLUMN` carries the whole column definition, and MySQL leaves the existing
+/// indexes in place. Repeating `UNIQUE` in the new definition therefore created a second
+/// key named `code_2`, which introspection then reported as drift.
+#[tokio::test]
+async fn changing_a_unique_columns_type_does_not_add_a_second_unique_key() {
+    let db = fresh("besu_test_unique_alter").await;
+
+    let schema = |ty: TypeDef| {
+        let mut code = column("code", ty);
+        code.unique = true;
+        let accounts = table(
+            "accounts",
+            vec![
+                {
+                    let mut id = column("id", TypeDef::Int8);
+                    id.primary_key = true;
+                    id
+                },
+                code,
+            ],
+        );
+        let mut schema = Schema::new();
+        schema.tables.push(accounts);
+        schema.sort();
+        schema
+    };
+
+    db.push_schema(&schema(TypeDef::Int4)).await.unwrap();
+    let changed = db.push_schema(&schema(TypeDef::Int8)).await.unwrap();
+    assert_eq!(
+        changed.statements,
+        ["ALTER TABLE `accounts` MODIFY COLUMN `code` BIGINT NOT NULL"]
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let accounts = introspected.table("accounts").unwrap();
+    assert!(accounts.column("code").unwrap().unique);
+    assert!(
+        accounts.indexes.is_empty(),
+        "the column kept its unique key, so there is no second one: {:?}",
+        accounts.indexes
+    );
+    assert!(
+        db.push_schema(&schema(TypeDef::Int8))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Removing the constraint drops the key instead of leaving it behind.
+    let mut without = schema(TypeDef::Int8);
+    without.tables[0].columns[1].unique = false;
+    let dropped = db.push_schema_destructive(&without).await.unwrap();
+    assert_eq!(
+        dropped.statements,
+        [
+            "DROP INDEX `code` ON `accounts`",
+            "ALTER TABLE `accounts` MODIFY COLUMN `code` BIGINT NOT NULL"
+        ]
+    );
+    let introspected = db.introspect().await.unwrap();
+    let accounts = introspected.table("accounts").unwrap();
+    assert!(!accounts.column("code").unwrap().unique);
+    assert!(accounts.indexes.is_empty(), "got {:?}", accounts.indexes);
+}
+
 /// `FULLTEXT` and `SPATIAL` are MySQL's own access methods. They are rendered inside
 /// `CREATE TABLE` and as `CREATE FULLTEXT INDEX` when the table already exists, and read
 /// back from `STATISTICS.INDEX_TYPE`.
@@ -697,6 +801,103 @@ async fn a_snapshot_replays_to_the_same_types() {
     assert_eq!(
         replayed.column("name").unwrap().ty,
         TypeDef::Collated(Box::new(TypeDef::VarChar(20)), "utf8mb4_bin".into())
+    );
+}
+
+/// A snapshot carries defaults as SQL, not as the bare text `information_schema` reports.
+///
+/// MySQL reports `'hi'` as `hi` and `(concat('a','b'))` as `concat(_latin1\'a\',...)`; writing
+/// either back verbatim produced `DEFAULT hi` (an identifier) or a syntax error. Replaying
+/// the snapshot into an empty database is what proves the conversion is executable.
+#[tokio::test]
+async fn a_snapshot_replays_literal_and_expression_defaults() {
+    let source = fresh("besu_test_defaults_source").await;
+    source
+        .execute(sql!(
+            "CREATE TABLE defaulted (\
+                 id BIGINT PRIMARY KEY, \
+                 label VARCHAR(20) NOT NULL DEFAULT 'hi', \
+                 quoted VARCHAR(20) NOT NULL DEFAULT 'it''s', \
+                 spaced VARCHAR(20) NOT NULL DEFAULT '  x  ', \
+                 amount INT NOT NULL DEFAULT 5, \
+                 day DATE NOT NULL DEFAULT '2024-01-02', \
+                 stamp DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) \
+                   ON UPDATE CURRENT_TIMESTAMP(6), \
+                 mood ENUM('happy','sad') NOT NULL DEFAULT 'sad', \
+                 joined VARCHAR(40) NOT NULL DEFAULT (concat('a','b')), \
+                 today DATE NOT NULL DEFAULT (CURRENT_DATE), \
+                 note TEXT NOT NULL DEFAULT ('a''b'))"
+        ))
+        .await
+        .unwrap();
+    let snapshot = source.introspect().await.unwrap();
+
+    let source_table = snapshot.table("defaulted").unwrap();
+    assert_eq!(
+        source_table.column("label").unwrap().default.as_deref(),
+        Some("'hi'")
+    );
+    assert_eq!(
+        source_table.column("quoted").unwrap().default.as_deref(),
+        Some("'it''s'")
+    );
+    assert_eq!(
+        source_table.column("spaced").unwrap().default.as_deref(),
+        Some("'  x  '")
+    );
+    assert_eq!(
+        source_table.column("amount").unwrap().default.as_deref(),
+        Some("5")
+    );
+    assert_eq!(
+        source_table.column("day").unwrap().default.as_deref(),
+        Some("'2024-01-02'")
+    );
+
+    let destination = fresh("besu_test_defaults_destination").await;
+    destination.push_schema(&snapshot).await.unwrap();
+
+    let replayed = destination.introspect().await.unwrap();
+    let table = replayed.table("defaulted").unwrap();
+    assert_eq!(
+        table.column("label").unwrap().default.as_deref(),
+        Some("'hi'")
+    );
+    assert_eq!(
+        table.column("quoted").unwrap().default.as_deref(),
+        Some("'it''s'")
+    );
+    assert_eq!(
+        table.column("spaced").unwrap().default.as_deref(),
+        Some("'  x  '")
+    );
+    assert_eq!(
+        table.column("amount").unwrap().default.as_deref(),
+        Some("5")
+    );
+    assert_eq!(
+        table.column("day").unwrap().default.as_deref(),
+        Some("'2024-01-02'")
+    );
+    assert_eq!(
+        table.column("mood").unwrap().default.as_deref(),
+        Some("'sad'")
+    );
+    assert!(
+        table
+            .column("stamp")
+            .unwrap()
+            .default
+            .as_deref()
+            .unwrap()
+            .contains("ON UPDATE CURRENT_TIMESTAMP(6)"),
+        "got {:?}",
+        table.column("stamp").unwrap().default
+    );
+    // A second push from the replayed snapshot is a no-op, so the conversions are stable.
+    assert!(
+        destination.push_schema(&replayed).await.unwrap().is_empty(),
+        "the replayed schema must converge"
     );
 }
 

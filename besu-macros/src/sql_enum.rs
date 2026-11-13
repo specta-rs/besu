@@ -3,7 +3,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Attribute, Data, DeriveInput, Error, Fields, LitStr, Result, spanned::Spanned};
 
-use crate::table::besu_path;
+use crate::table::{besu_path, ident_str};
 
 pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     let besu = besu_path();
@@ -59,7 +59,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
         let label = match rename {
             Some(label) => label,
             None => LitStr::new(
-                &rename_all(attrs.rename_all, &variant_ident_str(&variant.ident)),
+                &rename_all(attrs.rename_all, &ident_str(&variant.ident)),
                 variant.ident.span(),
             ),
         };
@@ -148,15 +148,6 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
             }
         }
     })
-}
-
-/// The identifier a label is derived from, without the `r#` of a raw identifier.
-fn variant_ident_str(ident: &syn::Ident) -> String {
-    let ident = ident.to_string();
-    match ident.strip_prefix("r#") {
-        Some(ident) => ident.to_owned(),
-        None => ident,
-    }
 }
 
 /// How a variant's name is turned into a label.

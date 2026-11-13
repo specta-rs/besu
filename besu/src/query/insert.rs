@@ -65,7 +65,14 @@ impl OnConflict {
 #[derive(Debug, Clone)]
 pub(crate) struct InsertQuery {
     pub(crate) table: &'static TableDef,
-    /// Every row's values, row after row, with one entry per column.
+    /// The columns the values are written for, in write order.
+    ///
+    /// This is [`Insertable::COLUMNS`](crate::Insertable::COLUMNS), which is the whole row
+    /// except for columns the database computes. The table's declared column list includes
+    /// those generated columns, so indexing the value buffer by it would misalign every
+    /// value after the first generated column.
+    pub(crate) columns: &'static [&'static str],
+    /// Every row's values, row after row, with one entry per insertable column.
     ///
     /// Flat rather than a `Vec` of rows: a bulk insert used to be one allocation per row,
     /// each sized to a power of two for a handful of entries, and rendering walked the heap
@@ -80,9 +87,10 @@ pub(crate) struct InsertQuery {
 }
 
 impl InsertQuery {
-    pub(crate) fn new(table: &'static TableDef) -> Self {
+    pub(crate) fn new(table: &'static TableDef, columns: &'static [&'static str]) -> Self {
         Self {
             table,
+            columns,
             values: Vec::new(),
             conflict: None,
             row_alias: "new",
@@ -92,8 +100,8 @@ impl InsertQuery {
     }
 
     /// The number of entries each row contributes.
-    fn stride(&self) -> usize {
-        self.table.columns.len()
+    pub(crate) fn stride(&self) -> usize {
+        self.columns.len()
     }
 
     /// How many rows have been added.
@@ -127,7 +135,7 @@ impl InsertQuery {
 
         if stride == 0 || self.values.len() % stride != 0 {
             out.set_error(Error::invalid_query(alloc::format!(
-                "`insert` produced {} value(s) for a table with {} column(s); \
+                "`insert` produced {} value(s) for an insert with {} column(s); \
                  `Insertable` must return one entry per column",
                 self.values.len(),
                 stride
@@ -162,7 +170,7 @@ impl InsertQuery {
             if i != 0 {
                 out.push_raw(", ");
             }
-            out.push_ident(self.table.columns[*index].name);
+            out.push_ident(self.columns[*index]);
         }
         out.push_raw(") VALUES ");
 
@@ -199,7 +207,7 @@ impl InsertQuery {
                                 "`{}` does not support `DEFAULT` inside `VALUES`, and this \
                                  bulk insert provides `{}` in some rows but not others",
                                 D::NAME,
-                                self.table.columns[*index].name
+                                self.columns[*index]
                             )));
                         }
                     }
@@ -403,7 +411,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
     pub(crate) fn new(exec: E, table: &'static TableDef) -> Self {
         Self {
             exec,
-            query: InsertQuery::new(table),
+            query: InsertQuery::new(table, I::COLUMNS),
             phantom: PhantomData,
         }
     }
@@ -594,7 +602,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
     ) -> Result<Vec<E::Output>, ErrorOf<E>> {
         let prefix = self.exec.table_prefix();
         let mut exec = self.exec;
-        let stride = self.query.table.columns.len();
+        let stride = self.query.stride();
         // One flat buffer for the whole iterator, drained one statement at a time. Building
         // a row at a time and pushing it into a `VecDeque` allocated per row for no reason:
         // nothing here needs to revisit a value.
@@ -609,7 +617,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         let per_statement = rows_per_statement.max(1).saturating_mul(stride.max(1));
         let mut outputs = Vec::new();
         loop {
-            let mut query = InsertQuery::new(self.query.table);
+            let mut query = InsertQuery::new(self.query.table, self.query.columns);
             query.conflict = self.query.conflict.clone();
             query.row_alias = self.query.row_alias;
             query.comment = self.query.comment.clone();

@@ -2104,7 +2104,32 @@ macro_rules! array_integer_element {
     };
 }
 
-array_integer_element!(i8, i16, i32, i64, u16, u32, u64);
+array_integer_element!(i8, i16, i32, i64, u16, u32);
+
+/// A 64-bit unsigned integer lives in `NUMERIC(20,0)`, so its array elements are `NUMERIC`
+/// rather than one of PostgreSQL's integer types. Reading it through the integer decoder
+/// rejected every `Vec<u64>` column that this crate itself declares.
+impl ArrayElement for u64 {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        let value = if element == NUMERIC_OID {
+            let (negative, value) = decode_numeric_binary(bytes)?;
+            if negative {
+                return Err("a negative NUMERIC does not fit in an unsigned integer");
+            }
+            value
+        } else {
+            u128::try_from(array_integer(element, bytes)?)
+                .map_err(|_| "an array element is out of range for its Rust type")?
+        };
+        u64::try_from(value).map_err(|_| "an array element is out of range for its Rust type")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        text.trim()
+            .parse()
+            .map_err(|_| "an array element is not a valid integer")
+    }
+}
 
 /// A 128-bit integer arrives as a `NUMERIC`, because no PostgreSQL integer is that wide.
 macro_rules! array_wide_integer_element {
@@ -2216,12 +2241,16 @@ impl ArrayElement for chrono::NaiveTime {
             return Err("this element is not a TIME");
         }
         let micros = array_micros(bytes)?;
-        let micros = u32::try_from(micros).map_err(|_| "the time is out of range")?;
-        chrono::NaiveTime::from_num_seconds_from_midnight_opt(
-            micros / 1_000_000,
-            (micros % 1_000_000) * 1_000,
-        )
-        .ok_or("the time is out of range")
+        // A whole day is 86_400_000_000 microseconds, which does not fit in a `u32`; only
+        // the seconds and the sub-second part do, so the division comes first.
+        if !(0..86_400_000_000).contains(&micros) {
+            return Err("the time is out of range");
+        }
+        let seconds = u32::try_from(micros / 1_000_000).map_err(|_| "the time is out of range")?;
+        let nanos =
+            u32::try_from((micros % 1_000_000) * 1_000).map_err(|_| "the time is out of range")?;
+        chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
+            .ok_or("the time is out of range")
     }
 
     fn decode_text(text: &str) -> Result<Self, &'static str> {

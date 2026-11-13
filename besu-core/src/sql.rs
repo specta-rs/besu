@@ -1,6 +1,6 @@
 use alloc::{borrow::Cow, fmt, string::String, sync::Arc, vec::Vec};
 
-use crate::{Dialect, Error, Value};
+use crate::{Dialect, Error, Placeholder, Value};
 
 /// A fully rendered SQL statement with its bound parameters.
 ///
@@ -162,7 +162,7 @@ impl<D: Dialect> Sql<D> {
     /// Append a single space, unless the statement is empty or already ends in whitespace.
     pub fn space(&mut self) {
         let s = self.sql.to_mut();
-        if !s.is_empty() && !s.ends_with(' ') {
+        if !s.is_empty() && !s.ends_with(char::is_whitespace) {
             s.push(' ');
         }
     }
@@ -239,16 +239,31 @@ impl<D: Dialect> Sql<D> {
     }
 
     /// Append another statement, moving across its parameters and any error.
+    ///
+    /// The appended statement keeps working for a dialect that numbers its placeholders: each
+    /// index in the appended text is moved along by the number of parameters this statement
+    /// already carries. Placeholders inside a single-quoted, double-quoted or backtick-quoted
+    /// literal are left alone.
     pub fn append(&mut self, mut other: Sql<D>) {
+        let offset = self.args.len();
         {
-            let out = self.sql.to_mut();
             let tail = other.sql.to_mut();
+            match D::PLACEHOLDER {
+                // Every placeholder is a bare `?`, and the next one is whatever comes next.
+                Placeholder::Question => {}
+                Placeholder::Dollar => renumber_placeholders(tail, '$', offset),
+                Placeholder::QuestionNumbered => renumber_placeholders(tail, '?', offset),
+            }
+            let out = self.sql.to_mut();
             out.push_str(tail);
         }
         self.args.append(&mut other.args);
         if self.error.is_none() {
             self.error = other.error;
         }
+        // The two statements were each within the limit on their own, but together they may
+        // not be.
+        self.check_param_limit();
     }
 
     /// The SQL text.
@@ -377,29 +392,30 @@ impl<D: Dialect> fmt::Display for Inspect<'_, D> {
                     }
                     // Consume an optional explicit index (`?1`), which we ignore because
                     // parameters arrive in order anyway.
-                    while matches!(chars.peek(), Some((_, c)) if c.is_ascii_digit()) {
-                        chars.next();
-                    }
+                    let digits = take_digits(&mut chars);
                     match params.next() {
                         Some(value) => f.write_fmt(format_args!("{}", render_param::<D>(value)))?,
-                        None => f.write_str("?")?,
+                        // Nothing to substitute: write the placeholder back exactly as it was.
+                        None => {
+                            f.write_str("?")?;
+                            f.write_str(&digits)?;
+                        }
                     }
                 }
                 '$' => {
-                    let mut consumed = false;
-                    while matches!(chars.peek(), Some((_, c)) if c.is_ascii_digit()) {
-                        chars.next();
-                        consumed = true;
-                    }
-                    if consumed {
+                    let digits = take_digits(&mut chars);
+                    if digits.is_empty() {
+                        f.write_str("$")?;
+                    } else {
                         match params.next() {
                             Some(value) => {
                                 f.write_fmt(format_args!("{}", render_param::<D>(value)))?
                             }
-                            None => f.write_str("$")?,
+                            None => {
+                                f.write_str("$")?;
+                                f.write_str(&digits)?;
+                            }
                         }
-                    } else {
-                        f.write_str("$")?;
                     }
                 }
                 _ => f.write_fmt(format_args!("{ch}"))?,
@@ -418,6 +434,219 @@ impl<D: Dialect> fmt::Display for Inspect<'_, D> {
     }
 }
 
+/// Move every numbered placeholder in `sql` along by `offset`.
+///
+/// `marker` is the character a numbered placeholder starts with: `$` for PostgreSQL and `?`
+/// for SQLite's explicit form. A marker that is not followed by a digit is SQL text — a `?`
+/// operator, a `$` in an identifier — and is left alone, as is everything inside a quoted
+/// literal.
+fn renumber_placeholders(sql: &mut String, marker: char, offset: usize) {
+    if offset == 0 || !sql.contains(marker) {
+        return;
+    }
+    let mut out = String::with_capacity(sql.len());
+    let mut quote: Option<char> = None;
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(open) = quote {
+            out.push(ch);
+            if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        if marker != ch {
+            if matches!(ch, '\'' | '"' | '`') {
+                quote = Some(ch);
+            }
+            out.push(ch);
+            continue;
+        }
+        // The marker starts a placeholder only when a digit follows it.
+        if !chars.peek().is_some_and(char::is_ascii_digit) {
+            out.push(ch);
+            continue;
+        }
+        let mut digits = String::new();
+        while let Some(&next) = chars.peek() {
+            if !next.is_ascii_digit() {
+                break;
+            }
+            digits.push(next);
+            chars.next();
+        }
+        out.push(marker);
+        match digits.parse::<usize>() {
+            Ok(index) => crate::dialect::write_index(&mut out, index.saturating_add(offset)),
+            // Too many digits to be an index Besu wrote; keep the text as it stands.
+            Err(_) => out.push_str(&digits),
+        }
+    }
+    *sql = out;
+}
+
+/// Consume the run of ASCII digits that follows a placeholder marker.
+///
+/// The digits are returned rather than discarded so that a placeholder with nothing to
+/// substitute is written back exactly as it appeared.
+fn take_digits(chars: &mut core::iter::Peekable<core::str::CharIndices<'_>>) -> String {
+    let mut digits = String::new();
+    while let Some(&(_, ch)) = chars.peek() {
+        if !ch.is_ascii_digit() {
+            break;
+        }
+        digits.push(ch);
+        chars.next();
+    }
+    digits
+}
+
 fn render_param<D: Dialect>(value: &D::Value) -> String {
     alloc::format!("{value:?}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Placeholder, TypeDef, UpsertStyle};
+
+    /// A PostgreSQL-shaped dialect: numbered placeholders that are part of the text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Postgres;
+
+    impl Dialect for Postgres {
+        type Value = Value;
+        const NAME: &'static str = "postgres";
+        const PLACEHOLDER: Placeholder = Placeholder::Dollar;
+        const SUPPORTS_RETURNING: bool = true;
+        const SUPPORTS_ILIKE: bool = true;
+        const SUPPORTS_FULL_JOIN: bool = true;
+        const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
+
+        fn bind(value: Value) -> Result<Self::Value, Error> {
+            Ok(value)
+        }
+
+        fn write_placeholder(out: &mut String, index: usize) {
+            out.push('$');
+            crate::dialect::write_index(out, index + 1);
+        }
+
+        fn type_name(_: TypeDef) -> Cow<'static, str> {
+            Cow::Borrowed("TEXT")
+        }
+    }
+
+    /// A SQLite-shaped dialect with one `?` per parameter, plus a parameter limit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Sqlite;
+
+    impl Dialect for Sqlite {
+        type Value = Value;
+        const NAME: &'static str = "sqlite";
+        const PLACEHOLDER: Placeholder = Placeholder::Question;
+        const SUPPORTS_RETURNING: bool = true;
+        const SUPPORTS_ILIKE: bool = false;
+        const SUPPORTS_FULL_JOIN: bool = true;
+        const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
+        const MAX_PARAMS: usize = 2;
+
+        fn bind(value: Value) -> Result<Self::Value, Error> {
+            Ok(value)
+        }
+
+        fn write_placeholder(out: &mut String, _: usize) {
+            out.push('?');
+        }
+
+        fn type_name(_: TypeDef) -> Cow<'static, str> {
+            Cow::Borrowed("TEXT")
+        }
+    }
+
+    #[test]
+    fn a_space_is_not_added_after_any_whitespace() {
+        for (sql, expected) in [
+            ("a", "a "),
+            ("a ", "a "),
+            ("a\n", "a\n"),
+            ("a\t", "a\t"),
+            ("", ""),
+        ] {
+            let mut sql = Sql::<Postgres>::raw(sql);
+            sql.space();
+            assert_eq!(sql.sql(), expected);
+        }
+    }
+
+    #[test]
+    fn appending_renumbers_numbered_placeholders() {
+        // Each statement is built as its own text, so each starts at `$1`. Appending the two
+        // has to move the second one along or the statement refers to the same parameter
+        // twice and never mentions the second.
+        let mut first = Sql::<Postgres>::raw("a = ");
+        first.bind(1_i64);
+        let mut second = Sql::<Postgres>::raw(" AND b = ");
+        second.bind(2_i64);
+        first.append(second);
+        assert_eq!(first.sql(), "a = $1 AND b = $2");
+        assert_eq!(first.args(), &[Value::Int(1), Value::Int(2)]);
+
+        // A `$1` that is SQL text rather than a placeholder is left alone.
+        let mut first = Sql::<Postgres>::raw("a = ");
+        first.bind(1_i64);
+        let mut second = Sql::<Postgres>::raw(" AND note = 'cost $1' AND b = ");
+        second.bind(2_i64);
+        first.append(second);
+        assert_eq!(first.sql(), "a = $1 AND note = 'cost $1' AND b = $2");
+    }
+
+    #[test]
+    fn appending_a_question_dialect_needs_no_renumbering() {
+        let mut first = Sql::<Sqlite>::raw("a = ");
+        first.bind(1_i64);
+        let mut second = Sql::<Sqlite>::raw(" AND b = ");
+        second.bind(2_i64);
+        first.append(second);
+        assert_eq!(first.sql(), "a = ? AND b = ?");
+    }
+
+    #[test]
+    fn appending_cannot_sneak_past_the_parameter_limit() {
+        // Each statement is within SQLite's own limit of two, but the pair is not.
+        let mut first = Sql::<Sqlite>::raw("a = ");
+        first.bind(1_i64);
+        first.bind(2_i64);
+        let mut second = Sql::<Sqlite>::raw(" AND b = ");
+        second.bind(3_i64);
+        second.bind(4_i64);
+        first.append(second);
+        assert!(first.error().is_some(), "the limit must be checked again");
+        assert!(first.render().is_err());
+    }
+
+    #[test]
+    fn inspecting_keeps_a_placeholder_that_has_no_parameter() {
+        // A malformed statement is a debugging aid's problem, but the rendering must not
+        // invent different SQL: the unmatched placeholder is written back as it was.
+        let mut sql = Sql::<Postgres>::raw("SELECT $1, $2");
+        sql.push_arg(Value::Int(1));
+        assert_eq!(sql.inspect().to_string(), "SELECT 1, $2");
+
+        let mut sql = Sql::<Sqlite>::raw("SELECT ?, ?");
+        sql.push_arg(Value::Int(1));
+        assert_eq!(sql.inspect().to_string(), "SELECT 1, ?");
+    }
+
+    #[test]
+    fn inspecting_substitutes_each_parameter_once_in_order() {
+        let mut sql = Sql::<Postgres>::raw("SELECT * FROM t WHERE a = ");
+        sql.bind(1_i64);
+        sql.push_raw(" AND b = ");
+        sql.bind("x");
+        assert_eq!(
+            sql.inspect().to_string(),
+            "SELECT * FROM t WHERE a = 1 AND b = 'x'"
+        );
+    }
 }

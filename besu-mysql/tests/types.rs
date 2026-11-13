@@ -5,8 +5,8 @@
 #![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
-use besu::Decimal;
 use besu::prelude::*;
+use besu::{Decimal, Driver};
 use besu_mysql::Sqlx;
 use sqlx::MySqlPool;
 
@@ -120,6 +120,19 @@ async fn declared_type_is_a_128_bit_unsigned_integer() {
     // `DECIMAL(39,0)` introspects back as the same width, so a second push is a no-op.
     let second = db.push([wide_numbers.def()]).await.unwrap();
     assert!(second.is_empty(), "got {:?}", second.changes);
+}
+
+/// Invalid JSON is an encode error, not a silently stored JSON `null`.
+#[tokio::test]
+async fn invalid_json_is_rejected_before_it_reaches_the_server() {
+    let db = fresh("besu_mysql_invalid_json").await;
+    let mut statement = besu::Sql::<besu_mysql::MySql>::raw("SELECT ?");
+    statement.push_arg(Value::Json(vec![0xff]));
+    let error = db.driver().query(&statement).await.unwrap_err();
+    assert!(
+        error.to_string().contains("json"),
+        "unexpected error: {error}"
+    );
 }
 
 /// A `DECIMAL` with a scale still goes through `BigDecimal`, which truncates it, even though

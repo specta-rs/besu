@@ -70,6 +70,7 @@ impl Dialect for BacktickDialect {
     const SUPPORTS_FULL_JOIN: bool = false;
     const SUPPORTS_INTERSECT_ALL: bool = false;
     const SUPPORTS_EXCEPT_ALL: bool = false;
+    const SUPPORTS_NULLS_ORDER: bool = false;
     const JSON_PATH: besu_core::JsonPathStyle = besu_core::JsonPathStyle::Mysql;
     const UPSERT: UpsertStyle = UpsertStyle::OnDuplicateKey;
 
@@ -2420,4 +2421,148 @@ fn a_limited_has_many_can_be_nested_under_a_limited_many_to_many() {
         )
     );
     assert_eq!(statements[2].args(), [Value::Int(7), Value::Int(1)]);
+}
+
+// ---------------------------------------------------------------------------------------
+// Regression tests found by bug-hunting the query layer
+// ---------------------------------------------------------------------------------------
+
+/// A table with a generated column, so the insert struct omits a column the table still has.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "line_items")]
+pub struct LineItem {
+    #[besu(primary_key)]
+    id: i64,
+    price: i64,
+    quantity: i64,
+    note: String,
+    #[besu(generated = "price * quantity")]
+    total: i64,
+}
+
+/// A generated column is not part of the insert struct, so the value buffer is one entry per
+/// insertable column rather than one per declared column. Indexing it by the table's column
+/// list made every plain insert into such a table fail before rendering.
+#[test]
+fn an_insert_skips_generated_columns_without_misaligning_the_row() {
+    let db = dry::<TestDialect>();
+
+    let sql = db
+        .insert(line_items)
+        .value(line_items.insert(1, 20, 3, "first"))
+        .to_sql()
+        .unwrap();
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "line_items" ("id", "price", "quantity", "note") VALUES ($1, $2, $3, $4)"#
+    );
+    assert_eq!(
+        sql.args(),
+        [
+            Value::Int(1),
+            Value::Int(20),
+            Value::Int(3),
+            Value::Text("first".into()),
+        ]
+    );
+
+    let sql = db
+        .insert(line_items)
+        .values([
+            line_items.insert(1, 20, 3, "first"),
+            line_items.insert(2, 5, 7, "second"),
+        ])
+        .to_sql()
+        .unwrap();
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+    assert_eq!(
+        sql.sql(),
+        r#"INSERT INTO "line_items" ("id", "price", "quantity", "note") VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)"#
+    );
+    assert_eq!(
+        sql.args(),
+        [
+            Value::Int(1),
+            Value::Int(20),
+            Value::Int(3),
+            Value::Text("first".into()),
+            Value::Int(2),
+            Value::Int(5),
+            Value::Int(7),
+            Value::Text("second".into()),
+        ]
+    );
+}
+
+/// MySQL has no `NULLS FIRST` / `NULLS LAST`, so the emulation writes the expression twice.
+/// Rendering moves an expression's bound values, so the second copy must be made first;
+/// without that the parameters after the first were bound as `NULL`.
+#[test]
+fn the_emulated_nulls_ordering_binds_a_parameter_for_every_occurrence() {
+    let db = dry::<BacktickDialect>();
+    let ordered: besu::Expr<(UserTable,), besu::Text> = coalesce(users.name, "!");
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .order_by(ordered.nulls_first())
+        .to_sql()
+        .unwrap();
+
+    assert_eq!(
+        sql.sql(),
+        "SELECT `users`.`id` FROM `users` ORDER BY (COALESCE(`users`.`name`, ?) IS NULL) DESC, COALESCE(`users`.`name`, ?) ASC"
+    );
+    assert_eq!(
+        sql.args(),
+        [Value::Text("!".into()), Value::Text("!".into())]
+    );
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+}
+
+/// SQLite with its `UPDATE/DELETE LIMIT` extension spells `RETURNING` before `LIMIT`, so a
+/// delete that uses both has to write them in that order. The old order was a syntax error.
+#[test]
+fn a_delete_writes_returning_before_its_limit() {
+    let db = dry::<TestDialect>();
+
+    let sql = db
+        .delete(users)
+        .filter(users.id.eq(1_i64))
+        .limit(1)
+        .returning(users.id)
+        .to_sql()
+        .unwrap();
+
+    assert_eq!(
+        sql.sql(),
+        r#"DELETE FROM "users" WHERE ("users"."id" = $1) RETURNING "users"."id" LIMIT $2"#
+    );
+    assert_eq!(sql.args(), [Value::Int(1), Value::Int(1)]);
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+}
+
+/// A compound's `ORDER BY` may only name an output column, so a column reached through a
+/// derived table is unqualified like a table column is. Leaving `"recent"."id"` named a table
+/// the compound does not select from.
+#[test]
+fn a_compound_orders_by_a_derived_column_without_qualifying_it() {
+    let db = dry::<TestDialect>();
+    let recent = derived(db.select(users).pick(users.id), "recent");
+    let id = recent.column(users.id);
+
+    let sql = db
+        .select(&recent)
+        .pick(id.clone())
+        .union(db.select(users).pick(users.id))
+        .order_by(id)
+        .to_sql()
+        .unwrap();
+
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "recent"."id" FROM (SELECT "users"."id" FROM "users") AS "recent" UNION SELECT "users"."id" FROM "users" ORDER BY "id" ASC"#
+    );
+    assert!(sql.error().is_none(), "{:?}", sql.error());
 }

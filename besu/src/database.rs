@@ -226,6 +226,9 @@ pub struct Transaction<'a, Dr: TransactionDriver> {
     /// The number of savepoints opened through [`Transaction::transaction`], so each gets a
     /// name of its own.
     savepoints: u32,
+    /// The table prefix the database carries, so a query built inside the transaction names
+    /// the same physical tables a query on the database itself would.
+    prefix: Option<alloc::sync::Arc<str>>,
 }
 
 impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
@@ -391,6 +394,10 @@ impl<'a, Dr: TransactionDriver> Executor for &mut Transaction<'a, Dr> {
     {
         Dr::txn_query_stream(&mut self.inner, sql)
     }
+
+    fn table_prefix(&self) -> Option<alloc::sync::Arc<str>> {
+        self.prefix.clone()
+    }
 }
 
 impl<Dr: TransactionDriver> Database<Dr> {
@@ -399,6 +406,7 @@ impl<Dr: TransactionDriver> Database<Dr> {
         Ok(Transaction {
             inner: Dr::begin(&self.driver).await?,
             savepoints: 0,
+            prefix: self.prefix.clone(),
         })
     }
 
@@ -510,11 +518,11 @@ impl<Dr: TransactionDriver> Database<Dr> {
             ..
         } = parent;
 
-        let stride = parent_table.columns.len();
+        let stride = parent_query.stride();
         if stride == 0 {
             return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
-                "`insert_tree` needs a parent table with at least one column, but `{}` has \
-                 none",
+                "`insert_tree` needs a parent table with at least one insertable column, but \
+                 `{}` has none",
                 parent_table.name
             ))));
         }
@@ -548,10 +556,10 @@ impl<Dr: TransactionDriver> Database<Dr> {
                 ))));
             }
         };
-        let child_foreign_key_index = match child_table
-            .columns
+        let child_columns = <C::Insert as Insertable>::COLUMNS;
+        let child_foreign_key_index = match child_columns
             .iter()
-            .position(|column| column.name == child_foreign_key)
+            .position(|column| *column == child_foreign_key)
         {
             Some(index) => index,
             None => {
@@ -619,7 +627,7 @@ impl<Dr: TransactionDriver> Database<Dr> {
             // One flat buffer for the whole child statement, written a row at a time. The
             // foreign key is overwritten in place immediately after each row lands, so there
             // is no second pass and no per-row allocation.
-            let child_stride = child_table.columns.len();
+            let child_stride = child_columns.len();
             let children = children.into_iter();
             let (child_rows, _) = children.size_hint();
             let mut child_values = Vec::with_capacity(child_rows.saturating_mul(child_stride));
@@ -641,7 +649,7 @@ impl<Dr: TransactionDriver> Database<Dr> {
                 return Ok((parent_model, Vec::new()));
             }
 
-            let mut child_query = InsertQuery::new(child_table);
+            let mut child_query = InsertQuery::new(child_table, child_columns);
             child_query.values = child_values;
             child_query.returning = Some(
                 child_table
@@ -746,10 +754,27 @@ impl<'a, E: Executor + Send + 'a> IntoFuture for RawQuery<'a, E> {
 /// Quoting an identifier is not enough here: `SAVEPOINT` takes a name, not a string, and not
 /// every dialect accepts a quoted one. Restricting the character set is the honest fix.
 fn is_valid_savepoint_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
     !name.is_empty()
         && name.len() <= 64
-        && name.as_bytes()[0].is_ascii_alphabetic()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_savepoint_name;
+
+    #[test]
+    fn a_savepoint_name_may_start_with_an_underscore() {
+        // The error message and the documentation both say letters, digits and underscores,
+        // so an underscore is legal anywhere an identifier can start.
+        assert!(is_valid_savepoint_name("_before_commit"));
+        assert!(is_valid_savepoint_name("besu_savepoint_0"));
+        assert!(!is_valid_savepoint_name("0_before"));
+        assert!(!is_valid_savepoint_name("has space"));
+        assert!(!is_valid_savepoint_name(""));
+    }
 }

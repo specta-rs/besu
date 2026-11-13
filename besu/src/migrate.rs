@@ -270,22 +270,12 @@ impl<Dr: SchemaDriver> Database<Dr> {
 
         let ddl = Dr::Ddl::default();
 
-        // A dialect that spells an enum inside the column has no named type to create or
-        // drop. A declaration still collects its named enums (so the same struct works on
-        // PostgreSQL), so leaving them in the comparison would report a `CreateEnum` that
-        // renders as nothing on every push. The labels travel on the column's own type.
-        if ddl.inline_enums() {
-            current.enums.clear();
-            desired.enums.clear();
-        }
-
-        // A dialect without domains renders one as its base type, so a snapshot pulled from
-        // PostgreSQL still works there. The domain list has nothing to create or drop, and
-        // leaving it in the comparison would report a change on every push.
-        if !ddl.expresses_domains() {
-            current.domains.clear();
-            desired.domains.clear();
-        }
+        // Fold everything the dialect cannot represent — inline enums, domains, standalone
+        // sequences, operator classes and partial indexes — out of both sides. A declaration
+        // that is meaningful on PostgreSQL otherwise reports a change on every push to
+        // SQLite or MySQL that no statement can ever apply.
+        besu_schema::normalise_schema(&ddl, &mut current);
+        besu_schema::normalise_schema(&ddl, &mut desired);
 
         let changes = besu_schema::diff_with(&current, &desired, &|ty| ddl.normalise_type(ty));
 
