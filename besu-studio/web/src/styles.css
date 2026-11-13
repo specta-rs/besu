@@ -1,0 +1,210 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --color-bg: var(--sp-bg);
+  --color-panel: var(--sp-panel);
+  --color-panel-2: var(--sp-panel-2);
+  --color-panel-3: var(--sp-panel-3);
+  --color-line: var(--sp-line);
+  --color-line-strong: var(--sp-line-strong);
+  --color-ink: var(--sp-ink);
+  --color-ink-2: var(--sp-ink-2);
+  --color-ink-3: var(--sp-ink-3);
+  --color-accent: var(--sp-accent);
+  --color-accent-ink: var(--sp-accent-ink);
+  --color-accent-soft: var(--sp-accent-soft);
+  --color-ok: var(--sp-ok);
+  --color-warn: var(--sp-warn);
+  --color-err: var(--sp-err);
+  --color-info: var(--sp-info);
+}
+
+:root {
+  --sp-bg: #fbf8f4;
+  --sp-panel: #ffffff;
+  --sp-panel-2: #f6f1ea;
+  --sp-panel-3: #efe8df;
+  --sp-line: rgb(60 42 25 / 12%);
+  --sp-line-strong: rgb(60 42 25 / 22%);
+  --sp-ink: #1b1611;
+  --sp-ink-2: #5d5349;
+  --sp-ink-3: #8b8075;
+  --sp-accent: #c2410c;
+  --sp-accent-ink: #fffaf5;
+  --sp-accent-soft: rgb(194 65 12 / 10%);
+  --sp-ok: #157f3d;
+  --sp-warn: #a16207;
+  --sp-err: #b91c1c;
+  --sp-info: #1d4ed8;
+  --sp-grid-head: #f4eee6;
+  --sp-grid-row: #ffffff;
+  --sp-grid-row-alt: #fdfaf6;
+  --sp-selection: rgb(194 65 12 / 12%);
+  --sp-shadow: 0 1px 2px rgb(60 42 25 / 6%), 0 8px 24px rgb(60 42 25 / 5%);
+  color-scheme: light;
+}
+
+.dark {
+  --sp-bg: #0a0908;
+  --sp-panel: #121010;
+  --sp-panel-2: #171413;
+  --sp-panel-3: #1e1a18;
+  --sp-line: rgb(244 226 208 / 10%);
+  --sp-line-strong: rgb(244 226 208 / 20%);
+  --sp-ink: #f3eee7;
+  --sp-ink-2: #b3a89b;
+  --sp-ink-3: #7d7368;
+  --sp-accent: #ff6a2a;
+  --sp-accent-ink: #1a0c05;
+  --sp-accent-soft: rgb(255 106 42 / 13%);
+  --sp-ok: #4ade80;
+  --sp-warn: #fbbf24;
+  --sp-err: #f87171;
+  --sp-info: #93b4ff;
+  --sp-grid-head: #171413;
+  --sp-grid-row: #100e0d;
+  --sp-grid-row-alt: #141110;
+  --sp-selection: rgb(255 106 42 / 14%);
+  --sp-shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 12px 32px rgb(0 0 0 / 45%);
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--sp-bg);
+  color: var(--sp-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--sp-selection);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--sp-accent);
+  outline-offset: 1px;
+}
+
+/* Thin, unobtrusive scrollbars: the studio is a dense, multi-pane surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sp-line-strong) transparent;
+}
+
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--sp-line);
+    border-radius: 7px;
+    background: var(--sp-panel);
+    color: var(--sp-ink);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--sp-panel-2);
+    border-color: var(--sp-line-strong);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .btn-primary {
+    border-color: transparent;
+    background: var(--sp-accent);
+    color: var(--sp-accent-ink);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--sp-accent);
+    filter: brightness(1.08);
+    border-color: transparent;
+  }
+  .btn-ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--sp-ink-2);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--sp-panel-2);
+    color: var(--sp-ink);
+    border-color: transparent;
+  }
+  .btn-danger {
+    border-color: transparent;
+    background: transparent;
+    color: var(--sp-err);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--sp-err) 12%, transparent);
+    border-color: transparent;
+  }
+  .btn-icon {
+    width: 28px;
+    padding: 0;
+  }
+
+  .field {
+    height: 28px;
+    padding: 0 9px;
+    border: 1px solid var(--sp-line);
+    border-radius: 7px;
+    background: var(--sp-panel);
+    color: var(--sp-ink);
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .field::placeholder {
+    color: var(--sp-ink-3);
+  }
+  .field:focus {
+    outline: none;
+    border-color: var(--sp-accent);
+    box-shadow: 0 0 0 3px var(--sp-accent-soft);
+  }
+
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 5px;
+    border: 1px solid var(--sp-line);
+    border-radius: 4px;
+    background: var(--sp-panel-2);
+    color: var(--sp-ink-3);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  .panel {
+    border: 1px solid var(--sp-line);
+    border-radius: 10px;
+    background: var(--sp-panel);
+  }
+}

@@ -317,8 +317,21 @@ nothing in the library depends on the CLI.
 It uses only the dynamic APIs. `AnyDatabase::introspect` supplies `GET /api/schema`; the row
 endpoint matches on the backend, asks the driver for each cell as text — the driver is the
 only layer that knows how a row is laid out — projects `NULL` through `Driver::is_null`, and
-uses the introspected column type to restore numbers, booleans and JSON. The page is one
-HTML file inlined into the binary, with no build step and no CDN.
+uses the introspected column type to restore numbers, booleans and JSON. Writes go the other
+way: the column's `TypeDef` decides the type a bound parameter is cast to, and a table without
+a primary key refuses an update rather than guessing which row was meant.
+
+The frontend is a Vite + SolidJS application in `besu-studio/web`. It is built to
+`web/dist`, committed, and embedded into the binary by a build script, so `cargo build` needs
+no Node toolchain and the published crate serves a working UI with no CDN and no asset
+directory to lose. The same bundle is deployed to Cloudflare as a read-only demo, with the
+HTTP client swapped for fixture data.
+
+The SQL console reads a statement's result through two passes: a `LIMIT 1` probe, whose row
+gives the result column names through `Driver::column_names`, then the same statement wrapped
+so every column is cast to text. That keeps the console working across three dialects without
+a type table, and it never re-runs a mutating statement — a probe that fails is simply
+executed once.
 
 ### Security posture
 

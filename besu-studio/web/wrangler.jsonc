@@ -1,0 +1,13 @@
+{
+  // The hosted build of the studio: a static demo bundle (`vite build --mode demo`)
+  // with fixture data, no Rust server and no API. `wrangler deploy` uploads `dist`
+  // as static assets only, so this Worker never runs code.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "besu-studio",
+  "compatibility_date": "2025-12-31",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [{ "pattern": "studio.besu.specta.dev", "custom_domain": true }]
+}

@@ -1,0 +1,8 @@
+[{"id":1,"post_id":1,"author_id":2,"body":"The SQL output in this post is exactly what I wanted to see.","created_at":"2026-08-03T10:12:00Z"},
+{"id":2,"post_id":1,"author_id":4,"body":"Does the derive work with a schema-qualified table?","created_at":"2026-08-03T14:55:00Z"},
+{"id":3,"post_id":1,"author_id":1,"body":"If you mean `app.users`, yes — the schema is part of the table identity.","created_at":"2026-08-04T08:20:00Z"},
+{"id":4,"post_id":3,"author_id":5,"body":"The batched second statement is the part I keep missing.","created_at":"2026-08-21T09:44:00Z"},
+{"id":5,"post_id":5,"author_id":6,"body":"Reading EXPLAIN output should be taught in every tutorial.","created_at":"2026-09-02T12:01:00Z"},
+{"id":6,"post_id":8,"author_id":3,"body":"Bookmarking this for the next architecture argument.","created_at":"2026-09-20T11:16:00Z"},
+{"id":7,"post_id":8,"author_id":10,"body":"The type system does the work, the database does not have to guess.","created_at":"2026-09-21T07:48:00Z"},
+{"id":8,"post_id":10,"author_id":2,"body":"`INTERVAL` and `INET` are the two I hit first as well.","created_at":"2026-10-05T15:30:00Z"}]

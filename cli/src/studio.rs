@@ -68,7 +68,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         println!("It is bound to loopback only; pass --allow-remote to expose it.");
     }
 
-    besu_studio::serve(listener, db)
+    besu_studio::serve(listener, db, args.database)
         .await
         .map_err(|err| anyhow::anyhow!("the studio stopped unexpectedly: {err}"))
 }

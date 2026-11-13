@@ -2,7 +2,7 @@ use std::{path::Path, str::from_utf8};
 
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use sqlx::{
-    Arguments, Row, Sqlite, SqlitePool,
+    Arguments, Column as _, Row, Sqlite, SqlitePool,
     sqlite::{
         SqliteArguments, SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult, SqliteRow,
     },
@@ -187,6 +187,15 @@ impl Driver for Sqlx {
         row.try_get_raw(index)
             .map(|value| sqlx::ValueRef::is_null(&value))
             .unwrap_or(true)
+    }
+
+    fn column_names(row: &Self::Row) -> Option<Vec<String>> {
+        Some(
+            row.columns()
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect(),
+        )
     }
 
     async fn query(&self, sql: &Sql<SQLite>) -> Result<Vec<Self::Row>, Self::Error> {

@@ -43,6 +43,18 @@ pub trait Driver: Clone + Send + Sync + 'static {
     /// fail: an out-of-range index reports `true`.
     fn is_null(row: &Self::Row, index: usize) -> bool;
 
+    /// The names of a row's columns, in the order this driver decodes them.
+    ///
+    /// A result set's names are a property of the response rather than the statement: only
+    /// the server knows what `SELECT *` expanded to, and only it can name an expression the
+    /// query did not alias. A driver that can read them off a row should; the default is
+    /// `None` so a hand-written driver that cannot report names is not forced to invent
+    /// them. Callers should treat `None` as "there is nothing to display" rather than as an
+    /// error.
+    fn column_names(_row: &Self::Row) -> Option<Vec<String>> {
+        None
+    }
+
     /// Run a query and collect every row.
     fn query(
         &self,

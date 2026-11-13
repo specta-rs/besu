@@ -1,7 +1,7 @@
 use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
 use chrono::Timelike;
 use sqlx::{
-    Arguments, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
+    Arguments, Column as _, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
     postgres::{
         PgArgumentBuffer, PgArguments, PgQueryResult, PgRow, PgTypeInfo, PgValueFormat, PgValueRef,
     },
@@ -669,6 +669,15 @@ impl Driver for Sqlx {
         row.try_get_raw(index)
             .map(|value| ValueRef::is_null(&value))
             .unwrap_or(true)
+    }
+
+    fn column_names(row: &Self::Row) -> Option<Vec<String>> {
+        Some(
+            row.columns()
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect(),
+        )
     }
 
     async fn query(&self, sql: &Sql<Postgres>) -> Result<Vec<Self::Row>, Self::Error> {

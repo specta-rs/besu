@@ -1,0 +1,10 @@
+[{"id":1,"name":"Oscar Beaumont","email":"oscar@specta.dev","role":"admin","created_at":"2026-02-14T09:12:00Z"},
+{"id":2,"name":"Aria Chen","email":"aria@specta.dev","role":"member","created_at":"2026-02-15T14:03:00Z"},
+{"id":3,"name":"Ben Okafor","email":"ben@example.com","role":"member","created_at":"2026-02-18T08:41:00Z"},
+{"id":4,"name":"Mira Patel","email":"mira@example.com","role":"editor","created_at":"2026-03-02T19:27:00Z"},
+{"id":5,"name":"Tomás Silva","email":"tomas@example.com","role":"member","created_at":"2026-03-11T11:55:00Z"},
+{"id":6,"name":"Nina Kowalski","email":"nina@example.com","role":"editor","created_at":"2026-04-01T07:09:00Z"},
+{"id":7,"name":"Kenji Watanabe","email":"kenji@example.com","role":"member","created_at":"2026-04-19T22:30:00Z"},
+{"id":8,"name":"Sofia Rossi","email":"sofia@example.com","role":"member","created_at":"2026-05-07T16:18:00Z"},
+{"id":9,"name":"Theo Martin","email":"theo@example.com","role":"member","created_at":"2026-06-23T10:02:00Z"},
+{"id":10,"name":"Priya Nair","email":"priya@example.com","role":"admin","created_at":"2026-07-30T13:44:00Z"}]

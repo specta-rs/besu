@@ -15,3 +15,8 @@ debug/
 *.db
 *.db-shm
 *.db-wal
+
+# Studio frontend: dependencies are installed, the built bundle is committed
+# (`besu-studio/web/dist`) so `cargo build` needs no Node toolchain.
+besu-studio/web/node_modules/
+besu-studio/web/.wrangler/

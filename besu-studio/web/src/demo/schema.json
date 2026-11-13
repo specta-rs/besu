@@ -1,0 +1,199 @@
+{
+  "tables": [
+    {
+      "name": "comments",
+      "columns": [
+        {
+          "name": "id",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "post_id",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "author_id",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "body",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "created_at",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "comments_author_id_fkey",
+          "columns": [
+            "author_id"
+          ],
+          "references_table": "users",
+          "references_columns": [
+            "id"
+          ],
+          "on_delete": "Default",
+          "on_update": "Default"
+        },
+        {
+          "name": "comments_post_id_fkey",
+          "columns": [
+            "post_id"
+          ],
+          "references_table": "posts",
+          "references_columns": [
+            "id"
+          ],
+          "on_delete": "Default",
+          "on_update": "Default"
+        }
+      ]
+    },
+    {
+      "name": "posts",
+      "columns": [
+        {
+          "name": "id",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "author_id",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "title",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "published",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false,
+          "default": "0"
+        },
+        {
+          "name": "views",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false,
+          "default": "0"
+        },
+        {
+          "name": "created_at",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "posts_author_id",
+          "columns": [
+            "author_id"
+          ],
+          "unique": false
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "posts_author_id_fkey",
+          "columns": [
+            "author_id"
+          ],
+          "references_table": "users",
+          "references_columns": [
+            "id"
+          ],
+          "on_delete": "Default",
+          "on_update": "Default"
+        }
+      ]
+    },
+    {
+      "name": "users",
+      "columns": [
+        {
+          "name": "id",
+          "ty": "Int8",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": true,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        },
+        {
+          "name": "email",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": true
+        },
+        {
+          "name": "role",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false,
+          "default": "'member'"
+        },
+        {
+          "name": "created_at",
+          "ty": "Text",
+          "nullable": false,
+          "auto_increment": false,
+          "primary_key": false,
+          "unique": false
+        }
+      ]
+    }
+  ]
+}

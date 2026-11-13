@@ -24,6 +24,21 @@ besu-core ──┬─▶ besu ──▶ besu-sqlite / besu-postgres / besu-mysq
 If you find yourself wanting to add a dependency from `besu-core` to anything in this
 workspace, the abstraction is wrong — say so in an issue instead.
 
+## The studio frontend
+
+`besu-studio/web` is a Vite + SolidJS + Tailwind application. Its build is committed to
+`web/dist` and embedded into the binary by `besu-studio/build.rs`, which is what keeps
+`cargo build` free of a Node toolchain and makes the published crate serve a working UI.
+
+```sh
+pnpm --dir besu-studio/web install
+pnpm --dir besu-studio/web dev     # http://localhost:5173, proxying /api to a running studio
+pnpm --dir besu-studio/web build   # rewrites web/dist — commit the result
+```
+
+The `studio` CI job fails when `web/dist` is stale, so a change that touches `web/src` and not
+the bundle is caught in review rather than at release.
+
 ## Running the tests
 
 SQLite tests need nothing. PostgreSQL and MySQL tests need a server:

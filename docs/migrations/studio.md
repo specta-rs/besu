@@ -1,9 +1,13 @@
 # `besu studio`
 
-`besu studio` is a development-only schema and data browser: one HTML page served beside the
-introspected schema, a paged row view and a one-statement SQL box. It is a subcommand of the
-CLI, so it ships with `besu` and needs nothing extra installed; the server itself lives in the
-`besu studio` crate, which is a library and has no binary of its own.
+A database browser served by the CLI: browse and edit rows, filter and sort them, read the
+schema, and run SQL. It introspects the database it is pointed at, so there is no config file
+and nothing else to install.
+
+```sh
+besu studio --database sqlite://app.db
+# besu studio 0.1.0 listening on http://127.0.0.1:4983
+```
 
 ```sh
 Usage: besu studio [OPTIONS] --database <DATABASE>
@@ -29,42 +33,82 @@ Options:
           Print version
 ```
 
-```sh
-besu studio --database sqlite://app.db
-# besu studio 0.1.0 listening on http://127.0.0.1:4983
-```
-
 `--database` reads `DATABASE_URL` like every other subcommand, so a shell that already exports
 it needs no flag. `RUST_LOG` is honoured — `besu studio` is the one subcommand that installs a
 tracing subscriber, because a server without its request log is hard to trust.
 
-## What it serves
+## The interface
+
+Three panes, one page:
+
+- **The sidebar** lists tables and views, searchable, with the connection it is browsing. It
+  keeps the SQL console one click away.
+- **The data view** is a grid over one table: pagination, a filter bar, multi-column sorting,
+  column visibility, CSV and JSON export of the page, and a sticky primary-key column so a
+  wide table stays readable.
+- **The structure view** is the same table as the database sees it: columns and types, the
+  primary key, uniques, indexes, foreign keys and checks, plus the `CREATE TABLE` the IR
+  renders for copy-paste.
+
+Clicking a row opens an editor with a control per column type — a checkbox for a boolean, a
+textarea for JSON, a NULL toggle for a nullable column. Only changed fields are written.
+Adding a row uses the same controls and leaves defaults to the database. Deleting asks first,
+and names the primary key it is about to remove.
+
+The **SQL console** runs one statement at a time and shows the result set with the same
+density as the grid, along with the row count and how long it took. The last twenty statements
+are kept for recall; in a browser, they survive navigation.
+
+### Keyboard
+
+| Keys | Action |
+| --- | --- |
+| `⌘K` / `Ctrl K` | Command palette: any table, view or action |
+| `/` | Focus the table search |
+| `↑` `↓` or `j` `k` | Move the row selection |
+| `Enter` | Open the selected row |
+| `Escape` | Close the drawer, dialog or palette |
+| `⌘↵` / `Ctrl ↵` | Run the statement (SQL console) |
+| `↑` `↓` | Recall a previous statement (SQL console) |
+
+## The hosted demo
+
+[studio.besu.specta.dev](https://studio.besu.specta.dev) is the same frontend against fixture
+data — three tables generated from a real SQLite database. It needs no server: the demo build
+swaps the HTTP client for an in-memory one, so browsing, filtering and the editors all work and
+nothing leaves the page. The SQL console explains that it needs a local process, because
+arbitrary SQL cannot run without a database behind it.
+
+## How it ships
+
+The frontend is Vite + SolidJS + Tailwind in `besu-studio/web`. It is built to
+`besu-studio/web/dist`, committed, and embedded into the binary by `besu-studio/build.rs`, so
+`cargo build` needs no Node toolchain and the published crate serves a working UI. The server
+answers:
 
 | Route | Purpose |
 | --- | --- |
-| `GET /` | The single page, inlined into the `besu` binary |
+| `GET /api/info` | Dialect, database and version |
 | `GET /api/schema` | The introspected `Schema` as JSON |
-| `GET /api/tables/{table}/rows` | A page of rows, `?limit=` and `?offset=` |
-| `POST /api/query` | One SQL statement, body `{ "sql": "..." }` |
+| `GET /api/tables/{table}/rows` | A page of rows, `?limit=`, `?offset=`, `?sort=`, `?filter=` |
+| `POST` `PATCH` `DELETE /api/tables/{table}/rows` | Insert, update or delete one row |
+| `POST /api/query` | One SQL statement, with its result set |
 
-The row endpoint projects every column as text, restores numbers, booleans and JSON from the
-introspected type, and returns `{ table, columns, rows, limit, offset }`. The default page is
-50 rows and the maximum is 500. A table name is checked against the introspected schema before
-any statement is built, and the identifier is quoted by the dialect.
-
-The query endpoint returns `{ rows_affected, last_insert_id, warning }` and refuses a request
-that the migration splitter does not report as exactly one statement.
+`{table}` may be schema-qualified and may name a view. Row pages carry `columns` with their
+Besu types, so the client renders and edits each value the way its type deserves.
 
 ## Security posture
 
-There is no authentication, no read-only mode and no audit trail. The query box runs
-arbitrary SQL, including statements that write. Treat every process as a shell with a database
+There is no authentication, no read-only mode and no audit trail. The query box runs arbitrary
+SQL, including statements that write. Treat every process as a shell with a database
 connection.
 
 The server therefore:
 
 - binds `127.0.0.1` unless `--allow-remote` is passed, and prints what that means when it is;
 - refuses to serve a table name that is not in the introspected schema;
+- builds every statement through `Sql`, which quotes identifiers the dialect's own way;
+- strips the password out of the connection string before the UI ever sees it;
 - splits the query body with the same splitter the migration runner uses, and refuses more
   than one statement.
 
@@ -76,13 +120,15 @@ and the studio does nothing to change that.
 
 - **`--allow-remote` is an explicit exposure.** Anyone who can reach the port can read and
   modify the database.
-- **The SQL box has no bound parameters.** A bare `?` is a placeholder with no value, so the
-  statement fails at the server; `??` is a literal question mark.
-- **A row page is capped at 500 rows.** There is no cursor; use the SQL box for anything
-  larger.
-- **Every API call introspects again.** `/api/schema` reads the whole schema for the table
-  list, and each row page reads it again to find its table. A large schema pays for that on
-  every request.
+- **Editing needs a primary key.** Without one, a row cannot be identified, so the drawer
+  shows the values read-only and refuses to save or delete rather than guessing.
+- **A row page is capped at 500 rows.** Use the SQL console for anything larger; its result
+  set is capped too.
+- **The SQL console returns text.** A statement's result columns are read through a cast, so
+  every cell arrives as a string and the console does not restore numbers or booleans the way
+  the table grid does.
+- **`?` is a placeholder.** A bare `?` in the SQL box has no value, so the statement fails at
+  the server; `??` is a literal question mark.
 - **It is not a migration tool.** It never diffs and never applies a schema; use
   [`besu push`](push.md) or [`besu migrate`](migrate.md).
 

@@ -10,6 +10,9 @@ rust-version.workspace = true
 readme = "README.md"
 categories = ["database", "development-tools"]
 keywords = ["database", "studio", "sqlite", "postgresql", "mysql"]
+# The frontend is committed already built, so the crate builds with Cargo alone and
+# the published package serves a working UI.
+include = ["src/**", "build.rs", "web/dist/**", "Cargo.toml", "README.md"]
 
 [lints]
 workspace = true

@@ -124,6 +124,31 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+  studio:
+    name: studio frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: besu-studio/web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: besu-studio/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm build
+      # The bundle is committed so Cargo builds on a machine without Node. A
+      # stale one would ship an old UI from the binary, which is the kind of
+      # drift nobody notices until a release.
+      - name: The committed bundle matches the source
+        run: git diff --exit-code -- dist
+
   docs:
     name: docs
     runs-on: ubuntu-latest
