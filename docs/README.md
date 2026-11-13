@@ -65,4 +65,3 @@ are in the query, and whether a bulk write was intentional.
 - [Architecture](architecture.md) — the crate graph and how a query becomes SQL
 - [Writing a driver](drivers.md) — `Dialect`, `Driver`, `SchemaDriver`, `Ddl`, `Decode`
 - [Comparison](comparison.md) — Besu against Diesel, SeaORM, sqlx and Drizzle
-- [Roadmap](roadmap.md) — what is missing, and what it would take

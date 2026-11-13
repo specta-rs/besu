@@ -195,7 +195,7 @@ published at [specta.dev/docs/besu](https://specta.dev/docs/besu).
 - [Transactions](docs/advanced/transactions.md), [set operations](docs/advanced/set-operations.md) and [subqueries](docs/advanced/subqueries.md)
 - [Migrations](docs/migrations/overview.md)
 - [Performance](docs/performance.md) and [writing a driver](docs/drivers.md)
-- [Architecture](docs/architecture.md), [comparison](docs/comparison.md) and [roadmap](docs/roadmap.md)
+- [Architecture](docs/architecture.md) and [comparison](docs/comparison.md)
 
 API reference is on [docs.rs](https://docs.rs/besu).
 

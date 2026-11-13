@@ -78,6 +78,11 @@ A few rules are load-bearing; please do not break them without a discussion in a
 5. **Drivers are dumb.** Anything about *what* SQL to run belongs in the dialect, so the same
    code path serves a driverless test and a production pool.
 
+Trait changes are the expensive part of this rulebook: `Driver`, `Executor` and `Ddl` are public
+API, and adding a method is a breaking change for every driver, so open an issue before starting
+one of those. A new expression, a new `Change` variant or a CLI improvement is much easier to
+land.
+
 ## Releasing
 
 Publishing uses crates.io trusted publishing: the `release` workflow exchanges its GitHub OIDC
