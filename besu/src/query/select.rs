@@ -626,7 +626,7 @@ where
             .finish()
             .map_err(<E::Driver as Driver>::error)?;
         let rows = exec.query(&sql).await?;
-        decode_rows::<E, R>(&rows)
+        decode_rows::<E::Driver, R>(&rows)
     }
 
     /// Run the query and return the first row, if any.
@@ -639,14 +639,19 @@ where
             .finish()
             .map_err(<E::Driver as Driver>::error)?;
         let rows = exec.query(&sql).await?;
-        let mut decoded = decode_rows::<E, R>(&rows)?;
+        let mut decoded = decode_rows::<E::Driver, R>(&rows)?;
         Ok(decoded.pop())
     }
 }
 
-pub(super) fn decode_rows<E: Executor, R: Decode<E::Driver>>(
-    rows: &[<E::Driver as Driver>::Row],
-) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
+/// Decode every row into `R`, one allocation for the whole result.
+///
+/// Generic over the driver rather than the executor so a batch, which holds the driver's
+/// transaction rather than an executor, decodes a query exactly the way awaiting it on its
+/// own does.
+pub(crate) fn decode_rows<Dr: Driver, R: Decode<Dr>>(
+    rows: &[Dr::Row],
+) -> Result<alloc::vec::Vec<R>, Dr::Error> {
     let mut out = alloc::vec::Vec::with_capacity(rows.len());
     for row in rows {
         let mut offset = 0;

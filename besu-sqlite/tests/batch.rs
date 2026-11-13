@@ -6,6 +6,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::Batch;
+use besu::Bool;
 use besu::prelude::*;
 use besu_sqlite::Sqlx;
 
@@ -175,4 +176,189 @@ async fn generated_sql_is_each_statement_to_sql() {
         r#"UPDATE "users" SET "age" = ? WHERE ("users"."email" = ?)"#
     );
     assert_eq!(rendered.2.args().len(), 2);
+}
+
+#[tokio::test]
+async fn a_select_in_the_tuple_sees_the_write_before_it() {
+    let db = setup().await;
+
+    // The third element is a `SELECT`. It runs after the two inserts, in the same
+    // transaction, so it reads the rows they wrote even though nothing has committed yet.
+    // The tuple's type is the proof that the elements stay distinct: two driver outputs and
+    // one `Vec<User>`.
+    let (first, second, rows): (_, _, Vec<User>) = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            db.insert(users)
+                .value(users.insert("b@example.com", "Bob", 17)),
+            db.select(users)
+                .filter(users.age.gte(18))
+                .order_by(users.email.asc()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(first.rows_affected(), 1);
+    assert_eq!(second.rows_affected(), 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].email, "a@example.com");
+    assert_eq!(rows[0].age, 30);
+
+    // The transaction committed, so the writes are still there afterwards.
+    let all: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[tokio::test]
+async fn a_read_only_batch_of_two_selects_returns_both_results() {
+    let db = setup().await;
+    for (email, name, age) in [
+        ("a@example.com", "Alice", 30),
+        ("b@example.com", "Bob", 17),
+        ("c@example.com", "Carol", 25),
+    ] {
+        db.insert(users)
+            .value(users.insert(email, name, age))
+            .await
+            .unwrap();
+    }
+
+    // The two statements have the same row type here, and they are still two separate
+    // results: the batch does not concatenate them.
+    let (everyone, adults): (Vec<User>, Vec<User>) = db
+        .batch((
+            db.select(users).order_by(users.age.asc()),
+            db.select(users)
+                .filter(users.age.gte(18))
+                .order_by(users.age.asc()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        everyone
+            .iter()
+            .map(|user| user.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Bob", "Carol", "Alice"]
+    );
+    assert_eq!(
+        adults
+            .iter()
+            .map(|user| user.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Carol", "Alice"]
+    );
+}
+
+#[tokio::test]
+async fn a_select_in_a_batch_decodes_several_columns_and_nulls() {
+    let db = setup().await;
+
+    // A projection, not a whole row: `(String, Option<String>, i32)`. The two rows differ in
+    // whether `bio` is NULL, which is what pins the `Option` decoding down inside a batch.
+    let (_, rows): (_, Vec<(String, Option<String>, i32)>) = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            db.select(users).pick((users.email, users.bio, users.age)),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(rows, vec![("a@example.com".to_string(), None, 30)]);
+
+    db.insert(users)
+        .value(
+            users
+                .insert("b@example.com", "Bob", 17)
+                .bio("hello".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, rows): (_, Vec<(String, Option<String>, i32)>) = db
+        .batch((
+            db.delete(users).filter(users.email.eq("a@example.com")),
+            db.select(users)
+                .pick((users.email, users.bio, users.age))
+                .order_by(users.email.asc()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows,
+        vec![("b@example.com".to_string(), Some("hello".to_string()), 17)]
+    );
+}
+
+#[tokio::test]
+async fn a_failure_after_a_select_rolls_the_write_back() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("taken@example.com", "Taken", 20))
+        .await
+        .unwrap();
+
+    let result = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            // Reads the row the insert above wrote, inside the same transaction.
+            db.select(users),
+            // The unique index rejects this one, which must undo the write the select saw.
+            db.insert(users)
+                .value(users.insert("taken@example.com", "Duplicate", 31)),
+        ))
+        .await;
+
+    assert!(result.is_err());
+
+    let all: Vec<User> = db.select(users).await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].email, "taken@example.com");
+}
+
+#[tokio::test]
+async fn a_returning_write_and_a_select_share_the_tuple() {
+    let db = setup().await;
+
+    // `returning` makes a write report rows rather than an affected-row count, which the
+    // batch supports as its own output shape: `(Vec<User>, Vec<User>)`.
+    let (created, all): (Vec<User>, Vec<User>) = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30))
+                .returning(users),
+            db.select(users),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].email, "a@example.com");
+    assert_eq!(all, created);
+}
+
+#[tokio::test]
+async fn a_dynamic_select_is_a_batch_element() {
+    let db = setup().await;
+    let adults: Expr<(UserTable,), Bool> = users.age.gte(18);
+
+    // The erased handle is a query like any other, so a clause built at run time can join a
+    // batch and report its rows in the tuple.
+    let (inserted, rows): (_, Vec<User>) = db
+        .batch((
+            db.insert(users)
+                .value(users.insert("a@example.com", "Alice", 30)),
+            db.select(users).dynamic().filter(adults.into_kind()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(inserted.rows_affected(), 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].email, "a@example.com");
 }

@@ -16,7 +16,7 @@ pub use besu_core::{TypeDef, Value};
 #[cfg(feature = "derive")]
 pub use besu_macros::{SqlEnum, Table};
 
-pub use crate::batch::{Batch, BatchWrite};
+pub use crate::batch::{Batch, BatchItem, BatchWrite};
 pub use crate::database::{Database, RawQuery, Transaction, dry};
 pub use crate::expr::{
     CaseBuilder, DateField, Expr, FrameBound, FrameUnits, Interval, IntoCondition, IntoExpr,

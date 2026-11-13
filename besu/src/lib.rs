@@ -96,7 +96,7 @@ mod table;
 
 pub mod types;
 pub use crate::types::*;
-pub use batch::{Batch, BatchWrite};
+pub use batch::{Batch, BatchItem, BatchWrite};
 pub use besu_core::schema::{
     CheckDef, ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexColumn, IndexEntry,
     IndexKind, ReferenceAction,

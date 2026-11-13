@@ -190,7 +190,7 @@ where
             .finish()
             .map_err(<E::Driver as Driver>::error)?;
         let rows = exec.query(&sql).await?;
-        decode_rows::<E, R>(&rows)
+        decode_rows::<E::Driver, R>(&rows)
     }
 
     /// Run the query and return the first row, if any.
