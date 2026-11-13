@@ -124,7 +124,6 @@ async fn introspect_table(
         // reported as a guess. The cost is that a table rebuild loses one.
         checks: Vec::new(),
         comment: None,
-        rls: false,
     };
 
     introspect_indexes(db, &mut table).await?;

@@ -224,12 +224,6 @@ pub struct TableDef {
     pub indexes: &'static [Index],
     /// Foreign keys.
     pub foreign_keys: &'static [ForeignKey],
-    /// Whether `push` should enable row-level security on this table.
-    ///
-    /// Only PostgreSQL implements it. Enabling is safe and happens on creation or as an
-    /// `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`; it is deliberately never disabled
-    /// automatically, because disabling one removes a guarantee every policy depends on.
-    pub rls: bool,
 }
 
 impl TableDef {

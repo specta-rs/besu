@@ -173,14 +173,6 @@ pub enum Change {
         /// The qualified sequence name.
         name: String,
     },
-    /// Row-level security should be enabled on a table.
-    ///
-    /// There is deliberately no inverse: disabling RLS silently removes the guarantee every
-    /// policy on the table depends on, so it is left to an explicit migration.
-    EnableRls {
-        /// The table.
-        table: String,
-    },
 }
 
 impl Change {
@@ -189,7 +181,7 @@ impl Change {
         match self {
             Self::CreateTable(_) | Self::CreateEnum(_) | Self::CreateSequence(_) => Safety::Safe,
             // A view is only a stored query, so creating one cannot touch a row.
-            Self::CreateView(_) | Self::EnableRls { .. } => Safety::Safe,
+            Self::CreateView(_) => Safety::Safe,
             // A rename rewrites metadata, and can break views or code that named the old
             // column. It never loses the column's data, so it is not destructive.
             Self::RenameColumn { .. } => Safety::Risky,
@@ -275,8 +267,7 @@ impl Change {
             | Self::AddForeignKey { table, .. }
             | Self::DropForeignKey { table, .. }
             | Self::AddCheck { table, .. }
-            | Self::DropCheck { table, .. }
-            | Self::EnableRls { table } => Some(table.clone()),
+            | Self::DropCheck { table, .. } => Some(table.clone()),
         }
     }
 }
@@ -326,7 +317,6 @@ impl core::fmt::Display for Change {
             }
             Self::AlterSequence { name, .. } => write!(f, "alter sequence {name}"),
             Self::DropSequence { name } => write!(f, "drop sequence {name}"),
-            Self::EnableRls { table } => write!(f, "enable row-level security on {table}"),
         }
     }
 }
@@ -480,18 +470,6 @@ pub fn diff_with(
         diff_table(existing, table, normalise, &mut changes);
     }
 
-    // Row-level security can be turned on but never off: see [`Change::EnableRls`].
-    for table in &desired.tables {
-        let Some(existing) = current.find(table.schema.as_deref(), &table.name) else {
-            continue;
-        };
-        if table.rls && !existing.rls {
-            changes.push(Change::EnableRls {
-                table: table.qualified_name(),
-            });
-        }
-    }
-
     // Drop views that are no longer wanted, before the tables they might read from.
     for view in current.ordered_views().into_iter().rev() {
         let managed_here = match view.schema() {
@@ -593,7 +571,6 @@ pub fn diff_with(
         // relative order among the views comes from `ordered_views` and is preserved by the
         // stable sort.
         Change::CreateView(_) => 18,
-        Change::EnableRls { .. } => 19,
         Change::DropColumn { .. } => 20,
         Change::DropTable { .. } => 21,
         Change::RemoveEnumValue { .. } => 22,
@@ -863,7 +840,6 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
-            rls: false,
         }
     }
 
@@ -1383,45 +1359,5 @@ mod tests {
         assert_eq!(altered.len(), 1);
         assert!(matches!(&altered[0], Change::AlterColumn { .. }));
         assert_eq!(altered[0].safety(), Safety::Risky);
-    }
-
-    #[test]
-    fn rls_is_enabled_but_never_disabled() {
-        let mut desired = schema(vec![table("invoices", vec![column("id", TypeDef::Int8)])]);
-        desired.tables[0].rls = true;
-
-        let mut without_rls = desired.tables.clone();
-        without_rls[0].rls = false;
-        let enabled = diff(&schema(without_rls), &desired);
-        assert_eq!(
-            enabled,
-            [Change::EnableRls {
-                table: "invoices".into(),
-            }]
-        );
-        assert_eq!(enabled[0].safety(), Safety::Safe);
-
-        // The reverse is not a change: disabling RLS is a decision for a migration.
-        let mut without_rls = desired.tables.clone();
-        without_rls[0].rls = false;
-        assert!(diff(&desired, &schema(without_rls)).is_empty());
-    }
-
-    #[test]
-    fn policies_are_recorded_but_never_diffed() {
-        let mut current = schema(vec![table("invoices", vec![column("id", TypeDef::Int8)])]);
-        current.policies.push(crate::Policy {
-            table: "invoices".into(),
-            name: "own_invoices".into(),
-            command: crate::PolicyCommand::All,
-            roles: Vec::new(),
-            using: Some("owner_id = current_setting('app.user_id')::uuid".into()),
-            with_check: None,
-        });
-
-        // Removing the policy from the declaration does not drop it, and adding one does not
-        // create it: the differ ignores the list in both directions.
-        assert!(diff(&current, &schema(current.tables.clone())).is_empty());
-        assert!(diff(&schema(current.tables.clone()), &current).is_empty());
     }
 }

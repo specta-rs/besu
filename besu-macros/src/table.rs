@@ -100,7 +100,6 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
         struct_ident,
         table_name,
         schema: table_attrs.schema,
-        rls: table_attrs.rls,
         module_ident,
         handle_ident,
         table_struct_ident,
@@ -132,7 +131,6 @@ fn sanitise_ident(name: &str) -> String {
 struct TableAttrs {
     name: Option<LitStr>,
     schema: Option<LitStr>,
-    rls: bool,
 }
 
 impl TableAttrs {
@@ -140,7 +138,6 @@ impl TableAttrs {
         let mut this = Self {
             name: None,
             schema: None,
-            rls: false,
         };
 
         for attr in attrs {
@@ -156,11 +153,7 @@ impl TableAttrs {
                     this.schema = Some(meta.value()?.parse()?);
                     return Ok(());
                 }
-                if meta.path.is_ident("rls") {
-                    this.rls = true;
-                    return Ok(());
-                }
-                Err(meta.error("unrecognised table attribute; expected `table`, `schema` or `rls`"))
+                Err(meta.error("unrecognised table attribute; expected `table` or `schema`"))
             })?;
         }
 
@@ -633,7 +626,6 @@ struct Codegen {
     struct_ident: Ident,
     table_name: LitStr,
     schema: Option<LitStr>,
-    rls: bool,
     module_ident: Ident,
     handle_ident: Ident,
     table_struct_ident: Ident,
@@ -656,7 +648,6 @@ impl Codegen {
             Some(schema) => quote!(Some(#schema)),
             None => quote!(None),
         };
-        let rls = self.rls;
 
         let columns = &self.columns;
         // A generated column is computed by the database, so it has no place in an insert
@@ -967,7 +958,6 @@ impl Codegen {
                         columns: &[#(#column_defs),*],
                         indexes: &[#(#index_defs),*],
                         foreign_keys: &[#(#foreign_keys),*],
-                        rls: #rls,
                     };
                 }
 

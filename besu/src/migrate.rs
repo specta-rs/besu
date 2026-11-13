@@ -157,9 +157,6 @@ impl<Dr: SchemaDriver> Database<Dr> {
         for sequence in &mut schema.sequences {
             sequence.name = alloc::format!("{prefix}{}", sequence.name);
         }
-        for policy in &mut schema.policies {
-            policy.table = prefixed_name(prefix, &policy.table);
-        }
         schema
     }
 
@@ -236,8 +233,8 @@ impl<Dr: SchemaDriver> Database<Dr> {
 
         // A shared database holds other tenants' tables. They are not this database's
         // business, so they are dropped from the comparison rather than reported as a
-        // `DropTable` — which would be refused, and rightly so. Views, sequences and
-        // policies are filtered the same way.
+        // `DropTable` — which would be refused, and rightly so. Views and sequences are
+        // filtered the same way.
         if let Some(prefix) = self.prefix() {
             current
                 .tables
@@ -248,9 +245,6 @@ impl<Dr: SchemaDriver> Database<Dr> {
             current
                 .sequences
                 .retain(|sequence| sequence.name.starts_with(prefix));
-            current
-                .policies
-                .retain(|policy| unqualified(&policy.table).starts_with(prefix));
         }
 
         // `push(&[TableDef])` cannot express a view or a sequence, so a live one would look

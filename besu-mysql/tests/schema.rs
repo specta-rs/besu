@@ -159,7 +159,6 @@ fn table(name: &str, columns: Vec<Column>) -> TableIr {
         foreign_keys: Vec::new(),
         checks: Vec::new(),
         comment: None,
-        rls: false,
     }
 }
 

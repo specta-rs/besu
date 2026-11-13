@@ -360,7 +360,6 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
-            rls: false,
         }
     }
 

@@ -34,14 +34,6 @@ pub struct Schema {
     /// person creates and names, which may be shared between tables or pre-allocated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequences: Vec<Sequence>,
-    /// Row-level security policies, kept for round-tripping only.
-    ///
-    /// A policy is raw SQL attached to a table: its `USING` and `WITH CHECK` clauses cannot
-    /// be compared safely, so the differ **ignores** this list entirely. A policy is
-    /// therefore never created or dropped by `push`; introspecting it means a `besu pull`
-    /// snapshot records what is really there.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub policies: Vec<Policy>,
 }
 
 /// A view, as declared by a snapshot or reported by a database.
@@ -517,74 +509,6 @@ fn type_bounds(data_type: &str) -> (i64, i64) {
     }
 }
 
-/// The command a row-level security policy applies to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum PolicyCommand {
-    /// Every command.
-    #[default]
-    All,
-    /// `SELECT` only.
-    Select,
-    /// `INSERT` only.
-    Insert,
-    /// `UPDATE` only.
-    Update,
-    /// `DELETE` only.
-    Delete,
-}
-
-impl PolicyCommand {
-    /// The spelling `pg_policies.cmd` and `CREATE POLICY` use.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::All => "ALL",
-            Self::Select => "SELECT",
-            Self::Insert => "INSERT",
-            Self::Update => "UPDATE",
-            Self::Delete => "DELETE",
-        }
-    }
-
-    /// Parse the catalogue's spelling.
-    pub fn from_catalogue(value: &str) -> Self {
-        match value.trim().to_ascii_uppercase().as_str() {
-            "SELECT" => Self::Select,
-            "INSERT" => Self::Insert,
-            "UPDATE" => Self::Update,
-            "DELETE" => Self::Delete,
-            // `ALL` and anything PostgreSQL adds later mean the permissive default.
-            _ => Self::All,
-        }
-    }
-}
-
-/// A PostgreSQL row-level security policy.
-///
-/// Policies are recorded, not managed: [`Schema::policies`] round-trips through `besu pull`
-/// and back, but the differ ignores it, so a policy written in a migration is never dropped
-/// by a `push` that does not know about it. Declaring one from the derive would need a
-/// `CREATE POLICY` that can carry raw SQL expressions, which is a larger decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Policy {
-    /// The table the policy applies to, qualified the same way a table is.
-    pub table: String,
-    /// The policy's name, unique per table.
-    pub name: String,
-    /// The command it applies to.
-    #[serde(default)]
-    pub command: PolicyCommand,
-    /// The roles it applies to; an empty list means `PUBLIC`.
-    #[serde(default)]
-    pub roles: Vec<String>,
-    /// The `USING` expression that filters visible rows, as PostgreSQL reports it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub using: Option<String>,
-    /// The `WITH CHECK` expression that validates new rows, as PostgreSQL reports it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub with_check: Option<String>,
-}
-
 /// A named enum type, as found in PostgreSQL.
 ///
 /// The name is unqualified for an enum in the database's default schema and `schema.name`
@@ -605,7 +529,6 @@ impl Schema {
             enums: Vec::new(),
             views: Vec::new(),
             sequences: Vec::new(),
-            policies: Vec::new(),
         }
     }
 
@@ -722,7 +645,7 @@ impl Schema {
         }
     }
 
-    /// Sort tables by schema and name, enums, views, sequences and policies by name, so
+    /// Sort tables by schema and name, and enums, views and sequences by name, so
     /// output is stable.
     pub fn sort(&mut self) {
         self.tables
@@ -731,8 +654,6 @@ impl Schema {
         self.views.sort_by(|a, b| a.name.cmp(&b.name));
         self.sequences
             .sort_by(|a, b| a.schema.cmp(&b.schema).then_with(|| a.name.cmp(&b.name)));
-        self.policies
-            .sort_by(|a, b| a.table.cmp(&b.table).then_with(|| a.name.cmp(&b.name)));
         for table in &mut self.tables {
             table.normalise();
         }
@@ -846,13 +767,6 @@ pub struct Table {
     /// Tables of named enums are rare; kept for fidelity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    /// Whether row-level security is enabled on this table.
-    ///
-    /// The differ only ever turns it **on**: a database with RLS enabled stays that way
-    /// even if the declaration does not mention it, because disabling RLS silently removes
-    /// the guarantee every policy on the table depends on.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub rls: bool,
 }
 
 impl Table {
@@ -895,7 +809,6 @@ impl Table {
             // populated by introspection or a hand-written snapshot.
             checks: Vec::new(),
             comment: None,
-            rls: def.rls,
         }
     }
 
@@ -1277,8 +1190,8 @@ mod fs_impl {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexKind, PolicyCommand, Schema, Sequence, normalise_generated_expression,
-        normalise_view_definition, view_body,
+        IndexKind, Schema, Sequence, normalise_generated_expression, normalise_view_definition,
+        view_body,
     };
 
     #[test]
@@ -1389,18 +1302,5 @@ mod tests {
             ..Sequence::new("x")
         };
         assert_eq!(narrowed.normalised(), Sequence::new("x"));
-    }
-
-    #[test]
-    fn a_policy_command_round_trips_through_the_catalogue_spelling() {
-        for command in [
-            PolicyCommand::All,
-            PolicyCommand::Select,
-            PolicyCommand::Insert,
-            PolicyCommand::Update,
-            PolicyCommand::Delete,
-        ] {
-            assert_eq!(PolicyCommand::from_catalogue(command.as_str()), command);
-        }
     }
 }

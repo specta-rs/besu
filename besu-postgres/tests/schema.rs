@@ -40,7 +40,6 @@ fn table(name: &str, columns: Vec<Column>) -> TableIr {
         foreign_keys: Vec::new(),
         checks: Vec::new(),
         comment: None,
-        rls: false,
     }
 }
 
@@ -847,123 +846,6 @@ async fn sequences_are_created_altered_and_dropped() {
         ]
     );
     assert!(db.push_schema(&Schema::new()).await.unwrap().is_empty());
-}
-
-/// A hand-written policy survives a `push` that does not declare it, and RLS is never turned
-/// off by one. Introspection records both so `besu pull` can write them down.
-#[tokio::test]
-async fn policies_are_recorded_and_never_dropped() {
-    let db = common::database().await;
-    common::reset(&db).await;
-
-    db.execute(sql!(
-        "CREATE TABLE invoices (\
-             id BIGINT PRIMARY KEY, \
-             owner_id UUID NOT NULL)"
-    ))
-    .await
-    .unwrap();
-    db.execute(sql!("ALTER TABLE invoices ENABLE ROW LEVEL SECURITY"))
-        .await
-        .unwrap();
-    db.execute(sql!(
-        "CREATE POLICY own_invoices ON invoices \
-         USING (owner_id = current_setting('app.user_id')::uuid)"
-    ))
-    .await
-    .unwrap();
-
-    let introspected = db.introspect().await.unwrap();
-    let invoices = introspected.table("invoices").unwrap();
-    assert!(invoices.rls);
-    assert_eq!(introspected.policies.len(), 1);
-    let policy = &introspected.policies[0];
-    assert_eq!(policy.table, "invoices");
-    assert_eq!(policy.name, "own_invoices");
-    assert_eq!(policy.command, besu::schema::PolicyCommand::All);
-    assert!(policy.roles.is_empty(), "PUBLIC is an empty role list");
-    assert!(
-        policy
-            .using
-            .as_deref()
-            .is_some_and(|using| using.contains("owner_id")),
-        "got {:?}",
-        policy.using
-    );
-
-    // Pushing exactly what introspection saw is a no-op, policies and all.
-    assert!(db.push_schema(&introspected).await.unwrap().is_empty());
-
-    // A declared schema that does not mention the policy does not drop it, and one that
-    // does not enable RLS does not disable it.
-    let mut declared = schema(
-        vec![table(
-            "invoices",
-            vec![
-                {
-                    let mut id = column("id", TypeDef::Int8);
-                    id.primary_key = true;
-                    id
-                },
-                column("owner_id", TypeDef::Uuid),
-            ],
-        )],
-        Vec::new(),
-    );
-    let pushed = db.push_schema(&declared).await.unwrap();
-    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
-    assert_eq!(db.introspect().await.unwrap().policies.len(), 1);
-
-    // Enabling RLS from the declaration is a statement, not part of `CREATE TABLE`.
-    declared.tables[0].rls = true;
-    let enabled = db.push_schema(&declared).await.unwrap();
-    assert!(enabled.is_empty(), "RLS is already on");
-
-    db.execute(sql!("DROP POLICY own_invoices ON invoices"))
-        .await
-        .unwrap();
-    db.execute(sql!("ALTER TABLE invoices DISABLE ROW LEVEL SECURITY"))
-        .await
-        .unwrap();
-    let enabled = db.push_schema(&declared).await.unwrap();
-    assert_eq!(
-        enabled.statements,
-        [r#"ALTER TABLE "invoices" ENABLE ROW LEVEL SECURITY"#]
-    );
-    assert!(db.push_schema(&declared).await.unwrap().is_empty());
-}
-
-/// `#[besu(rls)]` turns row-level security on when the table is created, and a later push
-/// neither turns it on again nor turns it off.
-#[tokio::test]
-async fn declaring_rls_enables_it_on_creation() {
-    let db = common::database().await;
-    common::reset(&db).await;
-
-    let first = db.push([secured::secrets.def()]).await.unwrap();
-    assert_eq!(
-        first.statements,
-        [
-            r#"CREATE TABLE "secrets" ("id" BIGINT PRIMARY KEY)"#,
-            r#"ALTER TABLE "secrets" ENABLE ROW LEVEL SECURITY"#,
-        ]
-    );
-    assert!(db.introspect().await.unwrap().table("secrets").unwrap().rls);
-    assert!(db.push([secured::secrets.def()]).await.unwrap().is_empty());
-}
-
-mod secured {
-    #![allow(unused_imports)]
-    use besu::Table;
-
-    /// A table whose reader is always restricted by a policy written in a migration.
-    #[derive(Table, Debug, Clone, PartialEq)]
-    #[besu(table = "secrets", rls)]
-    #[allow(dead_code)]
-    pub struct Secret {
-        #[besu(primary_key)]
-        pub id: i64,
-    }
 }
 
 mod generated {

@@ -481,16 +481,15 @@ impl Ddl for MySqlDdl {
             Change::CreateView(view) => self.create_view(view),
             Change::ReplaceView(view) => self.replace_view(view),
             Change::DropView { name, materialised } => self.drop_view(name, *materialised),
-            // MySQL has no named enum types (an enum is spelled inline in the column), no
-            // sequences and no row-level security, so those render as nothing.
+            // MySQL has no named enum types (an enum is spelled inline in the column) and no
+            // sequences, so those render as nothing.
             Change::CreateEnum(_)
             | Change::DropEnum { .. }
             | Change::AddEnumValue { .. }
             | Change::RemoveEnumValue { .. }
             | Change::CreateSequence(_)
             | Change::AlterSequence { .. }
-            | Change::DropSequence { .. }
-            | Change::EnableRls { .. } => Vec::new(),
+            | Change::DropSequence { .. } => Vec::new(),
             // `Change` is non-exhaustive: a change added later renders as nothing rather
             // than failing to compile, which keeps a schema shared across dialects usable.
             _ => Vec::new(),
@@ -561,7 +560,6 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
-            rls: false,
         }
     }
 
@@ -623,7 +621,6 @@ mod tests {
             foreign_keys: Vec::new(),
             checks: Vec::new(),
             comment: None,
-            rls: false,
         };
         let index = Index {
             name: "events_kind_idx".into(),

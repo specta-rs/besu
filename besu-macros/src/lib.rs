@@ -46,8 +46,6 @@ mod table;
 /// - `#[besu(table = "name")]` — the SQL table name. Defaults to the struct name in
 ///   `snake_case`.
 /// - `#[besu(schema = "name")]` — a schema/namespace, meaningful to PostgreSQL.
-/// - `#[besu(rls)]` — enable row-level security on the table. PostgreSQL only; it is never
-///   disabled automatically.
 ///
 /// On a field:
 ///

@@ -326,12 +326,4 @@ impl Ddl for PostgresDdl {
     fn drop_sequence(&self, name: &str) -> Vec<String> {
         vec![format!("DROP SEQUENCE {}", self.quote_table(name))]
     }
-
-    /// `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.
-    fn enable_rls(&self, table: &str) -> String {
-        format!(
-            "ALTER TABLE {} ENABLE ROW LEVEL SECURITY",
-            self.quote_table(table)
-        )
-    }
 }

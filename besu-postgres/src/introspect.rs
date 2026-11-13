@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use besu_core::TypeDef;
 use besu_core::schema::{IndexKind, ReferenceAction};
 use besu_schema::{
-    Check, Column, Enum, ForeignKey, Generated, Index, Policy, PolicyCommand, Schema, Sequence,
-    Table, Unique, View, normalise_expression, normalise_generated_expression,
+    Check, Column, Enum, ForeignKey, Generated, Index, Schema, Sequence, Table, Unique, View,
+    normalise_expression, normalise_generated_expression,
 };
 
 use crate::Sqlx;
@@ -26,18 +26,15 @@ use crate::Sqlx;
 /// - indexes using an access method the IR has no name for (`hash`, `spgist`),
 /// - triggers, which are never read at all.
 ///
-/// Views are read into [`Schema::views`], standalone sequences into
-/// [`Schema::sequences`], policies into [`Schema::policies`] and the RLS flag onto its
-/// table, so `besu pull` records what is really there.
+/// Views are read into [`Schema::views`] and standalone sequences into
+/// [`Schema::sequences`], so `besu pull` records what is really there.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let current = current_schema(db).await?;
 
     let names = db
         .execute(besu::sql!(
-            "SELECT t.table_schema, t.table_name, c.relrowsecurity \
+            "SELECT t.table_schema, t.table_name \
              FROM information_schema.tables t \
-             JOIN pg_namespace n ON n.nspname = t.table_schema \
-             JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = t.table_name \
              WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema') \
                AND t.table_schema NOT LIKE 'pg_toast%' \
                AND t.table_schema NOT LIKE 'pg_temp%' \
@@ -45,12 +42,12 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
                AND t.table_name <> '_besu_migrations' \
              ORDER BY t.table_schema, t.table_name"
         ))
-        .all::<(String, String, bool)>()
+        .all::<(String, String)>()
         .await?;
 
     let mut tables: BTreeMap<String, Table> = names
         .into_iter()
-        .map(|(schema, name, rls)| {
+        .map(|(schema, name)| {
             let key = qualified(&schema, &name, current.as_deref());
             let table = Table {
                 name,
@@ -63,7 +60,6 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
                 foreign_keys: Vec::new(),
                 checks: Vec::new(),
                 comment: None,
-                rls,
             };
             (key, table)
         })
@@ -81,7 +77,6 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
     schema.enums = introspect_enums(db, current.as_deref()).await?;
     schema.views = introspect_views(db, current.as_deref()).await?;
     schema.sequences = introspect_sequences(db, current.as_deref()).await?;
-    schema.policies = introspect_policies(db, current.as_deref()).await?;
     schema.sort();
     Ok(schema)
 }
@@ -244,57 +239,6 @@ async fn introspect_sequences(
                     }
                     .normalised(),
                 )
-            },
-        )
-        .collect())
-}
-
-/// Read every row-level security policy into [`Schema::policies`].
-///
-/// The list is for `besu pull` and round-tripping only: the differ ignores it, so a policy
-/// written in a migration is never dropped by a `push` that does not declare it. `roles` is
-/// a `name[]`, which is flattened with `array_to_string` because the driver's row type is a
-/// string; `{public}` becomes an empty list, which is how `CREATE POLICY` spells `PUBLIC`.
-async fn introspect_policies(
-    db: &besu::Database<Sqlx>,
-    current: Option<&str>,
-) -> Result<Vec<Policy>, sqlx::Error> {
-    let rows = db
-        .execute(besu::sql!(
-            "SELECT schemaname, tablename, policyname, cmd, array_to_string(roles, ','), \
-                    qual, with_check \
-             FROM pg_policies \
-             WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
-               AND schemaname NOT LIKE 'pg_toast%' \
-               AND schemaname NOT LIKE 'pg_temp%' \
-             ORDER BY schemaname, tablename, policyname"
-        ))
-        .all::<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )>()
-        .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(
-            |(schema, table, name, command, roles, using, with_check)| Policy {
-                table: qualified(&schema, &table, current),
-                name,
-                command: PolicyCommand::from_catalogue(&command),
-                roles: roles
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|role| !role.is_empty() && !role.eq_ignore_ascii_case("public"))
-                    .map(str::to_owned)
-                    .collect(),
-                using,
-                with_check,
             },
         )
         .collect())

@@ -201,7 +201,6 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         // leaves them: `push` neither sees nor drops one.
         checks: Vec::new(),
         comment: None,
-        rls: false,
     };
 
     table.foreign_keys = group_foreign_keys(foreign_keys);

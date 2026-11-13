@@ -24,7 +24,6 @@ are in the query, and whether a bulk write was intentional.
 - [Views](schema/views.md)
 - [Sequences](schema/sequences.md) — PostgreSQL
 - [Table schemas](schema/schemas.md) — PostgreSQL
-- [Row-level security](schema/rls.md) — PostgreSQL
 - [Extensions](schema/extensions.md) — PostgreSQL
 - [Custom types](advanced/custom-types.md)
 

@@ -409,15 +409,6 @@ pub trait Ddl {
         Vec::new()
     }
 
-    /// The statement that turns row-level security on for a table.
-    ///
-    /// The default returns an empty string, because only PostgreSQL has RLS. An empty
-    /// statement is dropped rather than executed, so a schema shared with the other
-    /// dialects still pushes.
-    fn enable_rls(&self, _table: &str) -> String {
-        String::new()
-    }
-
     /// The `FOREIGN KEY` clause used inside `CREATE TABLE`.
     fn foreign_key_clause(&self, fk: &ForeignKey) -> String {
         let mut sql = String::from("CONSTRAINT ");
@@ -477,14 +468,6 @@ pub trait Ddl {
                         statements.push(self.create_index(&table.qualified_name(), index));
                     }
                 }
-                // RLS is a table flag, not part of `CREATE TABLE`, so it is a second
-                // statement. A dialect without RLS returns nothing and it is skipped.
-                if table.rls {
-                    let statement = self.enable_rls(&table.qualified_name());
-                    if !statement.is_empty() {
-                        statements.push(statement);
-                    }
-                }
                 statements
             }
             Change::DropTable { name } => vec![self.drop_table(name)],
@@ -516,14 +499,6 @@ pub trait Ddl {
             Change::CreateSequence(sequence) => self.create_sequence(sequence),
             Change::AlterSequence { from, to, .. } => self.alter_sequence(from, to),
             Change::DropSequence { name } => self.drop_sequence(name),
-            Change::EnableRls { table } => {
-                let statement = self.enable_rls(table);
-                if statement.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![statement]
-                }
-            }
         }
     }
 
