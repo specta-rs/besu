@@ -606,7 +606,7 @@ async fn check_constraints_round_trip() {
         introspected.table("accounts").unwrap().checks,
         [Check {
             name: "accounts_balance_check".into(),
-            expression: "balance >= 0".into(),
+            expression: "balance>=0".into(),
         }]
     );
 
@@ -669,6 +669,49 @@ async fn check_constraints_round_trip() {
     );
     assert_eq!(added.changes[0].safety(), Safety::Risky);
     assert!(db.push_schema(&with).await.unwrap().is_empty());
+}
+
+/// A check declared by the derive is written into `CREATE TABLE` under its explicit name,
+/// read back with PostgreSQL's extra parentheses and casts folded away, and converges.
+#[tokio::test]
+async fn derived_checks_are_created_and_converge() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let first = db.push([checked::invoices.def()]).await.unwrap();
+    assert!(
+        first.statements[0].contains(r#"CONSTRAINT "invoices_0_check" CHECK (total > 0)"#),
+        "got {:?}",
+        first.statements
+    );
+    assert!(
+        first.statements[0].contains(
+            r#"CONSTRAINT "invoices_due_after_issued" CHECK (due_at IS NULL OR due_at > issued_at)"#
+        ),
+        "got {:?}",
+        first.statements
+    );
+    assert!(
+        first.statements[0].contains(
+            r#"CONSTRAINT "invoices_status" CHECK (status <> 'void' AND total < 1000000)"#
+        ),
+        "got {:?}",
+        first.statements
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let desired = besu::Database::<Sqlx>::schema([checked::invoices.def()]);
+    let introspected = &introspected.table("invoices").unwrap().checks;
+    let desired = &desired.table("invoices").unwrap().checks;
+    assert_eq!(introspected.len(), desired.len());
+    for (introspected, desired) in introspected.iter().zip(desired) {
+        assert_eq!(introspected.name, desired.name);
+        assert_eq!(
+            besu::schema::normalise_expression(&introspected.expression),
+            besu::schema::normalise_expression(&desired.expression)
+        );
+    }
+    assert!(db.push([checked::invoices.def()]).await.unwrap().is_empty());
 }
 
 /// A view is declared, created after the tables it reads, replaced when its definition
@@ -945,6 +988,34 @@ mod generated {
         pub name: String,
         #[besu(generated = "lower(name)")]
         pub handle: String,
+    }
+}
+
+mod checked {
+    #![allow(unused_imports)]
+    use besu::Table;
+
+    /// A table with both check spellings, including a boolean operator and a string literal
+    /// that PostgreSQL reports with an explicit cast.
+    #[derive(Table, Debug, Clone, PartialEq)]
+    #[besu(table = "invoices")]
+    #[besu(check = "total > 0")]
+    #[besu(check(
+        name = "invoices_due_after_issued",
+        expression = "due_at IS NULL OR due_at > issued_at"
+    ))]
+    #[besu(check(
+        name = "invoices_status",
+        expression = "status <> 'void' AND total < 1000000"
+    ))]
+    #[allow(dead_code, clippy::duplicated_attributes)]
+    pub struct Invoice {
+        #[besu(primary_key)]
+        pub id: i64,
+        pub total: i64,
+        pub issued_at: chrono::NaiveDateTime,
+        pub due_at: Option<chrono::NaiveDateTime>,
+        pub status: String,
     }
 }
 

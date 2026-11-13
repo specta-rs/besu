@@ -101,6 +101,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
         table_name,
         schema: table_attrs.schema,
         indexes: table_attrs.indexes,
+        checks: table_attrs.checks,
         module_ident,
         handle_ident,
         table_struct_ident,
@@ -133,6 +134,7 @@ struct TableAttrs {
     name: Option<LitStr>,
     schema: Option<LitStr>,
     indexes: Vec<IndexDecl>,
+    checks: Vec<CheckDecl>,
 }
 
 impl TableAttrs {
@@ -141,6 +143,7 @@ impl TableAttrs {
             name: None,
             schema: None,
             indexes: Vec::new(),
+            checks: Vec::new(),
         };
 
         for attr in attrs {
@@ -162,12 +165,85 @@ impl TableAttrs {
                     this.indexes.push(IndexDecl::parse(&content)?);
                     return Ok(());
                 }
-                Err(meta
-                    .error("unrecognised table attribute; expected `table`, `schema` or `index`"))
+                if meta.path.is_ident("check") {
+                    this.checks.push(CheckDecl::parse(&meta)?);
+                    return Ok(());
+                }
+                Err(meta.error(
+                    "unrecognised table attribute; expected `table`, `schema`, `index` or `check`",
+                ))
             })?;
         }
 
         Ok(this)
+    }
+}
+
+/// A table-level `#[besu(check = "...")]` declaration.
+struct CheckDecl {
+    name: Option<LitStr>,
+    expression: LitStr,
+    span: Span,
+}
+
+impl CheckDecl {
+    fn parse(meta: &syn::meta::ParseNestedMeta<'_>) -> Result<Self> {
+        // `check = "expr"` is the short form; `check(name = "...", expression = "...")` spells
+        // the name explicitly. The name is optional in the long form too, so the auto-naming
+        // rule is the only thing that decides it.
+        if meta.input.peek(Token![=]) {
+            meta.input.parse::<Token![=]>()?;
+            let expression: LitStr = meta.input.parse()?;
+            return Self::new(None, expression);
+        }
+
+        let content;
+        syn::parenthesized!(content in meta.input);
+        let mut name = None;
+        let mut expression = None;
+
+        while !content.is_empty() {
+            let keyword: Ident = content.parse()?;
+            content.parse::<Token![=]>()?;
+            if keyword == "name" {
+                name = Some(content.parse()?);
+            } else if keyword == "expression" {
+                expression = Some(content.parse()?);
+            } else {
+                return Err(Error::new(
+                    keyword.span(),
+                    format!(
+                        "besu: unrecognised check attribute `{keyword}`; expected `name` or \
+                         `expression`"
+                    ),
+                ));
+            }
+            if content.peek(Token![,]) {
+                content.parse::<Token![,]>()?;
+            }
+        }
+
+        let Some(expression) = expression else {
+            return Err(Error::new(
+                meta.path.span(),
+                "besu: `check` needs an `expression = \"...\"`",
+            ));
+        };
+        Self::new(name, expression)
+    }
+
+    fn new(name: Option<LitStr>, expression: LitStr) -> Result<Self> {
+        if expression.value().trim().is_empty() {
+            return Err(Error::new(
+                expression.span(),
+                "besu: a `check` needs a non-empty SQL expression",
+            ));
+        }
+        Ok(Self {
+            span: expression.span(),
+            name,
+            expression,
+        })
     }
 }
 
@@ -901,6 +977,7 @@ struct Codegen {
     table_name: LitStr,
     schema: Option<LitStr>,
     indexes: Vec<IndexDecl>,
+    checks: Vec<CheckDecl>,
     module_ident: Ident,
     handle_ident: Ident,
     table_struct_ident: Ident,
@@ -1091,6 +1168,24 @@ impl Codegen {
             })
         });
 
+        // An explicitly named check keeps its name. An unnamed one is called
+        // `{table}_{i}_check`, where `i` is its zero-based position among the struct's check
+        // attributes. The DDL writes the name explicitly, so introspection reads back the
+        // exact same one. The position is part of the name: reordering or removing a check
+        // renames the ones after it, which `push` sees as a drop and an add. Name the
+        // check explicitly when that matters.
+        let check_defs = self.checks.iter().enumerate().map(|(position, check)| {
+            let name = match &check.name {
+                Some(name) => name.clone(),
+                None => LitStr::new(
+                    &format!("{}_{position}_check", self.table_name.value()),
+                    check.span,
+                ),
+            };
+            let expression = &check.expression;
+            quote!(#besu::CheckDef::new(#name, #expression))
+        });
+
         // --- decoding -----------------------------------------------------------------
         let decode_fields = columns.iter().map(|column| {
             let ident = &column.ident;
@@ -1277,6 +1372,7 @@ impl Codegen {
                         columns: &[#(#column_defs),*],
                         indexes: &[#(#index_defs),*],
                         foreign_keys: &[#(#foreign_keys),*],
+                        checks: &[#(#check_defs),*],
                     };
                 }
 

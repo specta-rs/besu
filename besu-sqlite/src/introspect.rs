@@ -1,6 +1,6 @@
 use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
-use besu_schema::{Column, ForeignKey, Index, IndexColumn, Schema, Table, Unique, View};
+use besu_schema::{Check, Column, ForeignKey, Index, IndexColumn, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
@@ -10,8 +10,12 @@ use crate::Sqlx;
 /// themselves, because `push` would then try to drop or replace them:
 ///
 /// - partial indexes, whose `WHERE` clause has no representation here,
-/// - `CHECK` constraints, which would have to be parsed out of the `CREATE TABLE` text,
 /// - triggers, which are not read at all.
+///
+/// A `CHECK` constraint has no catalogue view either, so it is read out of the `CREATE TABLE`
+/// text SQLite keeps in `sqlite_master`: the `CONSTRAINT name CHECK (...)` clause Besu renders
+/// and any hand-written `CHECK (...)` are both recovered, so a check survives `push` and a
+/// table rebuild.
 ///
 /// An expression index is read from the `CREATE INDEX` text SQLite keeps in
 /// `sqlite_master`, because `PRAGMA index_info` reports a `NULL` name for an expression key
@@ -19,9 +23,6 @@ use crate::Sqlx;
 ///
 /// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
 /// ignores that list, so they never appear as tables and `push` never touches them.
-///
-/// A consequence of skipping checks is that a table rebuild (an `AlterColumn`) recreates the
-/// table from the IR and therefore loses a hand-written check; see `docs/guide/migrations.md`.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let tables = db
         .execute(besu::sql!(
@@ -121,17 +122,251 @@ async fn introspect_table(
         indexes: Vec::new(),
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
-        // SQLite's catalog has no view of a `CHECK` constraint: it exists only inside the
-        // `CREATE TABLE` text. Parsing that text back into an expression is not something
-        // the IR can promise to get right, so checks are left unmodelled here rather than
-        // reported as a guess. The cost is that a table rebuild loses one.
-        checks: Vec::new(),
+        checks: create_sql
+            .as_deref()
+            .map(|sql| check_constraints(sql, &name))
+            .unwrap_or_default(),
         comment: None,
     };
 
     introspect_indexes(db, &mut table).await?;
     introspect_foreign_keys(db, &mut table).await?;
     Ok(table)
+}
+
+/// Read the `CHECK` constraints out of a `CREATE TABLE` statement.
+///
+/// SQLite's catalogue has no view of a check: it exists only in `sqlite_master.sql`. The
+/// statement is therefore split into column definitions and table constraints at its
+/// top-level commas, and every `CHECK (...)` in one is read, together with the `CONSTRAINT
+/// name` that precedes it. A check written without a name cannot be named by the database, so
+/// it is given the same `{table}_{i}_check` name the derive gives an unnamed one.
+fn check_constraints(create_sql: &str, table: &str) -> Vec<Check> {
+    let Some(open) = create_sql.find('(') else {
+        return Vec::new();
+    };
+    let body = &create_sql[open + 1..];
+    let mut checks = Vec::new();
+
+    for segment in table_segments(body) {
+        collect_checks(segment, &mut checks);
+    }
+
+    checks
+        .into_iter()
+        .enumerate()
+        .map(|(position, (name, expression))| Check {
+            name: name.unwrap_or_else(|| format!("{table}_{position}_check")),
+            expression: besu_schema::normalise_expression(&expression),
+        })
+        .collect()
+}
+
+/// Split the inside of a `CREATE TABLE` body at its top-level commas.
+fn table_segments(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut segments = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut start = 0usize;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == open {
+                if bytes.get(index + 1) == Some(&open) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => quote = Some(byte),
+            b'[' => quote = Some(b']'),
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                segments.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if start < body.len() {
+        segments.push(&body[start..]);
+    }
+    segments
+}
+
+/// Push every top-level `CHECK (...)` in one table segment.
+fn collect_checks(segment: &str, checks: &mut Vec<(Option<String>, String)>) {
+    let bytes = segment.as_bytes();
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == open {
+                if bytes.get(index + 1) == Some(&open) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(byte);
+                index += 1;
+                continue;
+            }
+            b'[' => {
+                quote = Some(b']');
+                index += 1;
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth == 0
+            && index + 5 <= bytes.len()
+            && bytes[index..index + 5].eq_ignore_ascii_case(b"check")
+        {
+            let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
+            let after_ok = index + 5 == bytes.len() || !is_word_byte(bytes[index + 5]);
+            if before_ok && after_ok {
+                let mut open = index + 5;
+                while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+                    open += 1;
+                }
+                if bytes.get(open) == Some(&b'(')
+                    && let Some((expression, end)) = parenthesised(segment, open)
+                {
+                    checks.push((
+                        constraint_name_before(&segment[..index]),
+                        expression.to_owned(),
+                    ));
+                    index = end;
+                    continue;
+                }
+            }
+        }
+
+        index += 1;
+    }
+}
+
+/// The inside of the parenthesised group starting at `open`, and the index after it.
+fn parenthesised(segment: &str, open: usize) -> Option<(&str, usize)> {
+    let bytes = segment.as_bytes();
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut index = open;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(close) = quote {
+            if byte == close {
+                if bytes.get(index + 1) == Some(&close) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => quote = Some(byte),
+            b'[' => quote = Some(b']'),
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((&segment[open + 1..index], index + 1));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    None
+}
+
+/// The name in a `CONSTRAINT name` immediately before a check, if one is written.
+fn constraint_name_before(prefix: &str) -> Option<String> {
+    let mut names: Vec<String> = Vec::new();
+    let bytes = prefix.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_whitespace() || matches!(byte, b'(' | b')' | b',') => {
+                index += 1;
+            }
+            b'"' | b'`' => {
+                let close = bytes[index];
+                let start = index + 1;
+                index = start;
+                while index < bytes.len() {
+                    if bytes[index] == close {
+                        if bytes.get(index + 1) == Some(&close) {
+                            index += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    index += 1;
+                }
+                let raw = &prefix[start..index];
+                let escaped = match close {
+                    b'"' => raw.replace("\"\"", "\""),
+                    b'`' => raw.replace("``", "`"),
+                    _ => raw.to_owned(),
+                };
+                names.push(escaped);
+                index += 1;
+            }
+            b'[' => {
+                let start = index + 1;
+                index = start;
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+                names.push(prefix[start..index].to_owned());
+                index += 1;
+            }
+            _ => {
+                let start = index;
+                while index < bytes.len()
+                    && !bytes[index].is_ascii_whitespace()
+                    && !matches!(bytes[index], b'(' | b')' | b',')
+                {
+                    index += 1;
+                }
+                names.push(prefix[start..index].to_owned());
+            }
+        }
+    }
+
+    let [.., keyword, name] = names.as_slice() else {
+        return None;
+    };
+    keyword
+        .eq_ignore_ascii_case("constraint")
+        .then(|| name.clone())
 }
 
 /// The expression of a generated column, read out of the `CREATE TABLE` text.
@@ -560,7 +795,7 @@ fn quote_literal(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::index_key_parts;
+    use super::{Check, check_constraints, index_key_parts};
 
     #[test]
     fn key_parts_split_on_top_level_commas() {
@@ -577,6 +812,44 @@ mod tests {
             index_key_parts("CREATE INDEX x\nON t\n(lower(email))")
                 .expect("the key list must parse"),
             ["lower(email)"]
+        );
+    }
+
+    #[test]
+    fn a_named_table_check_is_read_with_its_name() {
+        assert_eq!(
+            check_constraints(
+                r#"CREATE TABLE "accounts" ("balance" INTEGER NOT NULL, CONSTRAINT "accounts_balance_check" CHECK (balance > 0))"#,
+                "accounts",
+            ),
+            [Check {
+                name: "accounts_balance_check".into(),
+                expression: "balance>0".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_column_check_without_a_name_is_given_the_derive_name() {
+        assert_eq!(
+            check_constraints(
+                "CREATE TABLE accounts (\
+                     id INTEGER PRIMARY KEY, \
+                     starts_at TEXT NOT NULL, \
+                     ends_at TEXT NOT NULL CHECK (ends_at IS NULL OR ends_at > starts_at), \
+                     price INTEGER NOT NULL CHECK (price > 0))",
+                "accounts",
+            ),
+            [
+                Check {
+                    name: "accounts_0_check".into(),
+                    expression: "ends_at is null or ends_at>starts_at".into(),
+                },
+                Check {
+                    name: "accounts_1_check".into(),
+                    expression: "price>0".into(),
+                },
+            ]
         );
     }
 }

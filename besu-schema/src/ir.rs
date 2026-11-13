@@ -758,7 +758,7 @@ pub struct Table {
     /// Foreign key constraints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_keys: Vec<ForeignKey>,
-    /// `CHECK` constraints, which the derive cannot declare and a snapshot can.
+    /// `CHECK` constraints, from the derive or a snapshot.
     ///
     /// A check is written inside `CREATE TABLE` and added or dropped with
     /// `ALTER TABLE ... ADD/DROP CONSTRAINT` on the dialects that support it.
@@ -822,9 +822,17 @@ impl Table {
                     on_update: fk.on_update,
                 })
                 .collect(),
-            // The derive has no attribute for a `CHECK` constraint, so this is only ever
-            // populated by introspection or a hand-written snapshot.
-            checks: Vec::new(),
+            checks: def
+                .checks
+                .iter()
+                .map(|check| Check {
+                    name: check.name.into(),
+                    // The declared expression is kept as written so the DDL renders exactly
+                    // what the caller wrote; the differ compares it through
+                    // `normalise_expression`, which is also what introspection stores.
+                    expression: check.expression.into(),
+                })
+                .collect(),
             comment: None,
         }
     }
@@ -1029,15 +1037,50 @@ pub fn normalise_generated_expression(expression: &str) -> String {
 }
 
 /// Consume the type name after a `::` cast.
+///
+/// PostgreSQL writes multi-word types (`character varying`, `timestamp with time zone`) and
+/// quoted ones (`"MyType"`), optionally with a `(precision, scale)` suffix. It stops before a
+/// keyword such as `AND`, so removing a cast does not eat the rest of the expression.
 fn skip_type(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) {
-    // A type name is words, dots and an optional `(precision, scale)` suffix.
-    while let Some(ch) = chars.peek() {
-        if ch.is_alphanumeric() || *ch == '_' || *ch == '.' || *ch == ' ' {
-            chars.next();
-        } else {
+    if chars.peek() == Some(&'"') {
+        chars.next();
+        for ch in chars.by_ref() {
+            if ch == '"' {
+                break;
+            }
+        }
+    } else {
+        skip_type_word(chars);
+    }
+
+    // `character varying`, `double precision`, `timestamp with time zone`, ...
+    loop {
+        let mut probe = chars.clone();
+        while probe.peek() == Some(&' ') {
+            probe.next();
+        }
+        let mut word = String::new();
+        while let Some(ch) = probe.peek() {
+            if ch.is_ascii_alphanumeric() || *ch == '_' {
+                word.push(*ch);
+                probe.next();
+            } else {
+                break;
+            }
+        }
+        let continuation = matches!(
+            word.to_ascii_lowercase().as_str(),
+            "varying" | "precision" | "with" | "without" | "time" | "zone"
+        );
+        if !continuation {
             break;
         }
+        while chars.peek() == Some(&' ') {
+            chars.next();
+        }
+        skip_type_word(chars);
     }
+
     if chars.peek() == Some(&'(') {
         let mut depth = 0usize;
         for ch in chars.by_ref() {
@@ -1053,9 +1096,28 @@ fn skip_type(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) {
             }
         }
     }
+    // An array type is written `integer[]`.
+    if chars.peek() == Some(&'[') {
+        for ch in chars.by_ref() {
+            if ch == ']' {
+                break;
+            }
+        }
+    }
     // Do not leave the space that separated the type from the next token.
     while chars.peek() == Some(&' ') {
         chars.next();
+    }
+}
+
+/// Consume one word of a type name: letters, digits, `_`, `$` and dots.
+fn skip_type_word(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) {
+    while let Some(ch) = chars.peek() {
+        if ch.is_alphanumeric() || *ch == '_' || *ch == '$' || *ch == '.' {
+            chars.next();
+        } else {
+            break;
+        }
     }
 }
 
@@ -1235,9 +1297,10 @@ pub struct Index {
 
 /// A `CHECK` constraint.
 ///
-/// The expression is a raw SQL boolean expression. It is compared after folding away the
-/// redundant parentheses PostgreSQL adds, so a check declared as `value > 0` converges
-/// against the `((value > 0))` the database reports back.
+/// The expression is a raw SQL boolean expression. It is compared after
+/// [`normalise_expression`] folds away identifier quoting, `::type` casts, redundant
+/// parentheses and keyword case, so a check declared as `value > 0` converges against the
+/// `((value > 0))` PostgreSQL reports and the backticked spelling MySQL reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Check {
     /// The constraint name.
@@ -1288,48 +1351,240 @@ pub fn normalise_default(value: Option<&str>) -> Option<String> {
 
 /// Fold equivalent spellings of a `CHECK` expression together.
 ///
-/// PostgreSQL stores `CHECK (value > 0)` and reports it as `(value > 0)`, with one pair of
-/// parentheses for every level it was written at. Stripping pairs that wrap the whole
-/// expression leaves the spelling a person would write, so a check declared in a snapshot
-/// converges instead of being dropped and added on every push.
+/// The comparison a check converges on does not depend on how a person or a database spelled
+/// it: PostgreSQL reports `CHECK (value > 0)` as `(value > 0)` and adds an explicit cast to
+/// every literal (`'x'::text`), while MySQL backticks identifiers, escapes string literals and
+/// lowercases keywords. This function therefore removes whole-expression and redundant
+/// comparison parentheses, folds identifier quoting and `::type` casts, collapses whitespace
+/// and lowercases outside string literals. String literals are kept exactly.
 ///
-/// Only parentheses wrapping the *whole* expression are removed; `(a > 0) AND (b > 0)` keeps
-/// both of its pairs.
+/// Parentheses that group a boolean operator are kept, because removing them would change the
+/// meaning of `(a OR b) AND c`. A pair is removed only when it wraps the whole expression or a
+/// comparison with no boolean operator inside it, which is exactly the redundant case.
 pub fn normalise_expression(expression: &str) -> String {
-    let mut current = expression.trim();
-    while let Some(inner) = strip_outer_parens(current) {
-        current = inner.trim();
+    enum Token {
+        Word(String),
+        Literal(String),
+        Punct(char),
     }
-    current.to_owned()
-}
 
-/// The inside of `sql` when one pair of parentheses wraps all of it.
-fn strip_outer_parens(sql: &str) -> Option<&str> {
-    let inner = sql.strip_prefix('(')?.strip_suffix(')')?;
-    let mut depth = 0usize;
-    let mut quote = 0u8;
-    for byte in inner.bytes() {
-        if quote != 0 {
-            if byte == quote {
-                quote = 0;
+    fn tokenise(expression: &str) -> Vec<Token> {
+        let mut tokens = Vec::new();
+        let mut word = String::new();
+        let mut chars = expression.chars().peekable();
+
+        fn flush(word: &mut String, tokens: &mut Vec<Token>) {
+            if !word.is_empty() {
+                tokens.push(Token::Word(core::mem::take(word).to_ascii_lowercase()));
             }
+        }
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                // A string literal is data: copy it untouched, including doubled quotes.
+                '\'' => {
+                    flush(&mut word, &mut tokens);
+                    let mut literal = String::from("'");
+                    while let Some(inner) = chars.next() {
+                        literal.push(inner);
+                        if inner == '\'' {
+                            if chars.peek() == Some(&'\'') {
+                                literal.push(chars.next().unwrap_or('\''));
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    tokens.push(Token::Literal(literal));
+                }
+                // A quoted identifier is the same identifier as the bare spelling; the
+                // quote carries no meaning to the comparison.
+                '"' | '`' | '[' => {
+                    flush(&mut word, &mut tokens);
+                    let close = if ch == '[' { ']' } else { ch };
+                    let mut name = String::new();
+                    for inner in chars.by_ref() {
+                        if inner == close {
+                            break;
+                        }
+                        name.push(inner);
+                    }
+                    tokens.push(Token::Word(name.to_ascii_lowercase()));
+                }
+                ch if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' => word.push(ch),
+                ch => {
+                    flush(&mut word, &mut tokens);
+                    if !ch.is_whitespace() {
+                        tokens.push(Token::Punct(ch));
+                    }
+                }
+            }
+        }
+        flush(&mut word, &mut tokens);
+        tokens
+    }
+
+    fn matching(tokens: &[Token], open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (index, token) in tokens.iter().enumerate().skip(open) {
+            match token {
+                Token::Punct('(') => depth += 1,
+                Token::Punct(')') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Whether the parentheses at `open` are grouping a boolean expression rather than
+    /// belonging to a function call or `IN (...)`.
+    fn strippable(tokens: &[Token], open: usize) -> bool {
+        match open.checked_sub(1).and_then(|index| tokens.get(index)) {
+            None => true,
+            Some(Token::Punct('(' | ',')) => true,
+            Some(Token::Punct(')')) => false,
+            Some(Token::Word(word)) => matches!(
+                word.as_str(),
+                "and" | "or" | "not" | "where" | "when" | "then" | "else"
+            ),
+            Some(Token::Punct(_)) | Some(Token::Literal(_)) => false,
+        }
+    }
+
+    // A PostgreSQL cast is a rendering detail, not part of the expression a person wrote.
+    let expression = strip_casts(expression);
+    let tokens = tokenise(&expression);
+    let mut dropped = vec![false; tokens.len()];
+
+    // A pair of parentheses that wraps the whole expression says nothing.
+    while let Some(first) = (0..tokens.len()).find(|index| !dropped[*index]) {
+        if !matches!(tokens[first], Token::Punct('(')) {
+            break;
+        }
+        let Some(close) = matching(&tokens, first) else {
+            break;
+        };
+        if tokens
+            .iter()
+            .enumerate()
+            .any(|(index, _)| index > close && !dropped[index])
+        {
+            break;
+        }
+        dropped[first] = true;
+        dropped[close] = true;
+    }
+
+    for open in 0..tokens.len() {
+        if dropped[open] || !matches!(tokens[open], Token::Punct('(')) {
             continue;
         }
-        match byte {
-            b'\'' | b'"' => quote = byte,
-            b'(' | b'[' => depth += 1,
-            b')' | b']' => {
-                if depth == 0 {
-                    // The opening parenthesis closed before the end, so the outer pair does
-                    // not wrap the whole expression.
-                    return None;
-                }
-                depth -= 1;
+        let Some(close) = matching(&tokens, open) else {
+            continue;
+        };
+        if dropped[close] || !strippable(&tokens, open) {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut comparison = false;
+        let mut boolean = false;
+        for token in &tokens[open + 1..close] {
+            match token {
+                Token::Punct('(') => depth += 1,
+                Token::Punct(')') => depth = depth.saturating_sub(1),
+                Token::Punct('=' | '<' | '>' | '!') if depth == 0 => comparison = true,
+                Token::Word(word) if depth == 0 => match word.as_str() {
+                    "and" | "or" | "not" => boolean = true,
+                    "is" | "in" | "between" | "like" | "ilike" | "exists" => comparison = true,
+                    _ => {}
+                },
+                _ => {}
             }
-            _ => {}
+        }
+        // A group of arithmetic that is directly compared is an operand: `(a + b) > 0` and
+        // `a + b > 0` are the same comparison. PostgreSQL parenthesises the left operand, so
+        // folding it is what keeps an arithmetic check from churning.
+        let compared_operand = !comparison
+            && !boolean
+            && tokens.get(close + 1).is_some_and(|token| match token {
+                Token::Punct('=' | '<' | '>' | '!') => true,
+                Token::Word(word) => {
+                    matches!(word.as_str(), "is" | "in" | "between" | "like" | "ilike")
+                }
+                _ => false,
+            });
+        if (comparison && !boolean) || compared_operand {
+            dropped[open] = true;
+            dropped[close] = true;
         }
     }
-    Some(inner)
+
+    let mut out = String::with_capacity(expression.len());
+    let mut previous: Option<&Token> = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if dropped[index] {
+            continue;
+        }
+        // Two words would join into one token, but an operator never needs a space around
+        // it. This makes `a <> 1` and `a<>1` compare equal.
+        if let Some(previous) = previous {
+            let both_words = matches!(
+                (previous, token),
+                (Token::Word(_), Token::Word(_))
+                    | (Token::Word(_), Token::Literal(_))
+                    | (Token::Literal(_), Token::Word(_))
+                    | (Token::Literal(_), Token::Literal(_))
+            );
+            if both_words {
+                out.push(' ');
+            }
+        }
+        match token {
+            Token::Word(word) => out.push_str(word),
+            Token::Literal(literal) => out.push_str(literal),
+            Token::Punct(ch) => out.push(*ch),
+        }
+        previous = Some(token);
+    }
+
+    out
+}
+
+/// Remove PostgreSQL's `::type` casts, leaving quoted names and string literals untouched.
+fn strip_casts(expression: &str) -> String {
+    let mut out = String::with_capacity(expression.len());
+    let mut chars = expression.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            // A `::` inside a literal or a quoted identifier is not a cast.
+            '\'' | '"' | '`' => {
+                out.push(ch);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == ch {
+                        if chars.peek() == Some(&ch) {
+                            out.push(chars.next().unwrap_or(ch));
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            ':' if chars.peek() == Some(&':') => {
+                chars.next();
+                skip_type(&mut chars);
+            }
+            ch => out.push(ch),
+        }
+    }
+
+    out
 }
 
 #[cfg(feature = "fs")]
@@ -1432,6 +1687,68 @@ mod tests {
         assert_eq!(
             normalise_generated_expression("(`price` * `quantity`)"),
             normalise_generated_expression("price * quantity")
+        );
+    }
+
+    #[test]
+    fn a_check_expression_folds_parentheses_casts_and_case() {
+        use super::normalise_expression;
+
+        // What PostgreSQL reports for `price > 0`.
+        assert_eq!(normalise_expression("(price > 0)"), "price>0");
+        // A cast PostgreSQL adds and the parentheses it puts around each comparison.
+        assert_eq!(
+            normalise_expression("((name <> 'x'::text) AND (balance < 100))"),
+            normalise_expression("name <> 'x' AND balance < 100")
+        );
+        // MySQL lowercases keywords and backticks identifiers.
+        assert_eq!(
+            normalise_expression("(`name` <> 'x' and `balance` < 100)"),
+            normalise_expression("name <> 'x' AND balance < 100")
+        );
+        // Parentheses that group a boolean operator are not redundant.
+        assert_ne!(
+            normalise_expression("(a OR b) AND c"),
+            normalise_expression("a OR (b AND c)")
+        );
+        // PostgreSQL parenthesises an arithmetic operand of a comparison; the grouping is
+        // redundant there.
+        assert_eq!(
+            normalise_expression("((a + b) > 0)"),
+            normalise_expression("a + b > 0")
+        );
+        // A string literal is data, so its case and spelling survive.
+        assert_ne!(
+            normalise_expression("name = 'X'"),
+            normalise_expression("name = 'x'")
+        );
+    }
+
+    #[test]
+    fn a_table_definition_copies_its_checks_into_the_ir() {
+        use besu_core::{CheckDef, ColumnDef, TableDef};
+
+        const COLUMNS: &[ColumnDef] = &[ColumnDef {
+            name: "price",
+            ty: besu_core::TypeDef::Int8,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            generated: None,
+            renamed_from: None,
+        }];
+        const CHECKS: &[CheckDef] = &[CheckDef::new("prices_price_check", "price > 0")];
+        const DEF: TableDef = TableDef::new("prices", None, COLUMNS, &[], &[], CHECKS);
+
+        let table = super::Table::from_def(&DEF);
+        assert_eq!(
+            table.checks,
+            [super::Check {
+                name: "prices_price_check".into(),
+                expression: "price > 0".into(),
+            }]
         );
     }
 

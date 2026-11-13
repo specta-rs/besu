@@ -3,7 +3,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
-use besu::schema::{Index, IndexColumn, IndexKind, Schema};
+use besu::schema::{Check, Index, IndexColumn, IndexKind, Schema};
 use besu_sqlite::Sqlx;
 
 /// A file-backed database, because a pool over `:memory:` would give every statement its
@@ -35,6 +35,40 @@ pub struct Account {
     #[besu(primary_key)]
     pub id: i64,
     pub balance: i64,
+}
+
+/// A table with both check spellings: an auto-named one and an explicitly named one.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "products")]
+#[besu(check = "price > 0")]
+#[besu(check(
+    name = "products_ends_after_it_starts",
+    expression = "ends_at IS NULL OR ends_at > starts_at"
+))]
+#[allow(dead_code, clippy::duplicated_attributes)]
+pub struct Product {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub price: i64,
+    pub starts_at: chrono::NaiveDateTime,
+    pub ends_at: Option<chrono::NaiveDateTime>,
+}
+
+#[test]
+fn derived_checks_carry_their_names_and_expressions() {
+    let schema = Schema::from_defs(&[products.def()]);
+    let checks = &schema.table("products").unwrap().checks;
+
+    assert_eq!(checks.len(), 2);
+    // The auto name is the table plus the check's zero-based position on the struct.
+    assert_eq!(checks[0].name, "products_0_check");
+    assert_eq!(checks[0].expression, "price > 0");
+    // An explicit name is kept as written.
+    assert_eq!(checks[1].name, "products_ends_after_it_starts");
+    assert_eq!(
+        checks[1].expression,
+        "ends_at IS NULL OR ends_at > starts_at"
+    );
 }
 
 /// Every table-level index spelling: composite, expression, named, unique, an access method
@@ -204,10 +238,11 @@ async fn a_composite_expression_index_round_trips() {
     assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
 
-/// A `CHECK` constraint exists only inside the `CREATE TABLE` text on SQLite, so it is not
-/// introspected. Pushing the declared schema must not try to remove one.
+/// A `CHECK` constraint exists only inside the `CREATE TABLE` text on SQLite, so it is read
+/// from there, named the same way the derive names an unnamed one, and a change to it rebuilds
+/// the table through the ordinary alter machinery.
 #[tokio::test]
-async fn a_check_constraint_is_skipped() {
+async fn a_check_constraint_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir).await;
 
@@ -220,15 +255,126 @@ async fn a_check_constraint_is_skipped() {
     .unwrap();
 
     let introspected = db.introspect().await.unwrap();
-    assert!(introspected.table("accounts").unwrap().checks.is_empty());
-
-    let pushed = db.push([accounts.def()]).await.unwrap();
-    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
-    assert!(
-        !pushed.statements.iter().any(|sql| sql.contains("CHECK")),
-        "got {:?}",
-        pushed.statements
+    assert_eq!(
+        introspected.table("accounts").unwrap().checks,
+        [Check {
+            name: "accounts_0_check".into(),
+            expression: "balance>=0".into(),
+        }]
     );
+
+    // A snapshot that carries that check is already what the database has.
+    let pushed = db.push_schema(&introspected).await.unwrap();
+    assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+
+    // The declaration has no check, so push sees a constraint to remove. Dropping one is
+    // destructive, and it is applied by rebuilding the table because SQLite has no
+    // `ALTER TABLE ... DROP CONSTRAINT`.
+    let refused = db.push([accounts.def()]).await.unwrap_err().to_string();
+    assert!(refused.contains("accounts_0_check"), "got {refused}");
+
+    let dropped = db.push_destructive([accounts.def()]).await.unwrap();
+    assert!(
+        dropped
+            .statements
+            .iter()
+            .any(|sql| sql.contains("accounts__besu_tmp")),
+        "the change must rebuild the table: {:?}",
+        dropped.statements
+    );
+    assert!(
+        db.introspect()
+            .await
+            .unwrap()
+            .table("accounts")
+            .unwrap()
+            .checks
+            .is_empty()
+    );
+    assert!(db.push([accounts.def()]).await.unwrap().is_empty());
+}
+
+/// A check declared by the derive is written into `CREATE TABLE`, read back under the same
+/// name and expression, and a second push is a no-op.
+#[tokio::test]
+async fn a_derived_check_is_created_and_converges() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir).await;
+
+    let first = db.push([products.def()]).await.unwrap();
+    assert!(
+        first.statements[0].contains(r#"CONSTRAINT "products_0_check" CHECK (price > 0)"#),
+        "got {:?}",
+        first.statements
+    );
+    assert!(
+        first.statements[0].contains(
+            r#"CONSTRAINT "products_ends_after_it_starts" CHECK (ends_at IS NULL OR ends_at > starts_at)"#
+        ),
+        "got {:?}",
+        first.statements
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let desired = Schema::from_defs(&[products.def()]);
+    let introspected = &introspected.table("products").unwrap().checks;
+    let desired = &desired.table("products").unwrap().checks;
+    assert_eq!(introspected.len(), desired.len());
+    for (introspected, desired) in introspected.iter().zip(desired) {
+        assert_eq!(introspected.name, desired.name);
+        assert_eq!(
+            besu::schema::normalise_expression(&introspected.expression),
+            besu::schema::normalise_expression(&desired.expression)
+        );
+    }
+    assert!(db.push([products.def()]).await.unwrap().is_empty());
+}
+
+/// A declared check whose expression changed is dropped and added; on SQLite that is one
+/// rebuild, and the new expression is what introspection reports afterwards.
+#[tokio::test]
+async fn a_changed_derived_check_rebuilds_the_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir).await;
+
+    db.execute(sql!(
+        "CREATE TABLE accounts (\
+             id INTEGER PRIMARY KEY, \
+             balance INTEGER NOT NULL, \
+             CONSTRAINT accounts_balance_check CHECK (balance >= 0))"
+    ))
+    .await
+    .unwrap();
+
+    let mut desired = Schema::new();
+    desired.push_def(accounts.def());
+    desired.tables[0].checks.push(Check {
+        name: "accounts_balance_check".into(),
+        expression: "balance>0".into(),
+    });
+
+    let changed = db.push_schema_destructive(&desired).await.unwrap();
+    assert!(
+        changed
+            .statements
+            .iter()
+            .any(|sql| sql.contains("accounts__besu_tmp")),
+        "a changed check must rebuild the table: {:?}",
+        changed.statements
+    );
+    assert_eq!(
+        db.introspect()
+            .await
+            .unwrap()
+            .table("accounts")
+            .unwrap()
+            .checks,
+        [Check {
+            name: "accounts_balance_check".into(),
+            expression: "balance>0".into(),
+        }]
+    );
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
 
 /// A view is created, replaced by a drop and a create (SQLite has no `OR REPLACE`) and

@@ -110,5 +110,6 @@ refuse the plan as destructive — which is exactly what happened before it was 
   not, because the IR does not model one.
 - **Type widening can be invisible.** SQLite folds integer widths; PostgreSQL folds unsigned
   integers into their signed storage. A change the dialect cannot see is not reported.
-- **A check written by hand is not declared by the derive.** Pushing table definitions
-  against a table with a check reports a `DropCheck`, which is destructive, so `push` refuses.
+- **A check written by hand is not declared by the derive unless you add it.** Pushing table
+  definitions against a table with an undeclared check reports a `DropCheck`, which is
+  destructive, so `push` refuses. Declare it with `#[besu(check = "...")]` or in the snapshot.

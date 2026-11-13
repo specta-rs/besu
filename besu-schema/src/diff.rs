@@ -601,12 +601,24 @@ fn renamed_previous<'a>(column: &'a Column, current: &Table) -> Option<&'a str> 
 fn same_index(a: &Index, b: &Index) -> bool {
     a.unique == b.unique
         && a.kind == b.kind
-        && a.predicate == b.predicate
+        && same_predicate(a.predicate.as_deref(), b.predicate.as_deref())
         && a.columns.len() == b.columns.len()
         && a.columns
             .iter()
             .zip(&b.columns)
             .all(|(a, b)| same_index_column(a, b))
+}
+
+/// Whether two partial-index predicates describe the same condition.
+///
+/// PostgreSQL reports the predicate with its own parentheses, quoting and keyword case, so it
+/// is compared through the same expression normaliser a check uses.
+fn same_predicate(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => crate::normalise_expression(a) == crate::normalise_expression(b),
+        _ => false,
+    }
 }
 
 /// Whether two key entries describe the same target and operator class.

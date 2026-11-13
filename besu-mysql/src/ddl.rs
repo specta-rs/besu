@@ -306,6 +306,16 @@ impl Ddl for MySqlDdl {
         )
     }
 
+    fn drop_check(&self, table: &str, check: &besu_schema::Check) -> String {
+        // MySQL 8.0.16 spells the drop `DROP CHECK`; `DROP CONSTRAINT` only arrived in
+        // 8.0.19, so this is the spelling that works on every server that enforces checks.
+        format!(
+            "ALTER TABLE {} DROP CHECK {}",
+            self.quote_table(table),
+            self.quote(&check.name)
+        )
+    }
+
     /// `CREATE TABLE`.
     ///
     /// Secondary indexes are inlined as `KEY` clauses because `create_schema` only runs

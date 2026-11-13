@@ -422,6 +422,34 @@ mod generated {
     }
 }
 
+mod checked {
+    #![allow(unused_imports)]
+    use besu::Table;
+
+    /// A table with both check spellings. MySQL lowercases keywords, backticks identifiers
+    /// and escapes string literals in `CHECK_CLAUSE`; all of it has to fold back to this.
+    #[derive(Table, Debug, Clone, PartialEq)]
+    #[besu(table = "invoices")]
+    #[besu(check = "total > 0")]
+    #[besu(check(
+        name = "invoices_due_after_issued",
+        expression = "due_at IS NULL OR due_at > issued_at"
+    ))]
+    #[besu(check(
+        name = "invoices_status",
+        expression = "status <> 'void' AND total < 1000000"
+    ))]
+    #[allow(dead_code, clippy::duplicated_attributes)]
+    pub struct Invoice {
+        #[besu(primary_key)]
+        pub id: i64,
+        pub total: i64,
+        pub issued_at: chrono::NaiveDateTime,
+        pub due_at: Option<chrono::NaiveDateTime>,
+        pub status: String,
+    }
+}
+
 /// A generated column is rendered with `GENERATED ALWAYS AS ... STORED`, read back from
 /// `GENERATION_EXPRESSION` and never written by an insert.
 #[tokio::test]
@@ -445,7 +473,7 @@ async fn generated_columns_round_trip() {
     assert_eq!(
         total.generated,
         Some(besu::schema::Generated {
-            expression: "price * quantity".into(),
+            expression: "price*quantity".into(),
             stored: true,
         })
     );
@@ -467,6 +495,109 @@ async fn generated_columns_round_trip() {
         .await
         .unwrap();
     assert_eq!(totals, [12]);
+}
+
+/// A check declared by the derive is written into `CREATE TABLE`, read back from
+/// `information_schema.CHECK_CONSTRAINTS`, and converges despite MySQL's backticks,
+/// lowercased keywords and escaped string literals.
+#[tokio::test]
+async fn derived_checks_are_created_and_converge() {
+    let db = fresh("besu_test_schema_checks").await;
+
+    let first = db.push([checked::invoices.def()]).await.unwrap();
+    assert!(
+        first.statements[0].contains("CONSTRAINT `invoices_0_check` CHECK (total > 0)"),
+        "got {:?}",
+        first.statements
+    );
+    assert!(
+        first.statements[0].contains(
+            "CONSTRAINT `invoices_due_after_issued` CHECK (due_at IS NULL OR due_at > issued_at)"
+        ),
+        "got {:?}",
+        first.statements
+    );
+    assert!(
+        first.statements[0]
+            .contains("CONSTRAINT `invoices_status` CHECK (status <> 'void' AND total < 1000000)"),
+        "got {:?}",
+        first.statements
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let desired = besu::Database::<Sqlx>::schema([checked::invoices.def()]);
+    let introspected = &introspected.table("invoices").unwrap().checks;
+    let desired = &desired.table("invoices").unwrap().checks;
+    assert_eq!(introspected.len(), desired.len());
+    for (introspected, desired) in introspected.iter().zip(desired) {
+        assert_eq!(introspected.name, desired.name);
+        assert_eq!(
+            besu::schema::normalise_expression(&introspected.expression),
+            besu::schema::normalise_expression(&desired.expression)
+        );
+    }
+    assert!(db.push([checked::invoices.def()]).await.unwrap().is_empty());
+}
+
+/// A check can be added to and dropped from an existing table, and MySQL's drop spelling is
+/// `DROP CHECK` (8.0.16) rather than `DROP CONSTRAINT` (8.0.19).
+#[tokio::test]
+async fn a_check_is_added_and_dropped_on_an_existing_table() {
+    let db = fresh("besu_test_schema_check_alter").await;
+
+    db.execute(sql!(
+        "CREATE TABLE accounts (\
+             id BIGINT PRIMARY KEY, \
+             balance BIGINT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    let base = || {
+        let mut schema = Schema::new();
+        schema.tables.push(table(
+            "accounts",
+            vec![
+                {
+                    let mut id = column("id", TypeDef::Int8);
+                    id.primary_key = true;
+                    id
+                },
+                column("balance", TypeDef::Int8),
+            ],
+        ));
+        schema.sort();
+        schema
+    };
+
+    let mut with = base();
+    with.tables[0].checks.push(besu::schema::Check {
+        name: "accounts_balance_check".into(),
+        expression: "balance>=0".into(),
+    });
+
+    let added = db.push_schema(&with).await.unwrap();
+    assert_eq!(
+        added.statements,
+        ["ALTER TABLE `accounts` ADD CONSTRAINT `accounts_balance_check` CHECK (balance>=0)"]
+    );
+    assert!(db.push_schema(&with).await.unwrap().is_empty());
+
+    let dropped = db.push_schema_destructive(&base()).await.unwrap();
+    assert_eq!(
+        dropped.statements,
+        ["ALTER TABLE `accounts` DROP CHECK `accounts_balance_check`"]
+    );
+    assert!(
+        db.introspect()
+            .await
+            .unwrap()
+            .table("accounts")
+            .unwrap()
+            .checks
+            .is_empty()
+    );
+    assert!(db.push_schema(&base()).await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------

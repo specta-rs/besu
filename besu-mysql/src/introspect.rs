@@ -1,5 +1,7 @@
 use besu_core::{TypeDef, schema::IndexKind, schema::ReferenceAction};
-use besu_schema::{Column, ForeignKey, Generated, Index, IndexColumn, Schema, Table, Unique, View};
+use besu_schema::{
+    Check, Column, ForeignKey, Generated, Index, IndexColumn, Schema, Table, Unique, View,
+};
 
 use crate::Sqlx;
 
@@ -9,10 +11,10 @@ use crate::Sqlx;
 /// schema that already exists produces no statements.
 ///
 /// Functional (expression) indexes are read from `STATISTICS.EXPRESSION`. `CHECK`
-/// constraints are skipped: MySQL reports them in a form it will not accept back (see the
-/// field comment in `introspect_table`). Views are read into
-/// [`Schema::views`] for `besu pull`; MySQL has no materialised views and no sequences.
-/// Triggers are not read at all.
+/// constraints are read from `information_schema.CHECK_CONSTRAINTS` (MySQL 8.0.16+), with
+/// MySQL's own backticks, keyword case and literal escaping folded back onto the declared
+/// expression. Views are read into [`Schema::views`] for `besu pull`; MySQL has no
+/// materialised views and no sequences. Triggers are not read at all.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
     let tables = db
         .execute(besu::sql!(
@@ -143,6 +145,24 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         .all::<(String, String, String, String, String, String)>()
         .await?;
 
+    // MySQL 8.0.16 and later keep a real table check in `CHECK_CONSTRAINTS`; the join to
+    // `TABLE_CONSTRAINTS` is what scopes it to a table, because the check's own view does not
+    // carry a table name.
+    let checks = db
+        .execute(table_query(
+            "SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE \
+             FROM information_schema.CHECK_CONSTRAINTS cc \
+             JOIN information_schema.TABLE_CONSTRAINTS tc \
+               ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA \
+              AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME \
+             WHERE cc.CONSTRAINT_SCHEMA = DATABASE() AND tc.TABLE_NAME = ? \
+               AND tc.CONSTRAINT_TYPE = 'CHECK' \
+             ORDER BY cc.CONSTRAINT_NAME",
+            &name,
+        ))
+        .all::<(String, String)>()
+        .await?;
+
     let mut table = Table {
         name: name.clone(),
         schema: None,
@@ -199,12 +219,13 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         indexes: Vec::new(),
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
-        // MySQL stores a check as a `CHECK_CLAUSE` that is not the SQL it accepts back:
-        // identifiers are backticked and string literals are backslash-escaped for MySQL's
-        // own parser, so reporting one would make `besu pull` write a snapshot that cannot be
-        // rendered again. Checks are therefore left unmodelled here, exactly as SQLite
-        // leaves them: `push` neither sees nor drops one.
-        checks: Vec::new(),
+        checks: checks
+            .into_iter()
+            .map(|(name, expression)| Check {
+                name,
+                expression: normalise_check_expression(&expression),
+            })
+            .collect(),
         comment: None,
     };
 
@@ -306,6 +327,74 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     }
 
     Ok(table)
+}
+
+/// Fold MySQL's spelling of a check expression onto the declared one.
+///
+/// `CHECK_CLAUSE` is what MySQL's own parser accepted, not a portable expression: every
+/// identifier is backticked, a string literal carries a character-set introducer and
+/// backslash-escaped quotes (`_latin1\'x\'`), and keywords are lowercased. Backticks and
+/// keywords are folded by [`besu_schema::normalise_expression`]; the introducer and escapes
+/// are MySQL's alone, so they are removed here.
+fn normalise_check_expression(expression: &str) -> String {
+    let mut unescaped = String::with_capacity(expression.len());
+    let mut chars = expression.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        // MySQL escapes the opening quote too when it round-trips a check, so `\'x\'` and
+        // `'x'` have to start the same literal.
+        let starts_literal = ch == '\'' || (ch == '\\' && chars.peek() == Some(&'\''));
+        if !starts_literal {
+            unescaped.push(ch);
+            continue;
+        }
+        if ch == '\\' {
+            chars.next();
+        }
+        strip_introducer(&mut unescaped);
+        unescaped.push('\'');
+        while let Some(inner) = chars.next() {
+            match inner {
+                '\\' => {
+                    // `\'` is a quote and `\\` a backslash; anything else keeps its
+                    // backslash so the expression still looks like what was written.
+                    match chars.next() {
+                        Some(escaped @ ('\'' | '"' | '\\')) => unescaped.push(escaped),
+                        Some(other) => {
+                            unescaped.push('\\');
+                            unescaped.push(other);
+                        }
+                        None => unescaped.push('\\'),
+                    }
+                }
+                '\'' => {
+                    unescaped.push(inner);
+                    if chars.peek() == Some(&'\'') {
+                        unescaped.push(chars.next().unwrap_or('\''));
+                    } else {
+                        break;
+                    }
+                }
+                _ => unescaped.push(inner),
+            }
+        }
+    }
+
+    besu_schema::normalise_expression(&unescaped)
+}
+
+/// Remove a character-set introducer (`_latin1`, `_utf8mb4`, ...) directly before a literal.
+fn strip_introducer(out: &mut String) {
+    let start = out
+        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .map_or(0, |index| index + 1);
+    let candidate = &out[start..];
+    if candidate.len() > 1
+        && candidate.starts_with('_')
+        && candidate[1..].chars().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        out.truncate(start);
+    }
 }
 
 /// Map `information_schema.STATISTICS.INDEX_TYPE` onto an [`IndexKind`].
@@ -509,6 +598,16 @@ fn on_update_clause(extra: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_check_clause_with_a_literal_is_folded() {
+        // `CHECK_CLAUSE` as MySQL reports it: backticks, a lowercased keyword, a charset
+        // introducer and backslash-escaped quotes.
+        assert_eq!(
+            normalise_check_expression("((`name` <> _latin1\\'x\\') and (`balance` < 100))"),
+            "name<>'x' and balance<100"
+        );
+    }
 
     #[test]
     fn tinyint_one_unsigned_is_a_byte_not_a_boolean() {

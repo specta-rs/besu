@@ -146,10 +146,10 @@ db.push_schema(&schema).await?;
 `From<&str>` and `From<String>` produce a plain column, so `vec!["name".into()]` still works.
 
 A `TableDef` is also a plain public struct, so a hand-written const can carry a composite,
-expression or operator-class index. It cannot carry a predicate or a check: those live only in
+expression or operator-class index, and a check. It cannot carry a predicate: that lives only in
 the `Schema` IR. An access method is part of `Index`, so a hand-written `TableDef` can declare
 one. Its entries are `besu::IndexEntry`, which has `column`, `expression` and `with_opclass`
-`const fn` constructors.
+`const fn` constructors; checks are `besu::CheckDef::new(name, expression)`.
 
 ### Access methods
 
@@ -302,8 +302,38 @@ constraint is created; `push` creates tables in dependency order.
 
 ## CHECK constraints
 
-A check is a name and the boolean expression inside `CHECK (...)`. The derive has no attribute
-for one, and `TableDef` has no field for one.
+A check is a name and the boolean expression inside `CHECK (...)`. The derive declares it on the
+struct, and both spellings may be repeated:
+
+```rust
+#[besu(check = "price > 0")]
+#[besu(check = "ends_at IS NULL OR ends_at > starts_at")]
+#[besu(check(name = "orders_total_positive", expression = "total > 0"))]
+```
+
+```sql
+CREATE TABLE "orders" (
+    "price" BIGINT NOT NULL,
+    "starts_at" TIMESTAMPTZ NOT NULL,
+    "ends_at" TIMESTAMPTZ,
+    "total" BIGINT NOT NULL,
+    CONSTRAINT "orders_0_check" CHECK (price > 0),
+    CONSTRAINT "orders_1_check" CHECK (ends_at IS NULL OR ends_at > starts_at),
+    CONSTRAINT "orders_total_positive" CHECK (total > 0)
+)
+```
+
+The name is always written explicitly, which is what makes introspection return the same object.
+Without a name a check is called `{table}_{i}_check`, where `i` is its zero-based position among
+the checks on the struct. The position is part of the name, so removing or reordering a check
+renames the ones after it and `push` sees a drop and an add; use the named form when that
+matters. An empty expression is a compile error.
+
+The expression is normalised before it is compared: identifier quoting, `::type` casts, the
+extra parentheses PostgreSQL adds and keyword case are folded away, so `price > 0`, `(price > 0)`
+and MySQL's `` (`price` > 0) `` all describe the same check. Parentheses that group `AND` or
+`OR` are kept, because removing them would change the meaning. A string literal is kept exactly,
+including its case.
 
 ```rust
 use besu::schema::Check;
@@ -318,9 +348,12 @@ schema.table_mut("accounts").unwrap().checks.push(Check {
 ALTER TABLE "accounts" ADD CONSTRAINT "accounts_balance_check" CHECK (balance >= 0)
 ```
 
-PostgreSQL is the only dialect that round-trips a check: it is read from `pg_constraint`, the extra
-parentheses are normalised away, and adding or dropping one is a plain `ALTER TABLE`. SQLite keeps
-a check inside the `CREATE TABLE` text and MySQL reports a `CHECK_CLAUSE` it will not accept back.
+All three dialects write a check inside `CREATE TABLE` and introspect it back: PostgreSQL reads
+`pg_constraint.contype = 'c'`, MySQL 8.0.16+ reads `information_schema.CHECK_CONSTRAINTS`, and
+SQLite parses the `CREATE TABLE` text in `sqlite_master`. PostgreSQL and MySQL add and drop an
+existing check with `ALTER TABLE`; MySQL spells the drop `DROP CHECK`. SQLite has no
+`ALTER TABLE ... ADD/DROP CONSTRAINT`, so it applies a check change by rebuilding the table
+through the same path it uses for an altered column.
 
 ## What the derive can declare
 
@@ -337,11 +370,11 @@ a check inside the `CREATE TABLE` text and MySQL reports a `CHECK_CLAUSE` it wil
 | Partial index | No | No | Yes (PostgreSQL) |
 | Foreign key, single column | Yes | Yes | Yes |
 | Foreign key, composite | No | Yes | Yes |
-| `CHECK` | No | No | Yes |
+| `CHECK` | Yes | Yes | Yes |
 
 A table definition pushed from Rust therefore declares its keys, uniques (one column), indexes
-(composite, expression, operator class and access method), and its single-column foreign keys.
-Everything else needs a hand-written `TableDef`, a `besu pull` snapshot or a migration.
+(composite, expression, operator class and access method), its single-column foreign keys and its
+checks. Everything else needs a hand-written `TableDef`, a `besu pull` snapshot or a migration.
 
 ## Generated columns
 
@@ -391,13 +424,15 @@ one for every row.
 
 ## Gotchas
 
-- SQLite cannot add or drop a composite `UNIQUE`, a foreign key or a check on an existing table.
-  The change is reported and renders no statement; only a `CREATE TABLE` — or a table rebuild
-  caused by a type change — writes one.
-- MySQL renders an `ADD CONSTRAINT ... CHECK` but never introspects one, so a check in a snapshot
-  is applied once and then reported again on the next push, where the duplicate name fails.
-- SQLite does not report a constraint's own name, so uniques are matched by their columns rather
-  than by name. Renaming a unique in a snapshot is not a change.
+- SQLite cannot add or drop a composite `UNIQUE` or a foreign key on an existing table. The
+  change is reported and renders no statement; only a `CREATE TABLE` — or a table rebuild —
+  writes one. A check is different: a check change triggers that rebuild, so it is applied.
+- MySQL introspects a check from `CHECK_CLAUSE` after folding its backticked identifiers,
+  lowercased keywords, character-set introducers and backslash-escaped quotes. A check on a MySQL
+  server older than 8.0.16 has no catalogue row; declare it on 8.0.16 or later.
+- SQLite does not report a constraint's own name for a `UNIQUE`, so uniques are matched by their
+  columns rather than by name. Renaming a unique in a snapshot is not a change. A check written
+  without a name is given `{table}_{i}_check`, the same rule the derive uses.
 - MySQL stores a single-column `UNIQUE` as an index named after the column and introspects it back
   onto the column; a unique index you name yourself stays an index.
 - An index with `INCLUDE` columns and a PostgreSQL exclusion constraint are invisible to the IR:

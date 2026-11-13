@@ -98,6 +98,20 @@ A table-level `#[besu(index(columns(...)))]` declares a composite or expression 
 index, an access method and a per-column operator class. Partial indexes still need a snapshot;
 see [the constraints page](indexes-constraints.md#indexes).
 
+## `check`
+
+A table-level `CHECK` constraint, named `{table}_{i}_check` unless a name is given. The attribute
+may be repeated, in either spelling:
+
+```rust
+#[besu(check = "price > 0")]
+#[besu(check(name = "orders_total_positive", expression = "total > 0"))]
+```
+
+An expression must be non-empty. It is raw SQL, so it is your responsibility that every target
+dialect accepts it; the name is always written into the DDL so introspection returns the same
+object. See [the constraints page](indexes-constraints.md#check-constraints).
+
 ## Defaults: `default`, `default_now`, `default_sql`
 
 A default makes the column optional in an insert; it does not change the Rust type, so the model

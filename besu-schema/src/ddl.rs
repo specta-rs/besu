@@ -658,4 +658,50 @@ mod tests {
             r#"CREATE INDEX "users_email_idx" ON "users" ("email")"#
         );
     }
+
+    fn accounts(checks: Vec<Check>) -> Table {
+        Table {
+            name: "accounts".into(),
+            schema: None,
+            columns: vec![Column {
+                name: "balance".into(),
+                ty: TypeDef::Int8,
+                nullable: false,
+                auto_increment: false,
+                primary_key: false,
+                unique: false,
+                default: None,
+                generated: None,
+                comment: None,
+                renamed_from: None,
+            }],
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn a_check_is_written_inside_create_table_and_alters_by_name() {
+        let check = Check {
+            name: "accounts_balance_check".into(),
+            expression: "balance > 0".into(),
+        };
+        let table = accounts(vec![check.clone()]);
+
+        assert_eq!(
+            TestDdl.create_table(&table),
+            r#"CREATE TABLE "accounts" ("balance", CONSTRAINT "accounts_balance_check" CHECK (balance > 0))"#
+        );
+        assert_eq!(
+            TestDdl.add_check("accounts", &check),
+            r#"ALTER TABLE "accounts" ADD CONSTRAINT "accounts_balance_check" CHECK (balance > 0)"#
+        );
+        assert_eq!(
+            TestDdl.drop_check("accounts", &check),
+            r#"ALTER TABLE "accounts" DROP CONSTRAINT "accounts_balance_check""#
+        );
+    }
 }

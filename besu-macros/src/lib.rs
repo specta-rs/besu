@@ -54,6 +54,11 @@ mod table;
 ///   `opclass(email = "text_pattern_ops")` by column name. Without `name`, a composite index
 ///   is called `{table}_{columns}_idx` and an expression entry contributes `expr{position}`.
 ///   May be repeated.
+/// - `#[besu(check = "expression")]` — a table-level `CHECK` constraint. An explicitly named
+///   form is `#[besu(check(name = "...", expression = "..."))]`. Without a name the check is
+///   called `{table}_{i}_check`, where `i` is its zero-based position among the checks on the
+///   struct; the name is written explicitly into the DDL, so introspection reads it back.
+///   May be repeated, including both spellings on one struct.
 ///
 /// On a field:
 ///

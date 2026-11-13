@@ -98,8 +98,8 @@ pub mod types;
 pub use crate::types::*;
 pub use batch::{Batch, BatchWrite};
 pub use besu_core::schema::{
-    ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexColumn, IndexEntry, IndexKind,
-    ReferenceAction,
+    CheckDef, ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexColumn, IndexEntry,
+    IndexKind, ReferenceAction,
 };
 pub use besu_core::{
     self, Decode, Dialect, Driver, Error, Executor, Sql, TableDef, TransactionDriver, TypeDef,

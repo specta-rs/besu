@@ -179,10 +179,10 @@ impl Ddl for SQLiteDdl {
     }
 
     fn apply_with(&self, changes: &[Change], current: &Schema, desired: &Schema) -> Vec<String> {
-        // A table that has an altered column is rebuilt once, from its full desired
-        // definition, so every other change for that table is skipped: the rebuild already
-        // creates the desired columns, inline constraints, foreign keys and indexes, and a
-        // later `ADD COLUMN`, `ADD INDEX` or `DROP INDEX` would fail or apply twice.
+        // A table that has an altered column or a changed check is rebuilt once, from its full
+        // desired definition, so every other change for that table is skipped: the rebuild
+        // already creates the desired columns, inline constraints, foreign keys and indexes,
+        // and a later `ADD COLUMN`, `ADD INDEX` or `DROP INDEX` would fail or apply twice.
         let altered: Vec<String> = changes
             .iter()
             .filter_map(|change| match change {
@@ -193,6 +193,12 @@ impl Ddl for SQLiteDdl {
                 Change::AddColumn { table, column }
                     if column.generated.as_ref().is_some_and(|g| g.stored) =>
                 {
+                    Some(table.clone())
+                }
+                // SQLite has no `ALTER TABLE ... ADD/DROP CONSTRAINT`, so a check added,
+                // removed or changed on an existing table is applied by the same rebuild.
+                // `create_table` writes the desired checks, and the copy keeps every row.
+                Change::AddCheck { table, .. } | Change::DropCheck { table, .. } => {
                     Some(table.clone())
                 }
                 _ => None,
@@ -318,13 +324,13 @@ impl Ddl for SQLiteDdl {
 
     fn add_check(&self, _table: &str, _check: &Check) -> String {
         // SQLite has no `ALTER TABLE ... ADD CONSTRAINT`; a check can only be written inside
-        // `CREATE TABLE`, so adding one to an existing table means rebuilding it. `push` does
-        // not rebuild for this change, so the statement is empty.
+        // `CREATE TABLE`. `apply_with` notices the change and rebuilds the table, so this
+        // statement is never the one that applies it.
         String::new()
     }
 
     fn drop_check(&self, _table: &str, _check: &Check) -> String {
-        // See `add_check`: dropping a check would need the same rebuild.
+        // See `add_check`: `apply_with` rebuilds the table instead.
         String::new()
     }
 
