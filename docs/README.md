@@ -12,7 +12,7 @@ are in the query, and whether a bulk write was intentional.
 - [Get started with PostgreSQL](get-started/postgresql.md)
 - [Get started with MySQL](get-started/mysql.md)
 - [Schema declaration](schema/declaration.md) — `#[derive(Table)]` and every attribute
-- [Relations](schema/relations.md) — `has_many`, and loading children without an N+1
+- [Relations](schema/relations.md) — relation values, many-to-many and nested loading without an N+1
 - [Connect](connect/overview.md) — a driver, a pool, a database
 - [Queries and CRUD](queries/select.md) — the shape of every statement
 - [Migrations](migrations/overview.md) — the schema IR, `push`, `generate`, `migrate`

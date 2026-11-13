@@ -130,6 +130,34 @@ pub struct Post {
     author_id: i64,
 }
 
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "comments")]
+pub struct Comment {
+    #[besu(primary_key, auto_increment)]
+    id: i64,
+    body: String,
+    #[besu(references = "posts.id")]
+    post_id: i64,
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "labels")]
+pub struct Label {
+    #[besu(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+/// The join table for the many-to-many relation between posts and labels.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "post_labels")]
+pub struct PostLabel {
+    #[besu(primary_key)]
+    post_id: i64,
+    #[besu(primary_key)]
+    label_id: i64,
+}
+
 /// A table that refers to itself, so a query can read it twice: every employee has at most
 /// one manager, who is another employee.
 #[derive(Table, Debug, Clone, PartialEq)]
@@ -1910,4 +1938,208 @@ fn alloc_to_string(display: &impl core::fmt::Display) -> String {
     let mut out = String::new();
     let _ = write!(out, "{display}");
     out
+}
+
+// ---------------------------------------------------------------------------------------
+// Relations
+// ---------------------------------------------------------------------------------------
+
+/// A relation is a value, so it can live in a `const` and be reused. The two loads below
+/// issue the same child statement because there is one relation, not two hand-written column
+/// pairs that happen to agree.
+#[test]
+fn a_relation_value_can_be_named_and_reused() {
+    const POSTS: HasMany<UserTable, PostTable, Int8> = has_many(users.id, posts.author_id);
+
+    // `Copy`, so passing it to `with` does not consume it.
+    let copied = POSTS;
+    let _: HasMany<UserTable, PostTable, Int8> = copied;
+
+    let db = dry::<TestDialect>();
+    let first = db.select(users).with(POSTS).to_sql([7]);
+    let second = db
+        .select(users)
+        .filter(users.age.gt(18))
+        .with(POSTS)
+        .to_sql([7]);
+
+    assert_eq!(
+        first[0].sql(),
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio", "users"."id" FROM "users""#
+    );
+    assert_eq!(
+        second[0].sql(),
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio", "users"."id" FROM "users" WHERE ("users"."age" > $1)"#
+    );
+    assert_eq!(second[0].args(), [Value::Int(18)]);
+    assert_eq!(first[1].sql(), second[1].sql());
+    assert_eq!(
+        first[1].sql(),
+        r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id" FROM "posts" WHERE ("posts"."author_id" IN ($1))"#
+    );
+}
+
+/// The parent key list comes from the parent rows, so duplicate keys collapse before the
+/// statement is rendered: three parents with two distinct keys bind two parameters.
+#[test]
+fn a_has_many_load_deduplicates_the_keys_before_the_child_statement() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .filter(users.age.gt(18))
+        .with(has_many(users.id, posts.author_id))
+        .to_sql([3, 3, 5]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[0].sql(),
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio", "users"."id" FROM "users" WHERE ("users"."age" > $1)"#
+    );
+    assert_eq!(statements[0].args(), [Value::Int(18)]);
+    assert_eq!(
+        statements[1].sql(),
+        r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id" FROM "posts" WHERE ("posts"."author_id" IN ($1, $2))"#
+    );
+    assert_eq!(statements[1].args(), [Value::Int(3), Value::Int(5)]);
+}
+
+/// An empty parent result means no second statement at all; for inspection, `to_sql` still
+/// shows the shape it would have had, with the empty `IN` list it would never send.
+#[test]
+fn an_empty_parent_result_still_renders_the_statement_it_would_skip() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .filter(users.age.gt(18))
+        .with(has_many(users.id, posts.author_id))
+        .to_sql([]);
+
+    assert_eq!(statements.len(), 2);
+    assert!(
+        statements[1].sql().ends_with("WHERE (1 = 0)"),
+        "{}",
+        statements[1].sql()
+    );
+    assert!(statements[1].args().is_empty());
+}
+
+/// A nested relation is one statement per level. The second statement carries the next
+/// level's key as a trailing column, which is what lets the third be filtered without
+/// asking the database again.
+#[test]
+fn a_nested_relation_renders_one_statement_per_level() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .with(has_many(users.id, posts.author_id).with(has_many(posts.id, comments.post_id)))
+        .to_sql_levels([
+            vec![Value::Int(1), Value::Int(2)],
+            vec![Value::Int(10), Value::Int(11)],
+        ]);
+
+    assert_eq!(statements.len(), 3);
+    assert_eq!(
+        statements[0].sql(),
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio", "users"."id" FROM "users""#
+    );
+    assert_eq!(
+        statements[1].sql(),
+        r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id", "posts"."id" FROM "posts" WHERE ("posts"."author_id" IN ($1, $2))"#
+    );
+    assert_eq!(statements[1].args(), [Value::Int(1), Value::Int(2)]);
+    assert_eq!(
+        statements[2].sql(),
+        r#"SELECT "comments"."id", "comments"."body", "comments"."post_id", "comments"."post_id" FROM "comments" WHERE ("comments"."post_id" IN ($1, $2))"#
+    );
+    assert_eq!(statements[2].args(), [Value::Int(10), Value::Int(11)]);
+}
+
+/// `to_sql` renders the first level from the keys it is given and leaves the deeper levels
+/// empty, because their keys only exist once the previous statement has run.
+#[test]
+fn to_sql_renders_the_first_level_of_a_nested_relation() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .with(has_many(users.id, posts.author_id).with(has_many(posts.id, comments.post_id)))
+        .to_sql([4]);
+
+    assert_eq!(statements.len(), 3);
+    assert!(statements[1].sql().contains("IN ($1)"));
+    assert!(
+        statements[2].sql().ends_with("WHERE (1 = 0)"),
+        "{}",
+        statements[2].sql()
+    );
+}
+
+/// Many-to-many is three statements: the parents, the join rows for those parents, then the
+/// children those join rows name. Each is ordinary SQL and binds only its own keys.
+#[test]
+fn a_many_to_many_relation_renders_the_join_and_child_statements() {
+    let db = dry::<TestDialect>();
+    let labels_relation = many_to_many(
+        posts.id,
+        post_labels.post_id,
+        post_labels.label_id,
+        labels.id,
+    );
+
+    let statements = db.select(posts).with(labels_relation).to_sql_levels([
+        vec![Value::Int(1), Value::Int(2)],
+        vec![Value::Int(7), Value::Int(8)],
+    ]);
+
+    assert_eq!(statements.len(), 3);
+    assert_eq!(
+        statements[0].sql(),
+        r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."id" FROM "posts""#
+    );
+    assert_eq!(
+        statements[1].sql(),
+        r#"SELECT "post_labels"."post_id", "post_labels"."label_id" FROM "post_labels" WHERE ("post_labels"."post_id" IN ($1, $2))"#
+    );
+    assert_eq!(statements[1].args(), [Value::Int(1), Value::Int(2)]);
+    assert_eq!(
+        statements[2].sql(),
+        r#"SELECT "labels"."id", "labels"."name", "labels"."id" FROM "labels" WHERE ("labels"."id" IN ($1, $2))"#
+    );
+    assert_eq!(statements[2].args(), [Value::Int(7), Value::Int(8)]);
+}
+
+/// A many-to-many can be the child of a has-many, in which case the three many-to-many
+/// statements follow the parent's statement. The child-side key type is inferred separately
+/// from the parent-side one, which is what lets a `BIGINT` post key join an `INTEGER` tag key.
+#[test]
+fn a_many_to_many_can_be_nested_under_a_has_many() {
+    let db = dry::<TestDialect>();
+    let labels_relation = many_to_many(
+        posts.id,
+        post_labels.post_id,
+        post_labels.label_id,
+        labels.id,
+    );
+    let statements = db
+        .select(users)
+        .with(has_many(users.id, posts.author_id).with(labels_relation))
+        .to_sql_levels([
+            vec![Value::Int(1)],
+            vec![Value::Int(9)],
+            vec![Value::Int(4)],
+        ]);
+
+    assert_eq!(statements.len(), 4);
+    assert!(
+        statements[1]
+            .sql()
+            .contains(r#""posts"."author_id" IN ($1)"#)
+    );
+    assert_eq!(
+        statements[2].sql(),
+        r#"SELECT "post_labels"."post_id", "post_labels"."label_id" FROM "post_labels" WHERE ("post_labels"."post_id" IN ($1))"#
+    );
+    assert_eq!(
+        statements[3].sql(),
+        r#"SELECT "labels"."id", "labels"."name", "labels"."id" FROM "labels" WHERE ("labels"."id" IN ($1))"#
+    );
 }

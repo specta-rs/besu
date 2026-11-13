@@ -6,10 +6,12 @@
     missing_docs,
     clippy::unwrap_used,
     clippy::panic,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::type_complexity
 )]
 
 use besu::prelude::*;
+use besu::types::Int8;
 use besu_mysql::Sqlx;
 use sqlx::MySqlPool;
 
@@ -81,11 +83,50 @@ async fn fresh(name: &str) -> besu::Database<Sqlx> {
     besu::Database::new(Sqlx::new(&url).await.unwrap())
 }
 
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "comments")]
+pub struct Comment {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub body: String,
+    #[besu(references = "posts.id", on_delete = "cascade")]
+    pub post_id: i64,
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "tags")]
+pub struct Tag {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "post_tags")]
+pub struct PostTag {
+    #[besu(primary_key)]
+    pub post_id: i64,
+    #[besu(primary_key)]
+    pub tag_id: i64,
+}
+
+/// A relation declared once and reused.
+const TAGS: ManyToMany<PostTable, PostTagTable, TagTable, Int8, Int8> =
+    many_to_many(posts.id, post_tags.post_id, post_tags.tag_id, tags.id);
+
 async fn setup(name: &str) -> besu::Database<Sqlx> {
     let db = fresh(name).await;
-    db.push([users.def(), posts.def(), teams.def(), members.def()])
-        .await
-        .unwrap();
+    db.push([
+        users.def(),
+        posts.def(),
+        comments.def(),
+        tags.def(),
+        post_tags.def(),
+        teams.def(),
+        members.def(),
+    ])
+    .await
+    .unwrap();
     db
 }
 
@@ -161,25 +202,26 @@ async fn every_parent_gets_its_own_children() {
 async fn generated_sql() {
     let db = besu::dry::<besu_mysql::MySql>();
 
-    let (parent, child) = db
+    let statements = db
         .select(users)
         .filter(users.age.gt(18))
         .with(has_many(users.id, posts.author_id))
-        .to_sql([3, 5, 9]);
+        .to_sql([3, 5, 3]);
 
+    assert_eq!(statements.len(), 2);
     assert_eq!(
-        parent.sql(),
+        statements[0].sql(),
         "SELECT `users`.`id`, `users`.`email`, `users`.`name`, `users`.`age`, `users`.`bio`, \
          `users`.`id` FROM `users` WHERE (`users`.`age` > ?)"
     );
-    assert_eq!(parent.args().len(), 1);
+    assert_eq!(statements[0].args().len(), 1);
 
     assert_eq!(
-        child.sql(),
+        statements[1].sql(),
         "SELECT `posts`.`id`, `posts`.`title`, `posts`.`author_id`, `posts`.`author_id` \
-         FROM `posts` WHERE (`posts`.`author_id` IN (?, ?, ?))"
+         FROM `posts` WHERE (`posts`.`author_id` IN (?, ?))"
     );
-    assert_eq!(child.args().len(), 3);
+    assert_eq!(statements[1].args().len(), 2);
 }
 
 #[tokio::test]
@@ -188,6 +230,7 @@ async fn no_second_query_when_the_parent_result_is_empty() {
 
     // If the relation load sent its child statement, this would fail rather than return
     // nothing. It must not: an empty parent result means no second round trip at all.
+    db.execute(sql!("DROP TABLE `comments`")).await.unwrap();
     db.execute(sql!("DROP TABLE `posts`")).await.unwrap();
 
     let loaded: Vec<(User, Vec<Post>)> = db
@@ -283,4 +326,174 @@ async fn loads_inside_a_transaction() {
     })
     .await
     .unwrap();
+}
+
+/// A const relation value loads many-to-many children in three statements, preserving parent
+/// order and giving a childless parent an empty `Vec`.
+#[tokio::test]
+async fn many_to_many_loads_children_for_every_parent() {
+    let db = setup("besu_test_relations_m2m").await;
+    let seeded = seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    for name in ["rust", "sql", "orm"] {
+        db.insert(tags).value(tags.insert(name)).await.unwrap();
+    }
+    let created: Vec<Tag> = db.select(tags).order_by(tags.id.asc()).await.unwrap();
+    for (post, tag) in [
+        (posts_by_id[0].id, created[0].id),
+        (posts_by_id[0].id, created[1].id),
+        (posts_by_id[1].id, created[0].id),
+        (posts_by_id[2].id, created[2].id),
+    ] {
+        db.insert(post_tags)
+            .value(post_tags.insert(post, tag))
+            .await
+            .unwrap();
+    }
+    db.insert(posts)
+        .value(posts.insert("Bob two", seeded[1].id))
+        .await
+        .unwrap();
+
+    let loaded: Vec<(Post, Vec<Tag>)> = db
+        .select(posts)
+        .order_by(posts.id.asc())
+        .with(TAGS)
+        .await
+        .unwrap();
+
+    assert_eq!(loaded.len(), 4);
+    assert_eq!(
+        loaded[0]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["rust", "sql"]
+    );
+    assert_eq!(
+        loaded[1]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["rust"]
+    );
+    assert_eq!(
+        loaded[2]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["orm"]
+    );
+    assert!(loaded[3].1.is_empty());
+}
+
+/// `users -> posts -> comments` is one statement per level, nested as the relation values
+/// are, with empty vectors at every level that matched nothing.
+#[tokio::test]
+async fn nested_relations_load_one_statement_per_level() {
+    let db = setup("besu_test_relations_nested").await;
+    seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    for (body, post) in [
+        ("Alice one first", posts_by_id[0].id),
+        ("Alice one second", posts_by_id[0].id),
+        ("Bob one first", posts_by_id[2].id),
+    ] {
+        db.insert(comments)
+            .value(comments.insert(body, post))
+            .await
+            .unwrap();
+    }
+
+    let loaded: Vec<(User, Vec<(Post, Vec<Comment>)>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(has_many(users.id, posts.author_id).with(has_many(posts.id, comments.post_id)))
+        .await
+        .unwrap();
+
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[0].1.len(), 2);
+    assert_eq!(loaded[0].1[0].1.len(), 2);
+    assert!(loaded[0].1[1].1.is_empty());
+    assert_eq!(loaded[1].1.len(), 1);
+    assert_eq!(loaded[1].1[0].1.len(), 1);
+    assert!(loaded[2].1.is_empty());
+}
+
+/// A level with no rows above it sends no statement, proved by dropping its table.
+#[tokio::test]
+async fn a_level_with_nothing_above_it_sends_no_statement() {
+    let db = setup("besu_test_relations_level_skip").await;
+    seed(&db).await;
+
+    db.execute(sql!("DELETE FROM `posts`")).await.unwrap();
+    db.execute(sql!("DROP TABLE `comments`")).await.unwrap();
+
+    let loaded: Vec<(User, Vec<(Post, Vec<Comment>)>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(has_many(users.id, posts.author_id).with(has_many(posts.id, comments.post_id)))
+        .await
+        .unwrap();
+
+    assert_eq!(loaded.len(), 3);
+    assert!(
+        loaded
+            .iter()
+            .all(|(_, posts_by_parent)| posts_by_parent.is_empty())
+    );
+}
+
+/// The parent query keeps its filters, ordering, limit and projection with a relation
+/// attached, and a many-to-many can nest under a has-many.
+#[tokio::test]
+async fn filters_order_limit_and_pick_still_apply_to_the_parent() {
+    let db = setup("besu_test_relations_parent").await;
+    seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    db.insert(tags).value(tags.insert("rust")).await.unwrap();
+    let tag: Tag = db.select(tags).first().await.unwrap().unwrap();
+    for post in &posts_by_id[..2] {
+        db.insert(post_tags)
+            .value(post_tags.insert(post.id, tag.id))
+            .await
+            .unwrap();
+    }
+
+    let picked: Vec<(String, Vec<Tag>)> = db
+        .select(posts)
+        .filter(posts.author_id.gt(0))
+        .order_by(posts.id.desc())
+        .limit(2)
+        .pick(posts.title)
+        .with(TAGS)
+        .await
+        .unwrap();
+    assert_eq!(
+        picked
+            .iter()
+            .map(|(title, _)| title.as_str())
+            .collect::<Vec<_>>(),
+        ["Bob one", "Alice two"]
+    );
+    assert!(picked[0].1.is_empty());
+    assert_eq!(picked[1].1.len(), 1);
+
+    let nested: Vec<(User, Vec<(Post, Vec<Tag>)>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(has_many(users.id, posts.author_id).with(TAGS))
+        .await
+        .unwrap();
+
+    assert_eq!(nested[0].1.len(), 2);
+    assert_eq!(nested[0].1[0].1, vec![tag.clone()]);
+    assert_eq!(nested[0].1[1].1, vec![tag]);
 }

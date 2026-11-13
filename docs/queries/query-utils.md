@@ -141,8 +141,8 @@ against a rendering from that dialect rather than a hand-written string.
 
 - **`$count`** — no shortcut for wrapping a query in `SELECT COUNT(*)`. Use `pick(count_all())`
   with the same filters, or write it with `sql!`.
-- **`$with`** — the relational `with` exists as `Select::with(has_many(..))` for one has-many
-  level only; there is no general `$with` for arbitrary queries.
+- **`$with`** — the relational `with` covers has-many, many-to-many and nested relation
+  values, but there is no general `$with` for arbitrary queries.
 - **`$dynamic`** — a query is a value and can be stored, passed and composed, but there is no
   mutable dynamic handle with a changed result type.
 - **A subquery as a table** is [`derived`](select.md#derived-table), with typed columns

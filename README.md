@@ -173,7 +173,8 @@ a result set is too large to hold. Each driver carries its own criterion bench; 
 - **Streaming.** `db.stream::<User>(&sql)` decodes row by row, so a million-row scan is a
   million rows of work rather than a million rows of memory.
 - **Relations.** `select(users).with(has_many(users.id, posts.author_id))` loads the children
-  in one extra, visible statement rather than an invisible join or an N+1.
+  in one extra, visible statement rather than an invisible join or an N+1. Relation values can
+  be named and reused, many-to-many through a join table is supported, and relations nest.
 - **Transactions and savepoints.** `db.transaction(..)` and `tx.transaction(..)`, which every
   database spells as a savepoint.
 - **Full-text search and JSON.** `posts.title.matches("rust")` and
