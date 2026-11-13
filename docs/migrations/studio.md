@@ -80,8 +80,12 @@ is only the UI, and every row, write and query reaches the database through the 
 machine.
 
 The server allows that origin (and the Vite dev server) in its CORS layer, and answers Chrome's
-private-network preflight, which is what lets an HTTPS page reach loopback at all. Nothing else
-is allowed: a different site cannot read this studio, and the server is still loopback-only.
+private-network preflight, which is what lets an HTTPS page reach loopback at all. Chrome also
+asks once per site whether the page may access devices on the local network; allow it, and the
+page connects from then on. Nothing else is allowed: a different site cannot read this studio,
+and the server is still loopback-only. If a browser will not permit the request, the connect
+screen links straight to the studio's own address, which is a plain navigation and always
+works.
 
 If no server answers, the page says so and shows the command to start one. "Explore with demo
 data" is a quiet second option: three fixture tables in memory, where browsing, filtering and

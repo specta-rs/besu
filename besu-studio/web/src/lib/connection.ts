@@ -116,8 +116,8 @@ function describe(target: string, error: unknown): ProbeFailure {
     };
   }
   return {
-    message: `Nothing is listening on ${label}.`,
-    hint: "Start `besu studio` and check the port it printed. A page served over HTTPS can also be blocked from reaching localhost by Safari or Brave.",
+    message: `Could not reach ${label}.`,
+    hint: "Start `besu studio` and check the port it printed. If it is already running, your browser is asking for permission to reach a device on the local network — allow it, then press Connect again. Chrome asks once per site; Safari and Brave block loopback from an HTTPS page.",
   };
 }
 

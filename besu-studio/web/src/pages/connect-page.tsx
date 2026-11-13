@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   Terminal,
 } from "lucide-solid";
-import { targetFrom } from "../lib/connection";
+import { targetFrom, targetLabel } from "../lib/connection";
 import { copy } from "../lib/format";
 import { useStudio } from "../lib/store";
 import { Spinner } from "../lib/ui";
@@ -182,7 +182,17 @@ export function ConnectPage(): JSX.Element {
                       <span class="font-mono text-ink-2">
                         besu studio --database …
                       </span>{" "}
-                      and clicking Connect again is usually all it takes.
+                      and clicking Connect again is usually all it takes. If your
+                      browser will not allow it,{" "}
+                      <a
+                        class="underline decoration-line-strong decoration-1 underline-offset-2 hover:text-ink-2"
+                        href={target()}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        open {targetLabel(target())} directly
+                      </a>
+                      .
                     </p>
                   </Show>
                 </div>
