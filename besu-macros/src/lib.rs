@@ -46,6 +46,14 @@ mod table;
 /// - `#[besu(table = "name")]` — the SQL table name. Defaults to the struct name in
 ///   `snake_case`.
 /// - `#[besu(schema = "name")]` — a schema/namespace, meaningful to PostgreSQL.
+/// - `#[besu(index(columns(...)))]` — a table-level index. `columns` takes columns and raw
+///   expressions, so `columns(user_id, lower(email))` is a composite index over the first
+///   and an expression over the second. The other keys are `name = "..."`, `unique`,
+///   `using = "gin"` (or `btree`, `gist`, `brin`, `fulltext`, `spatial`) and an operator
+///   class: `opclass = "text_pattern_ops"` for a single entry, or
+///   `opclass(email = "text_pattern_ops")` by column name. Without `name`, a composite index
+///   is called `{table}_{columns}_idx` and an expression entry contributes `expr{position}`.
+///   May be repeated.
 ///
 /// On a field:
 ///

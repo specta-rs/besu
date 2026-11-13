@@ -1,5 +1,7 @@
 use besu_core::{Dialect, TypeDef};
-use besu_schema::{Change, Column, Ddl, Index, IndexKind, Schema, Table, View, view_body};
+use besu_schema::{
+    Change, Column, Ddl, Index, IndexColumn, IndexKind, IndexTarget, Schema, Table, View, view_body,
+};
 
 use crate::MySql;
 
@@ -75,23 +77,36 @@ impl MySqlDdl {
         )
     }
 
-    /// Render a column list with the key lengths MySQL needs, using the table's types.
+    /// Render a key-part list with the key lengths and functional spellings MySQL needs.
     ///
     /// `create_index` only sees the index, and an `AddIndex` change is rendered from a
     /// `CREATE INDEX` statement that cannot look the column up on its own; both paths go
     /// through here so a `TEXT` or oversized `VARCHAR` column gets the same prefix either
     /// way. Without it, adding an index to an existing `String` column fails with error 1170.
-    fn key_columns(&self, table: Option<&Table>, columns: &[String]) -> String {
+    ///
+    /// MySQL 8 spells a functional key part as `(expression)`, with the parentheses part of
+    /// the key-part syntax rather than the surrounding key list. Operator classes do not
+    /// exist here, so they are omitted.
+    fn key_columns(&self, table: Option<&Table>, columns: &[IndexColumn]) -> String {
         let mut out = String::new();
-        for (i, name) in columns.iter().enumerate() {
+        for (i, entry) in columns.iter().enumerate() {
             if i != 0 {
                 out.push_str(", ");
             }
-            out.push_str(&self.quote(name));
-            if let Some(column) = table.and_then(|table| table.column(name))
-                && let Uniqueness::Prefix(prefix) = uniqueness(&column.ty)
-            {
-                out.push_str(&format!("({prefix})"));
+            match &entry.target {
+                IndexTarget::Column(name) => {
+                    out.push_str(&self.quote(name));
+                    if let Some(column) = table.and_then(|table| table.column(name))
+                        && let Uniqueness::Prefix(prefix) = uniqueness(&column.ty)
+                    {
+                        out.push_str(&format!("({prefix})"));
+                    }
+                }
+                IndexTarget::Expression(expression) => {
+                    out.push('(');
+                    out.push_str(expression);
+                    out.push(')');
+                }
             }
         }
         out
@@ -670,6 +685,20 @@ mod tests {
         assert!(sql.contains("`email` VARCHAR(1000) NOT NULL"), "{sql}");
         assert!(
             sql.contains("UNIQUE KEY `events_kind_idx` (`email`(768))"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn a_functional_key_part_is_parenthesised() {
+        let (mut table, _) = indexed("payload", TypeDef::Text, IndexKind::Btree, false);
+        table.indexes[0].columns = vec![
+            IndexColumn::column("payload"),
+            IndexColumn::expression("lower(payload)"),
+        ];
+        let sql = MySqlDdl.create_table(&table);
+        assert!(
+            sql.contains("KEY `events_kind_idx` (`payload`(255), (lower(payload)))"),
             "{sql}"
         );
     }

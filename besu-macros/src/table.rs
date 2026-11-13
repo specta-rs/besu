@@ -3,8 +3,8 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitStr, Result, Type,
-    spanned::Spanned,
+    Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitStr, Result, Token, Type,
+    parse::Parse, spanned::Spanned,
 };
 
 /// Resolve the path to the `besu` crate, so generated code keeps working when the
@@ -100,6 +100,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
         struct_ident,
         table_name,
         schema: table_attrs.schema,
+        indexes: table_attrs.indexes,
         module_ident,
         handle_ident,
         table_struct_ident,
@@ -131,6 +132,7 @@ fn sanitise_ident(name: &str) -> String {
 struct TableAttrs {
     name: Option<LitStr>,
     schema: Option<LitStr>,
+    indexes: Vec<IndexDecl>,
 }
 
 impl TableAttrs {
@@ -138,6 +140,7 @@ impl TableAttrs {
         let mut this = Self {
             name: None,
             schema: None,
+            indexes: Vec::new(),
         };
 
         for attr in attrs {
@@ -153,12 +156,283 @@ impl TableAttrs {
                     this.schema = Some(meta.value()?.parse()?);
                     return Ok(());
                 }
-                Err(meta.error("unrecognised table attribute; expected `table` or `schema`"))
+                if meta.path.is_ident("index") {
+                    let content;
+                    syn::parenthesized!(content in meta.input);
+                    this.indexes.push(IndexDecl::parse(&content)?);
+                    return Ok(());
+                }
+                Err(meta
+                    .error("unrecognised table attribute; expected `table`, `schema` or `index`"))
             })?;
         }
 
         Ok(this)
     }
+}
+
+/// What one derived index entry targets.
+enum IndexTargetDecl {
+    Column(String),
+    Expression(String),
+}
+
+/// One entry in a table-level `#[besu(index(columns(...)))]`.
+struct IndexEntryDecl {
+    target: IndexTargetDecl,
+    opclass: Option<LitStr>,
+    span: Span,
+}
+
+/// A table-level `#[besu(index(...))]` declaration.
+struct IndexDecl {
+    entries: Vec<IndexEntryDecl>,
+    name: Option<LitStr>,
+    unique: bool,
+    /// The `IndexKind` variant, when `using = "..."` names one.
+    kind: Option<TokenStream>,
+    bare_opclass: Option<LitStr>,
+}
+
+impl IndexDecl {
+    fn parse(input: syn::parse::ParseStream) -> Result<Self> {
+        let mut this = Self {
+            entries: Vec::new(),
+            name: None,
+            unique: false,
+            kind: None,
+            bare_opclass: None,
+        };
+        let mut opclasses: Vec<(Ident, LitStr)> = Vec::new();
+
+        while !input.is_empty() {
+            let keyword: Ident = input.parse()?;
+            if keyword == "columns" {
+                let content;
+                syn::parenthesized!(content in input);
+                let exprs = content.parse_terminated(Expr::parse, Token![,])?;
+                if exprs.is_empty() {
+                    return Err(Error::new(
+                        keyword.span(),
+                        "besu: `columns` needs at least one column or expression",
+                    ));
+                }
+                this.entries = exprs
+                    .into_iter()
+                    .map(|expr| index_entry(&expr))
+                    .collect::<Result<_>>()?;
+            } else if keyword == "name" {
+                input.parse::<Token![=]>()?;
+                this.name = Some(input.parse()?);
+            } else if keyword == "unique" {
+                this.unique = true;
+            } else if keyword == "using" {
+                input.parse::<Token![=]>()?;
+                let lit: LitStr = input.parse()?;
+                this.kind = Some(index_kind(&lit)?);
+            } else if keyword == "opclass" {
+                // `opclass = "..."` names the class for the only entry; `opclass(a = "...")`
+                // names one per column. The two spellings cannot be mixed.
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    this.bare_opclass = Some(input.parse()?);
+                } else {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    while !content.is_empty() {
+                        let column: Ident = content.parse()?;
+                        content.parse::<Token![=]>()?;
+                        let value: LitStr = content.parse()?;
+                        opclasses.push((column, value));
+                        if content.peek(Token![,]) {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
+            } else {
+                return Err(Error::new(
+                    keyword.span(),
+                    format!(
+                        "besu: unrecognised index attribute `{keyword}`; expected `columns`, \
+                         `name`, `unique`, `using` or `opclass`"
+                    ),
+                ));
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        if this.entries.is_empty() {
+            return Err(Error::new(
+                Span::call_site(),
+                "besu: `index` needs `columns(...)`",
+            ));
+        }
+
+        if let Some(opclass) = &this.bare_opclass {
+            if this.entries.len() != 1 {
+                return Err(Error::new(
+                    opclass.span(),
+                    "besu: a bare `opclass` needs an index with exactly one entry; use \
+                     `opclass(column = \"...\")` for a composite index",
+                ));
+            }
+            this.entries[0].opclass = Some(opclass.clone());
+        }
+
+        for (column, opclass) in opclasses {
+            let entry = this
+                .entries
+                .iter_mut()
+                .find(|entry| {
+                    matches!(&entry.target, IndexTargetDecl::Column(name) if name == &column.to_string())
+                })
+                .ok_or_else(|| {
+                    Error::new(
+                        opclass.span(),
+                        format!("besu: no index column named `{column}`"),
+                    )
+                })?;
+            if entry.opclass.is_some() {
+                return Err(Error::new(
+                    opclass.span(),
+                    format!("besu: the operator class for `{column}` is given twice"),
+                ));
+            }
+            entry.opclass = Some(opclass);
+        }
+
+        Ok(this)
+    }
+}
+
+/// Classify one `columns(...)` entry as a column or an expression.
+///
+/// A bare identifier is a column. Everything else — a function call, arithmetic, a cast — is
+/// an expression and is rendered back into SQL. A string literal is an escape hatch for an
+/// expression the token printer would not preserve, and its value is used verbatim.
+fn index_entry(expr: &Expr) -> Result<IndexEntryDecl> {
+    match expr {
+        Expr::Path(path)
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && path.path.segments[0].arguments.is_none() =>
+        {
+            Ok(IndexEntryDecl {
+                target: IndexTargetDecl::Column(path.path.segments[0].ident.to_string()),
+                opclass: None,
+                span: path.span(),
+            })
+        }
+        Expr::Lit(lit) => match &lit.lit {
+            Lit::Str(value) => Ok(IndexEntryDecl {
+                target: IndexTargetDecl::Expression(value.value()),
+                opclass: None,
+                span: value.span(),
+            }),
+            _ => Ok(IndexEntryDecl {
+                target: IndexTargetDecl::Expression(render_expression(expr)),
+                opclass: None,
+                span: lit.span(),
+            }),
+        },
+        other => Ok(IndexEntryDecl {
+            target: IndexTargetDecl::Expression(render_expression(other)),
+            opclass: None,
+            span: other.span(),
+        }),
+    }
+}
+
+/// Render an attribute expression back into readable SQL.
+///
+/// `syn` does not keep the whitespace the caller wrote, so the token stream is printed and
+/// then tidied: the spaces `to_string` puts around parentheses, commas and dots are removed,
+/// while the spaces around an operator are kept so the expression still resembles SQL. A
+/// string literal is data and is never touched.
+fn render_expression(expr: &Expr) -> String {
+    let raw = quote!(#expr).to_string();
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut in_string = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    out.push(chars.next().unwrap_or('\''));
+                } else {
+                    in_string = false;
+                }
+            }
+            continue;
+        }
+        if ch == '\'' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            let next = *chars.peek().unwrap_or(&' ');
+            let previous = out.chars().last().unwrap_or(' ');
+            let drop = matches!(next, '(' | ')' | ',' | '.' | ']')
+                || matches!(previous, '(' | '[' | '.' | ' ');
+            if !drop {
+                out.push(' ');
+            }
+            while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out.trim().to_owned()
+}
+
+/// Map `using = "..."` onto an `IndexKind` variant.
+fn index_kind(lit: &LitStr) -> Result<TokenStream> {
+    let kind = match lit.value().to_ascii_lowercase().as_str() {
+        "btree" | "b-tree" => quote!(Btree),
+        "gin" => quote!(Gin),
+        "gist" => quote!(Gist),
+        "brin" => quote!(Brin),
+        "fulltext" | "full-text" => quote!(FullText),
+        "spatial" => quote!(Spatial),
+        other => {
+            return Err(Error::new(
+                lit.span(),
+                format!(
+                    "besu: `using = \"{other}\"` is not an index access method; expected \
+                     btree, gin, gist, brin, fulltext or spatial"
+                ),
+            ));
+        }
+    };
+    Ok(kind)
+}
+
+/// The deterministic name for a table-level index that does not pass `name`.
+///
+/// Columns contribute their own name and expressions contribute their 1-based position, so
+/// `columns(a, lower(email))` on `users` is `users_a_expr2_idx`.
+fn default_index_name(table: &str, index: &IndexDecl) -> String {
+    let mut name = String::from(table);
+    for (position, entry) in index.entries.iter().enumerate() {
+        name.push('_');
+        match &entry.target {
+            IndexTargetDecl::Column(column) => name.push_str(column),
+            IndexTargetDecl::Expression(_) => {
+                name.push_str(&format!("expr{}", position + 1));
+            }
+        }
+    }
+    name.push_str("_idx");
+    name
 }
 
 #[derive(Default)]
@@ -626,6 +900,7 @@ struct Codegen {
     struct_ident: Ident,
     table_name: LitStr,
     schema: Option<LitStr>,
+    indexes: Vec<IndexDecl>,
     module_ident: Ident,
     handle_ident: Ident,
     table_struct_ident: Ident,
@@ -725,7 +1000,7 @@ impl Codegen {
             }
         });
 
-        let index_defs = columns.iter().filter(|column| column.index).map(|column| {
+        let field_index_defs = columns.iter().filter(|column| column.index).map(|column| {
             let name = LitStr::new(
                 &format!(
                     "{}_{}_idx",
@@ -738,12 +1013,56 @@ impl Codegen {
             quote! {
                 #besu::Index {
                     name: #name,
-                    columns: &[#column_name],
+                    entries: &[#besu::IndexEntry::column(#column_name)],
                     unique: false,
                     kind: #besu::IndexKind::Btree,
                 }
             }
         });
+
+        let declared_index_defs = self.indexes.iter().map(|index| {
+            let name = match &index.name {
+                Some(name) => name.clone(),
+                None => LitStr::new(
+                    &default_index_name(&self.table_name.value(), index),
+                    index
+                        .entries
+                        .first()
+                        .map_or_else(Span::call_site, |entry| entry.span),
+                ),
+            };
+            let unique = index.unique;
+            let kind = index
+                .kind
+                .as_ref()
+                .map_or_else(|| quote!(Btree), |kind| quote!(#kind));
+            let entries = index.entries.iter().map(|entry| {
+                let base = match &entry.target {
+                    IndexTargetDecl::Column(column) => {
+                        let column = LitStr::new(column, entry.span);
+                        quote!(#besu::IndexEntry::column(#column))
+                    }
+                    IndexTargetDecl::Expression(expression) => {
+                        let expression = LitStr::new(expression, entry.span);
+                        quote!(#besu::IndexEntry::expression(#expression))
+                    }
+                };
+                match &entry.opclass {
+                    Some(opclass) => quote!(#base.with_opclass(#opclass)),
+                    None => base,
+                }
+            });
+            quote! {
+                #besu::Index {
+                    name: #name,
+                    entries: &[#(#entries),*],
+                    unique: #unique,
+                    kind: #besu::IndexKind::#kind,
+                }
+            }
+        });
+
+        let index_defs = field_index_defs.chain(declared_index_defs);
 
         let foreign_keys = columns.iter().filter_map(|column| {
             let reference = column.reference.as_ref()?;

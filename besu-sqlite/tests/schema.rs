@@ -3,7 +3,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
-use besu::schema::Schema;
+use besu::schema::{Index, IndexColumn, IndexKind, Schema};
 use besu_sqlite::Sqlx;
 
 /// A file-backed database, because a pool over `:memory:` would give every statement its
@@ -37,11 +37,85 @@ pub struct Account {
     pub balance: i64,
 }
 
-/// SQLite has partial indexes, and expression indexes have existed for as long as partial
-/// ones. The IR models neither a predicate nor an expression key here, so both are skipped
-/// rather than reported as plain indexes that `push` would then drop.
+/// Every table-level index spelling: composite, expression, named, unique, an access method
+/// and both operator-class forms.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "memberships")]
+#[besu(index(columns(user_id, team_id)))]
+#[besu(index(
+    columns(email, lower(email)),
+    name = "memberships_email_lower",
+    unique,
+    using = "gin",
+    opclass(email = "text_pattern_ops")
+))]
+#[besu(index(
+    columns(email),
+    name = "memberships_email_pattern",
+    opclass = "text_pattern_ops"
+))]
+#[besu(index(columns(lower(email))))]
+#[allow(dead_code, clippy::duplicated_attributes)]
+pub struct Membership {
+    #[besu(primary_key)]
+    pub user_id: i64,
+    pub team_id: i64,
+    pub email: String,
+}
+
+#[test]
+fn derived_indexes_carry_composite_expression_and_opclass_entries() {
+    let schema = Schema::from_defs(&[memberships.def()]);
+    let table = schema.table("memberships").unwrap();
+
+    let find = |name: &str| {
+        table
+            .indexes
+            .iter()
+            .find(|index| index.name == name)
+            .unwrap_or_else(|| panic!("no index named {name}"))
+    };
+
+    let composite = find("memberships_user_id_team_id_idx");
+    assert_eq!(
+        composite.columns,
+        [
+            IndexColumn::column("user_id"),
+            IndexColumn::column("team_id")
+        ]
+    );
+    assert!(!composite.unique);
+    assert_eq!(composite.kind, IndexKind::Btree);
+
+    let named = find("memberships_email_lower");
+    assert_eq!(
+        named.columns,
+        [
+            IndexColumn::column("email").with_opclass("text_pattern_ops"),
+            IndexColumn::expression("lower(email)"),
+        ]
+    );
+    assert!(named.unique);
+    assert_eq!(named.kind, IndexKind::Gin);
+
+    let bare = find("memberships_email_pattern");
+    assert_eq!(
+        bare.columns,
+        [IndexColumn::column("email").with_opclass("text_pattern_ops")]
+    );
+
+    // An expression that is not named contributes its position, not its text.
+    let expression = find("memberships_expr1_idx");
+    assert_eq!(
+        expression.columns,
+        [IndexColumn::expression("lower(email)")]
+    );
+}
+
+/// A partial index is skipped, because the IR cannot express its predicate. An expression
+/// index is read back from the `CREATE INDEX` text in `sqlite_master`, so it round-trips.
 #[tokio::test]
-async fn partial_and_expression_indexes_are_not_dropped() {
+async fn a_partial_index_is_skipped_and_an_expression_index_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir).await;
 
@@ -65,13 +139,24 @@ async fn partial_and_expression_indexes_are_not_dropped() {
     .unwrap();
 
     let introspected = db.introspect().await.unwrap();
-    assert!(
-        introspected.table("events").unwrap().indexes.is_empty(),
-        "neither index can be modelled and both must be skipped: {:?}",
-        introspected.table("events").unwrap().indexes
+    let events_ir = introspected.table("events").unwrap();
+    assert_eq!(
+        events_ir.indexes,
+        [Index {
+            name: "events_lower_payload_idx".into(),
+            columns: vec![IndexColumn::expression("lower(payload)")],
+            unique: false,
+            kind: IndexKind::Btree,
+            predicate: None,
+        }],
+        "the expression index is modelled and the partial one is skipped"
     );
 
-    let pushed = db.push([events.def()]).await.unwrap();
+    // Pushing the declaration that matches what is there is a no-op, so nothing is dropped.
+    let mut desired = Schema::new();
+    desired.push_def(events.def());
+    desired.tables[0].indexes = events_ir.indexes.clone();
+    let pushed = db.push_schema(&desired).await.unwrap();
     assert!(pushed.is_empty(), "got {:?}", pushed.changes);
     assert!(
         !pushed
@@ -81,6 +166,42 @@ async fn partial_and_expression_indexes_are_not_dropped() {
         "got {:?}",
         pushed.statements
     );
+}
+
+/// A composite index including an expression is created, read back and converges.
+#[tokio::test]
+async fn a_composite_expression_index_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir).await;
+
+    let mut desired = Schema::new();
+    desired.push_def(events.def());
+    desired.tables[0].indexes.push(Index {
+        name: "events_kind_payload_idx".into(),
+        columns: vec![
+            IndexColumn::column("kind"),
+            IndexColumn::expression("lower(payload)"),
+        ],
+        unique: false,
+        kind: IndexKind::Btree,
+        predicate: None,
+    });
+
+    let first = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "events" ("id" INTEGER PRIMARY KEY, "kind" TEXT NOT NULL, "payload" TEXT NOT NULL)"#,
+            r#"CREATE INDEX "events_kind_payload_idx" ON "events" ("kind", lower(payload))"#,
+        ]
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    assert_eq!(
+        introspected.table("events").unwrap().indexes,
+        desired.tables[0].indexes
+    );
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
 
 /// A `CHECK` constraint exists only inside the `CREATE TABLE` text on SQLite, so it is not

@@ -47,7 +47,10 @@ pub use driver::{Driver, RowStream, TransactionDriver, futures_stream};
 pub use error::Error;
 pub use executor::{DialectOf, Dry, DryDriver, DryRow, ErrorOf, Executor, RowOf};
 pub use futures_core::Stream;
-pub use schema::{ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexKind, TableDef};
+pub use schema::{
+    ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexColumn, IndexEntry, IndexKind,
+    TableDef,
+};
 pub use sql::{Rendered, Sql};
 pub use types::TypeDef;
 pub use value::Value;

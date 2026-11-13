@@ -9,8 +9,8 @@ mod common;
 use besu::TypeDef;
 use besu::prelude::*;
 use besu::schema::{
-    Change, Check, Column, Enum, Generated, Index, IndexKind, Safety, Schema, Sequence,
-    Table as TableIr, Unique, View,
+    Change, Check, Column, Enum, Generated, Index, IndexColumn, IndexKind, Safety, Schema,
+    Sequence, Table as TableIr, Unique, View,
 };
 use besu_postgres::Sqlx;
 
@@ -373,9 +373,8 @@ async fn the_same_table_name_in_two_schemas() {
         .unwrap();
 }
 
-/// A partial index is modelled, an expression index is not. Pushing a schema that matches
-/// what is really there must not try to drop either: the expression index is invisible to
-/// the IR, and the partial one is compared with its predicate.
+/// A partial index and an expression index are both modelled; an `INCLUDE` index is not.
+/// Pushing a schema that matches what is really there must not try to drop any of them.
 #[tokio::test]
 async fn partial_and_expression_indexes_are_not_dropped() {
     let db = common::database().await;
@@ -412,19 +411,31 @@ async fn partial_and_expression_indexes_are_not_dropped() {
     let events = introspected.table("events").unwrap();
     assert_eq!(
         events.indexes.len(),
-        1,
-        "the expression and `INCLUDE` indexes must not be reported: {:?}",
+        2,
+        "the `INCLUDE` index must not be reported: {:?}",
         events.indexes
     );
-    let partial = &events.indexes[0];
-    assert_eq!(partial.name, "events_kind_idx");
-    assert_eq!(partial.columns, ["kind"]);
+    let partial = events
+        .indexes
+        .iter()
+        .find(|index| index.name == "events_kind_idx")
+        .expect("the partial index must be reported");
+    assert_eq!(partial.columns, [IndexColumn::column("kind")]);
     assert!(!partial.unique);
     let predicate = partial
         .predicate
         .as_deref()
         .expect("a partial index must carry its predicate");
     assert!(predicate.contains("error"), "got {predicate}");
+    let expression = events
+        .indexes
+        .iter()
+        .find(|index| index.name == "events_lower_payload_idx")
+        .expect("the expression index must be reported");
+    assert_eq!(
+        expression.columns,
+        [IndexColumn::expression("lower(payload)")]
+    );
 
     // The declared schema says exactly what the database has, so there is nothing to do.
     let desired = schema(
@@ -442,6 +453,7 @@ async fn partial_and_expression_indexes_are_not_dropped() {
                 ],
             );
             events.indexes.push(partial.clone());
+            events.indexes.push(expression.clone());
             events
         }],
         Vec::new(),
@@ -460,6 +472,77 @@ async fn partial_and_expression_indexes_are_not_dropped() {
 
     // Pushing the introspected schema itself is also a no-op, views and all.
     assert!(db.push_schema(&introspected).await.unwrap().is_empty());
+}
+
+/// A composite index with an operator class, an expression and a predicate is rendered in
+/// that order, read back from `pg_index` and converges. Changing the operator class is a
+/// drop and a create because both statements use the same name.
+#[tokio::test]
+async fn composite_expression_and_opclass_indexes_round_trip() {
+    let db = common::database().await;
+    common::reset(&db).await;
+
+    let mut desired = schema(
+        vec![table(
+            "users",
+            vec![
+                {
+                    let mut id = column("id", TypeDef::Int8);
+                    id.primary_key = true;
+                    id
+                },
+                column("email", TypeDef::Text),
+                column("name", TypeDef::Text),
+                column("payload", TypeDef::Text),
+            ],
+        )],
+        Vec::new(),
+    );
+    desired.tables[0].indexes.push(Index {
+        name: "users_search_idx".into(),
+        columns: vec![
+            IndexColumn::column("email").with_opclass("text_pattern_ops"),
+            IndexColumn::expression("lower(name)"),
+        ],
+        unique: false,
+        kind: IndexKind::Btree,
+        predicate: Some("payload IS NOT NULL".into()),
+    });
+
+    let first = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            r#"CREATE TABLE "users" ("id" BIGINT PRIMARY KEY, "email" TEXT NOT NULL, "name" TEXT NOT NULL, "payload" TEXT NOT NULL)"#,
+            r#"CREATE INDEX "users_search_idx" ON "users" ("email" text_pattern_ops, lower(name)) WHERE payload IS NOT NULL"#,
+        ]
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let index = introspected
+        .table("users")
+        .unwrap()
+        .indexes
+        .iter()
+        .find(|index| index.name == "users_search_idx")
+        .expect("the index must be reported");
+    assert_eq!(index.columns, desired.tables[0].indexes[0].columns);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+
+    // Removing the operator class changes which predicates the index serves, so it is
+    // replaced. The default operator class is not reported back, which is what keeps the
+    // plain declaration converging.
+    let mut changed = desired.clone();
+    changed.tables[0].indexes[0].columns[0] = IndexColumn::column("email");
+    let replaced = db.push_schema_destructive(&changed).await.unwrap();
+    assert_eq!(
+        replaced.statements,
+        [
+            r#"DROP INDEX "users_search_idx""#,
+            r#"CREATE INDEX "users_search_idx" ON "users" ("email", lower(name)) WHERE payload IS NOT NULL"#,
+        ]
+    );
+    assert!(db.push_schema(&changed).await.unwrap().is_empty());
 }
 
 /// An exclusion constraint is not modelled. PostgreSQL's `information_schema` does not list

@@ -139,13 +139,97 @@ impl IndexKind {
     }
 }
 
+/// One key part of an index: a column name or a SQL expression.
+///
+/// Expressions are raw SQL, written verbatim inside the index's column list. Besu cannot
+/// check one, and the same expression is not portable across dialects, so it is the
+/// caller's responsibility that the target database accepts it. A column is a plain name,
+/// which every dialect quotes for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexColumn {
+    /// A column, by SQL name.
+    Column(&'static str),
+    /// A raw SQL expression, for example `lower(email)`.
+    Expression(&'static str),
+}
+
+impl IndexColumn {
+    /// An index entry over the named column.
+    pub const fn column(name: &'static str) -> Self {
+        Self::Column(name)
+    }
+
+    /// An index entry over a raw SQL expression.
+    pub const fn expression(expression: &'static str) -> Self {
+        Self::Expression(expression)
+    }
+
+    /// The column's name, if this entry is a column.
+    pub const fn as_column(&self) -> Option<&'static str> {
+        match self {
+            Self::Column(name) => Some(name),
+            Self::Expression(_) => None,
+        }
+    }
+
+    /// The expression, if this entry is one.
+    pub const fn as_expression(&self) -> Option<&'static str> {
+        match self {
+            Self::Column(_) => None,
+            Self::Expression(expression) => Some(expression),
+        }
+    }
+}
+
+/// One entry in an index's ordered key list.
+///
+/// An entry is a column or an expression, optionally followed by an operator class.
+/// Operator classes are PostgreSQL's `text_pattern_ops`, `gin_trgm_ops` and friends; the
+/// dialects without them ignore the name rather than render a statement they reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexEntry {
+    /// What the entry indexes.
+    pub target: IndexColumn,
+    /// The operator class, if the index names one.
+    pub opclass: Option<&'static str>,
+}
+
+impl IndexEntry {
+    /// An entry over a column, with the column's default operator class.
+    pub const fn column(name: &'static str) -> Self {
+        Self {
+            target: IndexColumn::Column(name),
+            opclass: None,
+        }
+    }
+
+    /// An entry over a raw SQL expression.
+    pub const fn expression(expression: &'static str) -> Self {
+        Self {
+            target: IndexColumn::Expression(expression),
+            opclass: None,
+        }
+    }
+
+    /// Attach an operator class to this entry.
+    ///
+    /// This is a builder-style `const fn`, so the derive can emit the whole entry as one
+    /// constant expression.
+    pub const fn with_opclass(self, opclass: &'static str) -> Self {
+        Self {
+            target: self.target,
+            opclass: Some(opclass),
+        }
+    }
+}
+
 /// A secondary index declaration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Index {
     /// The index name.
     pub name: &'static str,
-    /// The columns the index covers, in order.
-    pub columns: &'static [&'static str],
+    /// The indexed columns or expressions, in order.
+    pub entries: &'static [IndexEntry],
     /// Whether the index enforces uniqueness.
     pub unique: bool,
     /// The access method the index uses.

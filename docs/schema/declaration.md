@@ -94,7 +94,9 @@ A separate, non-unique, single-column index named `{table}_{column}_idx`, render
 pub created_at: chrono::DateTime<chrono::Utc>,
 ```
 
-Composite and partial indexes have no attribute; see [the constraints page](indexes-constraints.md).
+A table-level `#[besu(index(columns(...)))]` declares a composite or expression index, a unique
+index, an access method and a per-column operator class. Partial indexes still need a snapshot;
+see [the constraints page](indexes-constraints.md#indexes).
 
 ## Defaults: `default`, `default_now`, `default_sql`
 

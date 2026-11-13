@@ -1,11 +1,10 @@
-//! Schema fidelity on MySQL: a functional index is skipped rather than reported as a
-//! smaller index, access methods round-trip, generated columns converge, and views are
-//! created, replaced and dropped.
+//! Schema fidelity on MySQL: functional and composite indexes round-trip, access methods
+//! round-trip, generated columns converge, and views are created, replaced and dropped.
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::TypeDef;
 use besu::prelude::*;
-use besu::schema::{Change, Column, Index, IndexKind, Schema, Table as TableIr, View};
+use besu::schema::{Change, Column, Index, IndexColumn, IndexKind, Schema, Table as TableIr, View};
 use besu_mysql::Sqlx;
 use sqlx::MySqlPool;
 
@@ -30,11 +29,11 @@ async fn fresh(name: &str) -> besu::Database<Sqlx> {
     besu::Database::new(Sqlx::new(&url).await.unwrap())
 }
 
-/// A functional index has an expression where a column name would be. The IR cannot express
-/// one, and reporting the remaining key parts would describe an index that does not exist,
-/// so the whole index is skipped.
+/// A functional index has an expression where a column name would be. MySQL reports it in
+/// `STATISTICS.EXPRESSION`, with its own backticked spelling, which is compared after
+/// folding identifier quoting.
 #[tokio::test]
-async fn a_functional_index_is_skipped() {
+async fn a_functional_index_round_trips() {
     let db = fresh("besu_test_schema_functional_index").await;
 
     db.execute(sql!(
@@ -58,15 +57,84 @@ async fn a_functional_index_is_skipped() {
     let events = introspected.table("events").unwrap();
     assert_eq!(
         events.indexes.len(),
-        1,
-        "the functional index must be skipped as a whole: {:?}",
+        2,
+        "every index must be reported: {:?}",
         events.indexes
     );
-    assert_eq!(events.indexes[0].name, "events_kind_idx");
-    assert_eq!(events.indexes[0].columns, ["kind"]);
+    let kind = events
+        .indexes
+        .iter()
+        .find(|index| index.name == "events_kind_idx")
+        .expect("the plain index must be reported");
+    assert_eq!(kind.columns, [IndexColumn::column("kind")]);
+    let functional = events
+        .indexes
+        .iter()
+        .find(|index| index.name == "events_lower_payload_idx")
+        .expect("the functional index must be reported");
+    assert_eq!(
+        besu::schema::normalise_generated_expression(
+            functional.columns[0]
+                .as_expression()
+                .expect("a functional key part must be an expression")
+        ),
+        besu::schema::normalise_generated_expression("lower(payload)")
+    );
 
     // Pushing what introspection saw is a no-op: nothing is dropped or re-created.
     assert!(db.push_schema(&introspected).await.unwrap().is_empty());
+}
+
+/// A composite index with a functional key part is created inside `CREATE TABLE`, read back
+/// from `STATISTICS` and converges.
+#[tokio::test]
+async fn a_composite_functional_index_round_trips() {
+    let db = fresh("besu_test_schema_composite_functional").await;
+
+    let mut desired = Schema::new();
+    desired.tables.push(table(
+        "events",
+        vec![
+            {
+                let mut id = column("id", TypeDef::Int8);
+                id.primary_key = true;
+                id
+            },
+            column("kind", TypeDef::VarChar(50)),
+            column("payload", TypeDef::VarChar(200)),
+        ],
+    ));
+    desired.tables[0].indexes.push(Index {
+        name: "events_kind_payload_idx".into(),
+        columns: vec![
+            IndexColumn::column("kind"),
+            IndexColumn::expression("lower(payload)"),
+        ],
+        unique: false,
+        kind: IndexKind::Btree,
+        predicate: None,
+    });
+
+    let first = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        first.statements,
+        [
+            "CREATE TABLE `events` (`id` BIGINT PRIMARY KEY, `kind` VARCHAR(50) NOT NULL, \
+             `payload` VARCHAR(200) NOT NULL, \
+             KEY `events_kind_payload_idx` (`kind`, (lower(payload)))) \
+             ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        ]
+    );
+
+    let introspected = db.introspect().await.unwrap();
+    let index = &introspected.table("events").unwrap().indexes[0];
+    assert_eq!(index.name, "events_kind_payload_idx");
+    assert_eq!(index.columns[0], IndexColumn::column("kind"));
+    assert_eq!(
+        besu::schema::normalise_generated_expression(index.columns[1].as_expression().unwrap()),
+        besu::schema::normalise_generated_expression("lower(payload)")
+    );
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
 
 /// A view is created, replaced with `CREATE OR REPLACE` and dropped. MySQL qualifies and

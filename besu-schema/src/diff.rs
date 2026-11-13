@@ -592,6 +592,41 @@ fn renamed_previous<'a>(column: &'a Column, current: &Table) -> Option<&'a str> 
     }
 }
 
+/// Whether two indexes describe the same object.
+///
+/// The name is matched by the caller, because that is how a drop finds an index. Everything
+/// else is part of the definition: the ordered key entries, each operator class, uniqueness,
+/// the access method and a partial index's predicate. A change to any of them is a drop and
+/// a create, since both statements use the same name.
+fn same_index(a: &Index, b: &Index) -> bool {
+    a.unique == b.unique
+        && a.kind == b.kind
+        && a.predicate == b.predicate
+        && a.columns.len() == b.columns.len()
+        && a.columns
+            .iter()
+            .zip(&b.columns)
+            .all(|(a, b)| same_index_column(a, b))
+}
+
+/// Whether two key entries describe the same target and operator class.
+///
+/// Expressions are compared after folding identifier quoting and `::type` casts, because the
+/// databases report them in their own spelling (`lower(\`email\`)` on MySQL, for example)
+/// while the declaration is written as SQL. A column is compared exactly.
+fn same_index_column(a: &crate::IndexColumn, b: &crate::IndexColumn) -> bool {
+    if a.opclass != b.opclass {
+        return false;
+    }
+    match (&a.target, &b.target) {
+        (crate::IndexTarget::Column(a), crate::IndexTarget::Column(b)) => a == b,
+        (crate::IndexTarget::Expression(a), crate::IndexTarget::Expression(b)) => {
+            crate::normalise_generated_expression(a) == crate::normalise_generated_expression(b)
+        }
+        _ => false,
+    }
+}
+
 fn diff_table(
     current: &Table,
     desired: &Table,
@@ -682,7 +717,7 @@ fn diff_table(
     // Indexes.
     for index in &desired.indexes {
         match current.indexes.iter().find(|i| i.name == index.name) {
-            Some(existing) if existing == index => {}
+            Some(existing) if same_index(existing, index) => {}
             Some(_) => {
                 changes.push(Change::DropIndex {
                     table: table.clone(),
@@ -812,7 +847,7 @@ pub fn worst_safety(changes: &[Change]) -> Safety {
 #[cfg(test)]
 mod tests {
     use super::{diff, worst_safety};
-    use crate::{Change, Column, Enum, Safety, Schema, Table, Unique};
+    use crate::{Change, Column, Enum, IndexColumn, Safety, Schema, Table, Unique};
     use besu_core::TypeDef;
 
     fn column(name: &str, ty: TypeDef) -> Column {
@@ -1322,6 +1357,70 @@ mod tests {
         assert!(matches!(&changes[0], Change::DropIndex { .. }));
         assert!(matches!(&changes[1], Change::AddIndex { .. }));
         assert!(diff(&after, &after).is_empty());
+    }
+
+    #[test]
+    fn an_index_entry_change_is_a_drop_and_create() {
+        let mut before = table(
+            "users",
+            vec![
+                column("name", TypeDef::Text),
+                column("email", TypeDef::Text),
+            ],
+        );
+        before.indexes.push(crate::Index {
+            name: "users_name_email_idx".into(),
+            columns: vec![IndexColumn::column("name"), IndexColumn::column("email")],
+            unique: false,
+            kind: crate::IndexKind::Btree,
+            predicate: None,
+        });
+        let mut after = before.clone();
+        after.indexes[0].columns.reverse();
+
+        let changes = diff(&schema(vec![before]), &schema(vec![after]));
+        assert!(matches!(&changes[0], Change::DropIndex { .. }));
+        assert!(matches!(&changes[1], Change::AddIndex { .. }));
+    }
+
+    #[test]
+    fn an_operator_class_is_part_of_the_index() {
+        let mut before = table("users", vec![column("email", TypeDef::Text)]);
+        before.indexes.push(crate::Index {
+            name: "users_email_idx".into(),
+            columns: vec![IndexColumn::column("email")],
+            unique: false,
+            kind: crate::IndexKind::Btree,
+            predicate: None,
+        });
+        let mut after = before.clone();
+        after.indexes[0].columns[0].opclass = Some("text_pattern_ops".into());
+        let (before, after) = (schema(vec![before]), schema(vec![after]));
+
+        // `text_pattern_ops` changes which predicates the index serves, so the declaration
+        // must replace the old index rather than keep it.
+        let changes = diff(&before, &after);
+        assert!(matches!(&changes[0], Change::DropIndex { .. }));
+        assert!(matches!(&changes[1], Change::AddIndex { .. }));
+        assert!(diff(&after, &after).is_empty());
+    }
+
+    #[test]
+    fn an_expression_the_database_rewrites_still_converges() {
+        // MySQL reports a functional key part as `lower(\`email\`)`, and PostgreSQL may add
+        // its own quoting. Identifier quoting is not a change.
+        let mut current = table("users", vec![column("email", TypeDef::Text)]);
+        current.indexes.push(crate::Index {
+            name: "users_lower_email_idx".into(),
+            columns: vec![IndexColumn::expression("lower(`email`)")],
+            unique: false,
+            kind: crate::IndexKind::Btree,
+            predicate: None,
+        });
+        let mut desired = current.clone();
+        desired.indexes[0].columns[0] = IndexColumn::expression("lower(email)");
+
+        assert!(diff(&schema(vec![current]), &schema(vec![desired])).is_empty());
     }
 
     #[test]

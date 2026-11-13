@@ -166,7 +166,25 @@ export function createTableSql(table: Table, dialect: string | undefined): strin
           .join(",\n")}\n);`;
 
   const indexes = (table.indexes ?? []).map((index) => {
-    const columnList = index.columns.map((name) => quoteIdent(name, dialect)).join(", ");
+    const postgres = dialect === "postgres";
+    const columnList = index.columns
+      .map((column) => {
+        if (typeof column === "string") return quoteIdent(column, dialect);
+        if ("expression" in column) {
+          // MySQL 8 spells a functional key part with its own parentheses.
+          const expression = isMySql(dialect)
+            ? `(${column.expression})`
+            : column.expression;
+          return column.opclass && postgres
+            ? `${expression} ${column.opclass}`
+            : expression;
+        }
+        const name = quoteIdent(column.column, dialect);
+        return column.opclass && postgres
+          ? `${name} ${column.opclass}`
+          : name;
+      })
+      .join(", ");
     const unique = index.unique ? "UNIQUE " : "";
     // MySQL has no partial indexes, so a predicate is Postgres/SQLite only.
     const predicate =

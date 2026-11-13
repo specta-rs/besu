@@ -1,6 +1,6 @@
 use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
-use besu_schema::{Column, ForeignKey, Index, Schema, Table, Unique, View};
+use besu_schema::{Column, ForeignKey, Index, IndexColumn, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
@@ -10,9 +10,12 @@ use crate::Sqlx;
 /// themselves, because `push` would then try to drop or replace them:
 ///
 /// - partial indexes, whose `WHERE` clause has no representation here,
-/// - expression indexes, whose key parts are not columns,
 /// - `CHECK` constraints, which would have to be parsed out of the `CREATE TABLE` text,
 /// - triggers, which are not read at all.
+///
+/// An expression index is read from the `CREATE INDEX` text SQLite keeps in
+/// `sqlite_master`, because `PRAGMA index_info` reports a `NULL` name for an expression key
+/// part rather than the expression itself.
 ///
 /// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
 /// ignores that list, so they never appear as tables and `push` never touches them.
@@ -243,6 +246,16 @@ async fn introspect_indexes(
         .all::<(i64, String, i64, String, i64)>()
         .await?;
 
+    // The only place SQLite says what an expression key part is, is the `CREATE INDEX` text.
+    // It is read once for the whole table rather than once per index.
+    let definitions = db
+        .execute(besu::Fragment::new(format!(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = {}",
+            quote_literal(&table.name)
+        )))
+        .all::<(String, Option<String>)>()
+        .await?;
+
     for (_, name, unique, origin, partial) in indexes {
         // SQLite knows partial indexes, but the IR has no predicate for one here, and a
         // partial index reported as a plain index would make `push` drop it or believe it
@@ -257,38 +270,81 @@ async fn introspect_indexes(
             .all::<(i64, i64, Option<String>)>()
             .await?;
 
-        // A `NULL` column name marks an expression key part (`lower(email)`), which the IR
-        // cannot express. Reporting the remaining columns would describe an index that does
-        // not exist, so the whole index is skipped.
-        if columns.iter().any(|(_, _, name)| name.is_none()) {
-            continue;
-        }
-        let columns: Vec<String> = columns
-            .into_iter()
-            .filter_map(|(_, _, name)| name)
-            .collect();
-
         if columns.is_empty() {
             continue;
         }
 
+        let has_expression = columns.iter().any(|(_, _, name)| name.is_none());
+        let definition = definitions
+            .iter()
+            .find(|(index, _)| index == &name)
+            .and_then(|(_, sql)| sql.as_deref());
+
+        // An expression key part has no column name in `index_info`; the key parts are read
+        // from the statement instead. Without the statement there is no honest way to
+        // describe the index, so it is skipped rather than reported as an index over its
+        // plain columns only.
+        let entries = if has_expression {
+            let Some(parts) = definition.and_then(index_key_parts) else {
+                continue;
+            };
+            if parts.len() != columns.len() {
+                continue;
+            }
+            parts
+                .into_iter()
+                .zip(&columns)
+                .map(|(part, (_, _, name))| match name {
+                    Some(name) => IndexColumn::column(name.clone()),
+                    None => IndexColumn::expression(part),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            columns
+                .iter()
+                .filter_map(|(_, _, name)| name.clone())
+                .map(IndexColumn::column)
+                .collect::<Vec<_>>()
+        };
+
+        let column_names: Option<Vec<String>> = entries
+            .iter()
+            .map(|entry| entry.as_column().map(ToOwned::to_owned))
+            .collect();
+
         match origin.as_str() {
             // A `UNIQUE` written on the column itself shows up as an automatic index.
-            "u" if columns.len() == 1 && unique != 0 => {
-                if let Some(column) = table.columns.iter_mut().find(|c| c.name == columns[0]) {
-                    column.unique = true;
+            "u" if unique != 0 => match column_names.as_deref() {
+                Some([column]) => {
+                    if let Some(column) =
+                        table.columns.iter_mut().find(|c| c.name == column.as_str())
+                    {
+                        column.unique = true;
+                    }
                 }
-            }
-            // A multi-column `UNIQUE` is reported as an automatic index too. SQLite gives
-            // that index a generated name (`sqlite_autoindex_<table>_<n>`) and does not
-            // expose the constraint's own name, which is why the differ matches uniques by
-            // their columns rather than by name.
-            "u" if unique != 0 => table.uniques.push(Unique { name, columns }),
+                // A multi-column `UNIQUE` is reported as an automatic index too. SQLite
+                // gives that index a generated name (`sqlite_autoindex_<table>_<n>`) and
+                // does not expose the constraint's own name, which is why the differ
+                // matches uniques by their columns rather than by name.
+                Some(columns) => table.uniques.push(Unique {
+                    name,
+                    columns: columns.to_vec(),
+                }),
+                // A unique expression index is not a `UNIQUE` constraint; keep it as an
+                // index so it round-trips.
+                None => table.indexes.push(Index {
+                    name,
+                    columns: entries,
+                    unique: true,
+                    kind: besu_schema::IndexKind::Btree,
+                    predicate: None,
+                }),
+            },
             // `PRIMARY KEY` automatic indexes.
             "pk" => {}
             _ => table.indexes.push(Index {
                 name,
-                columns,
+                columns: entries,
                 unique: unique != 0,
                 // SQLite has one access method; everything it creates is a b-tree.
                 kind: besu_schema::IndexKind::Btree,
@@ -298,6 +354,105 @@ async fn introspect_indexes(
     }
 
     Ok(())
+}
+
+/// The key parts of a `CREATE INDEX` statement, in order.
+///
+/// SQLite has no catalogue view of an expression key part, so the statement is split at its
+/// top-level commas. Quoted identifiers and string literals are respected, and nested
+/// parentheses (a function call, for example) do not split an entry.
+fn index_key_parts(sql: &str) -> Option<Vec<String>> {
+    let on = keyword_position(sql, "on")?;
+    let open = sql[on..].find('(')? + on;
+
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut start = open + 1;
+    let mut chars = sql[open..].char_indices().peekable();
+
+    while let Some((offset, ch)) = chars.next() {
+        let index = open + offset;
+        if let Some(open_quote) = quote {
+            if ch == open_quote {
+                if chars.peek().is_some_and(|(_, next)| *next == open_quote) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let part = sql[start..index].trim();
+                    if !part.is_empty() {
+                        parts.push(part.to_owned());
+                    }
+                    return Some(parts);
+                }
+            }
+            ',' if depth == 1 => {
+                parts.push(sql[start..index].trim().to_owned());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The byte offset of a bare keyword, ignoring text inside quotes.
+///
+/// `CREATE INDEX` text is whatever the caller wrote, so the `ON` can sit on its own line;
+/// searching for the literal `" on "` would miss it.
+fn keyword_position(sql: &str, keyword: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let needle = keyword.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == open {
+                if bytes.get(index + 1) == Some(&open) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if index + needle.len() <= bytes.len()
+            && bytes[index..index + needle.len()].eq_ignore_ascii_case(needle)
+        {
+            let before = index == 0 || !is_word_byte(bytes[index - 1]);
+            let after =
+                index + needle.len() == bytes.len() || !is_word_byte(bytes[index + needle.len()]);
+            if before && after {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
 async fn introspect_foreign_keys(
@@ -401,4 +556,27 @@ fn normalise_default(value: String) -> String {
 
 fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_key_parts;
+
+    #[test]
+    fn key_parts_split_on_top_level_commas() {
+        assert_eq!(
+            index_key_parts("CREATE INDEX x ON t (lower(email), kind DESC, (a + b))")
+                .expect("the key list must parse"),
+            ["lower(email)", "kind DESC", "(a + b)"]
+        );
+    }
+
+    #[test]
+    fn a_newline_before_on_does_not_hide_the_key_list() {
+        assert_eq!(
+            index_key_parts("CREATE INDEX x\nON t\n(lower(email))")
+                .expect("the key list must parse"),
+            ["lower(email)"]
+        );
+    }
 }

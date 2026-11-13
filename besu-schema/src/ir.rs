@@ -781,7 +781,24 @@ impl Table {
                 .iter()
                 .map(|idx| Index {
                     name: idx.name.into(),
-                    columns: idx.columns.iter().map(|c| (*c).into()).collect(),
+                    columns: idx
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            let target = match entry.target {
+                                besu_core::IndexColumn::Column(name) => {
+                                    IndexTarget::Column(name.into())
+                                }
+                                besu_core::IndexColumn::Expression(expression) => {
+                                    IndexTarget::Expression(expression.into())
+                                }
+                            };
+                            IndexColumn {
+                                target,
+                                opclass: entry.opclass.map(Into::into),
+                            }
+                        })
+                        .collect(),
                     unique: idx.unique,
                     kind: idx.kind,
                     // A `TableDef` has no way to spell a predicate, so a declared index is
@@ -1042,13 +1059,163 @@ fn skip_type(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) {
     }
 }
 
+/// What one index key part indexes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexTarget {
+    /// A column, by SQL name.
+    Column(String),
+    /// A raw SQL expression, for example `lower(email)`.
+    Expression(String),
+}
+
+/// One key part of an index.
+///
+/// A column is serialised as a bare string, which is the form every snapshot written before
+/// expressions and operator classes existed uses. An entry with an operator class, or an
+/// expression, is serialised as an object:
+///
+/// ```json
+/// ["email", {"column": "name", "opclass": "text_pattern_ops"}, {"expression": "lower(email)"}]
+/// ```
+///
+/// Deserialisation accepts the bare string as a column with the default operator class, so
+/// older snapshots load unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexColumn {
+    /// What the entry indexes.
+    pub target: IndexTarget,
+    /// The operator class, if the index names one.
+    pub opclass: Option<String>,
+}
+
+impl IndexColumn {
+    /// An entry over the named column, with the default operator class.
+    pub fn column(name: impl Into<String>) -> Self {
+        Self {
+            target: IndexTarget::Column(name.into()),
+            opclass: None,
+        }
+    }
+
+    /// An entry over a raw SQL expression.
+    pub fn expression(expression: impl Into<String>) -> Self {
+        Self {
+            target: IndexTarget::Expression(expression.into()),
+            opclass: None,
+        }
+    }
+
+    /// Attach an operator class to this entry.
+    pub fn with_opclass(mut self, opclass: impl Into<String>) -> Self {
+        self.opclass = Some(opclass.into());
+        self
+    }
+
+    /// The column's name, if this entry is a column.
+    pub fn as_column(&self) -> Option<&str> {
+        match &self.target {
+            IndexTarget::Column(name) => Some(name),
+            IndexTarget::Expression(_) => None,
+        }
+    }
+
+    /// The expression, if this entry is one.
+    pub fn as_expression(&self) -> Option<&str> {
+        match &self.target {
+            IndexTarget::Column(_) => None,
+            IndexTarget::Expression(expression) => Some(expression),
+        }
+    }
+}
+
+impl From<&str> for IndexColumn {
+    fn from(name: &str) -> Self {
+        Self::column(name)
+    }
+}
+
+impl From<String> for IndexColumn {
+    fn from(name: String) -> Self {
+        Self::column(name)
+    }
+}
+
+impl Serialize for IndexColumn {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.target, &self.opclass) {
+            (IndexTarget::Column(name), None) => serializer.serialize_str(name),
+            (IndexTarget::Column(name), Some(opclass)) => {
+                #[derive(Serialize)]
+                struct Entry<'a> {
+                    column: &'a str,
+                    opclass: &'a str,
+                }
+                Entry {
+                    column: name,
+                    opclass,
+                }
+                .serialize(serializer)
+            }
+            (IndexTarget::Expression(expression), opclass) => {
+                #[derive(Serialize)]
+                struct Entry<'a> {
+                    expression: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    opclass: Option<&'a str>,
+                }
+                Entry {
+                    expression,
+                    opclass: opclass.as_deref(),
+                }
+                .serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for IndexColumn {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            /// The pre-expression snapshot spelling: a bare column name.
+            Plain(String),
+            Column {
+                column: String,
+                #[serde(default)]
+                opclass: Option<String>,
+            },
+            Expression {
+                expression: String,
+                #[serde(default)]
+                opclass: Option<String>,
+            },
+        }
+
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Plain(name) => Self::column(name),
+            Raw::Column { column, opclass } => Self {
+                target: IndexTarget::Column(column),
+                opclass,
+            },
+            Raw::Expression {
+                expression,
+                opclass,
+            } => Self {
+                target: IndexTarget::Expression(expression),
+                opclass,
+            },
+        })
+    }
+}
+
 /// A secondary index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Index {
     /// The index name.
     pub name: String,
-    /// The indexed columns, in order.
-    pub columns: Vec<String>,
+    /// The indexed columns or expressions, in order.
+    pub columns: Vec<IndexColumn>,
     /// Whether the index is unique.
     #[serde(default)]
     pub unique: bool,
@@ -1190,8 +1357,8 @@ mod fs_impl {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexKind, Schema, Sequence, normalise_generated_expression, normalise_view_definition,
-        view_body,
+        Index, IndexColumn, IndexKind, IndexTarget, Schema, Sequence,
+        normalise_generated_expression, normalise_view_definition, view_body,
     };
 
     #[test]
@@ -1283,6 +1450,66 @@ mod tests {
         }"#;
         let schema: Schema = serde_json::from_str(json).expect("an old snapshot must load");
         assert_eq!(schema.tables[0].indexes[0].kind, IndexKind::Btree);
+        // A bare string was the only spelling an index entry had, so it must still mean a
+        // column with no operator class.
+        assert_eq!(
+            schema.tables[0].indexes[0].columns,
+            [IndexColumn::column("id")]
+        );
+    }
+
+    #[test]
+    fn an_index_entry_round_trips_expressions_and_operator_classes() {
+        let index = Index {
+            name: "users_search_idx".into(),
+            columns: vec![
+                IndexColumn::column("email").with_opclass("text_pattern_ops"),
+                IndexColumn::expression("lower(name)"),
+            ],
+            unique: true,
+            kind: IndexKind::Gin,
+            predicate: Some("active".into()),
+        };
+
+        let json = serde_json::to_string(&index).expect("the index must serialise");
+        let parsed: Index = serde_json::from_str(&json).expect("the index must load");
+        assert_eq!(parsed, index);
+    }
+
+    #[test]
+    fn a_plain_column_keeps_the_bare_string_spelling() {
+        // Existing snapshots store `"columns": ["email"]`; a plain column has to keep
+        // writing that form so a snapshot does not churn just because entries gained an
+        // operator-class slot.
+        let value =
+            serde_json::to_value(IndexColumn::column("email")).expect("a column must serialise");
+        assert_eq!(value, serde_json::json!("email"));
+
+        let value =
+            serde_json::to_value(IndexColumn::column("email").with_opclass("text_pattern_ops"))
+                .expect("a column with an operator class must serialise");
+        assert_eq!(
+            value,
+            serde_json::json!({"column": "email", "opclass": "text_pattern_ops"})
+        );
+
+        let value = serde_json::to_value(IndexColumn::expression("lower(email)"))
+            .expect("an expression must serialise");
+        assert_eq!(value, serde_json::json!({"expression": "lower(email)"}));
+    }
+
+    #[test]
+    fn an_index_entry_accepts_both_spellings_of_a_column() {
+        let old: IndexColumn = serde_json::from_str(r#""email""#).expect("a bare string must load");
+        let new: IndexColumn =
+            serde_json::from_str(r#"{"column": "email", "opclass": "text_pattern_ops"}"#)
+                .expect("an object entry must load");
+        assert_eq!(old.target, IndexTarget::Column("email".into()));
+        assert_eq!(old.opclass, None);
+        assert_eq!(
+            new,
+            IndexColumn::column("email").with_opclass("text_pattern_ops")
+        );
     }
 
     #[test]

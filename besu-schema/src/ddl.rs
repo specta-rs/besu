@@ -1,8 +1,8 @@
 use besu_core::{IndexKind, TypeDef, Value};
 
 use crate::{
-    Change, Check, Column, Enum, ForeignKey, Index, ReferenceAction, Schema, Sequence, Table,
-    Unique, View, view_body,
+    Change, Check, Column, Enum, ForeignKey, Index, IndexColumn, IndexTarget, ReferenceAction,
+    Schema, Sequence, Table, Unique, View, view_body,
 };
 
 /// Render a schema as DDL for a particular database.
@@ -213,11 +213,11 @@ pub trait Ddl {
         }
 
         sql.push_str(" (");
-        for (i, column) in index.columns.iter().enumerate() {
+        for (i, entry) in index.columns.iter().enumerate() {
             if i != 0 {
                 sql.push_str(", ");
             }
-            sql.push_str(&self.quote(column));
+            sql.push_str(&self.index_column_sql(entry));
         }
         sql.push(')');
         if let Some(predicate) = &index.predicate {
@@ -225,6 +225,32 @@ pub trait Ddl {
             sql.push_str(predicate);
         }
         sql
+    }
+
+    /// One key part of an index, as a PostgreSQL-style default renders it.
+    ///
+    /// A column is quoted; an expression is raw SQL, written verbatim, because only the
+    /// caller knows what the expression means. An operator class follows it, which is where
+    /// PostgreSQL expects it. Dialects without operator classes override this to ignore
+    /// them, rather than render a statement they cannot parse.
+    fn index_column_sql(&self, entry: &IndexColumn) -> String {
+        let mut sql = match &entry.target {
+            IndexTarget::Column(name) => self.quote(name),
+            IndexTarget::Expression(expression) => self.index_expression_sql(expression),
+        };
+        if let Some(opclass) = &entry.opclass {
+            sql.push(' ');
+            sql.push_str(opclass);
+        }
+        sql
+    }
+
+    /// Render the expression of an index key.
+    ///
+    /// The default writes it verbatim, which is what SQLite and MySQL's functional-key
+    /// spelling accept. A dialect whose grammar needs extra parentheses overrides this.
+    fn index_expression_sql(&self, expression: &str) -> String {
+        expression.to_owned()
     }
 
     /// `DROP INDEX`.
@@ -570,4 +596,66 @@ fn join_quoted(parts: &[String], quote: impl Fn(&str) -> String) -> String {
 /// Render a reference action the way most dialects spell it.
 pub fn reference_action_sql(action: ReferenceAction) -> Option<&'static str> {
     action.as_sql()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::IndexKind;
+
+    /// The portable default, which is what a PostgreSQL-shaped dialect renders.
+    struct TestDdl;
+
+    impl Ddl for TestDdl {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
+        fn quote(&self, ident: &str) -> String {
+            format!("\"{ident}\"")
+        }
+
+        fn type_name(&self, _ty: &TypeDef) -> String {
+            "TEXT".into()
+        }
+
+        fn column_sql(&self, column: &Column, _inline_pk: bool) -> String {
+            self.quote(&column.name)
+        }
+    }
+
+    #[test]
+    fn an_index_renders_its_entries_in_order() {
+        let index = Index {
+            name: "users_search_idx".into(),
+            columns: vec![
+                IndexColumn::column("email").with_opclass("text_pattern_ops"),
+                IndexColumn::expression("lower(name)"),
+            ],
+            unique: true,
+            kind: IndexKind::Gin,
+            predicate: Some("active".into()),
+        };
+
+        assert_eq!(
+            TestDdl.create_index("users", &index),
+            r#"CREATE UNIQUE INDEX "users_search_idx" ON "users" USING gin ("email" text_pattern_ops, lower(name)) WHERE active"#
+        );
+    }
+
+    #[test]
+    fn a_plain_column_has_no_operator_class_and_no_expression_parentheses() {
+        let index = Index {
+            name: "users_email_idx".into(),
+            columns: vec![IndexColumn::column("email")],
+            unique: false,
+            kind: IndexKind::Btree,
+            predicate: None,
+        };
+
+        assert_eq!(
+            TestDdl.create_index("users", &index),
+            r#"CREATE INDEX "users_email_idx" ON "users" ("email")"#
+        );
+    }
 }

@@ -5,6 +5,7 @@ import { createTableSql } from "../components/console/create-table";
 import { copy, displayType } from "../lib/format";
 import { href, linkClick } from "../lib/router";
 import { useStudio } from "../lib/store";
+import { indexColumnLabel } from "../lib/types";
 import type { Column, Table, View } from "../lib/types";
 import { EmptyState, Spinner } from "../lib/ui";
 
@@ -276,7 +277,7 @@ function ConstraintsSection(props: { table: Table }) {
                     <div class="flex flex-wrap items-baseline gap-2">
                       <span class="font-mono text-[11.5px] text-ink">{index.name}</span>
                       <code class="font-mono text-[11px] text-ink-3">
-                        ({index.columns.join(", ")})
+                        ({index.columns.map(indexColumnLabel).join(", ")})
                       </code>
                       <Show when={index.unique}>
                         <Badge tone="accent">unique</Badge>

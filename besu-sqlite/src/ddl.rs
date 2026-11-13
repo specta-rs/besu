@@ -244,11 +244,17 @@ impl Ddl for SQLiteDdl {
         sql.push_str(" ON ");
         sql.push_str(&self.quote_table(table));
         sql.push_str(" (");
-        for (i, column) in index.columns.iter().enumerate() {
+        for (i, entry) in index.columns.iter().enumerate() {
             if i != 0 {
                 sql.push_str(", ");
             }
-            sql.push_str(&self.quote(column));
+            // SQLite has no operator classes, so one is omitted rather than rendered as an
+            // expression it would parse as a column reference. The index it creates is the
+            // same one it would create without it.
+            match &entry.target {
+                besu_schema::IndexTarget::Column(name) => sql.push_str(&self.quote(name)),
+                besu_schema::IndexTarget::Expression(expression) => sql.push_str(expression),
+            }
         }
         sql.push(')');
         sql
@@ -334,7 +340,7 @@ impl Ddl for SQLiteDdl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use besu_schema::Unique;
+    use besu_schema::{IndexColumn, IndexKind, Unique};
 
     fn table() -> Table {
         Table {
@@ -378,5 +384,25 @@ mod tests {
         let unique = &table().uniques[0];
         assert!(SQLiteDdl.add_unique("memberships", unique).is_empty());
         assert!(SQLiteDdl.drop_unique("memberships", unique).is_empty());
+    }
+
+    #[test]
+    fn an_expression_index_keeps_its_expression_and_drops_the_opclass() {
+        // SQLite supports expression indexes but has no operator classes; adding one to the
+        // statement would make it a different expression.
+        let index = besu_schema::Index {
+            name: "users_search_idx".into(),
+            columns: vec![
+                IndexColumn::column("email").with_opclass("text_pattern_ops"),
+                IndexColumn::expression("lower(email)"),
+            ],
+            unique: false,
+            kind: IndexKind::Btree,
+            predicate: None,
+        };
+        assert_eq!(
+            SQLiteDdl.create_index("users", &index),
+            r#"CREATE INDEX "users_search_idx" ON "users" ("email", lower(email))"#
+        );
     }
 }

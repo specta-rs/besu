@@ -163,6 +163,19 @@ impl Ddl for PostgresDdl {
         statements
     }
 
+    /// PostgreSQL requires parentheses around an index expression unless it has the form of
+    /// a function call. Wrapping an arithmetic expression is what makes it a statement the
+    /// server accepts; a function call is left as written, which is also the spelling
+    /// introspection reports back.
+    fn index_expression_sql(&self, expression: &str) -> String {
+        let expression = expression.trim();
+        if expression.starts_with('(') || is_function_call(expression) {
+            expression.to_owned()
+        } else {
+            format!("({expression})")
+        }
+    }
+
     fn drop_index(&self, table: &str, index: &Index) -> String {
         // An index belongs to the table's schema, so an unqualified `DROP INDEX` names the
         // wrong one whenever the table is not in the current schema.
@@ -325,5 +338,46 @@ impl Ddl for PostgresDdl {
     /// `DROP SEQUENCE`.
     fn drop_sequence(&self, name: &str) -> Vec<String> {
         vec![format!("DROP SEQUENCE {}", self.quote_table(name))]
+    }
+}
+
+/// Whether an expression has the form `name(...)`, which PostgreSQL accepts as an index key
+/// without an extra pair of parentheses.
+///
+/// The name may be schema-qualified and quoted. Anything else — arithmetic, a cast, a
+/// literal — needs the parentheses.
+fn is_function_call(expression: &str) -> bool {
+    let Some(open) = expression.find('(') else {
+        return false;
+    };
+    let head = expression[..open].trim();
+    !head.is_empty()
+        && head
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '"' | '$'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use besu_schema::{IndexColumn, IndexKind};
+
+    #[test]
+    fn an_arithmetic_expression_is_parenthesised_and_a_function_call_is_not() {
+        let index = Index {
+            name: "events_score_idx".into(),
+            columns: vec![
+                IndexColumn::expression("a + b"),
+                IndexColumn::expression("lower(name)"),
+            ],
+            unique: false,
+            kind: IndexKind::Btree,
+            predicate: None,
+        };
+
+        assert_eq!(
+            PostgresDdl.create_index("events", &index),
+            r#"CREATE INDEX "events_score_idx" ON "events" ((a + b), lower(name))"#
+        );
     }
 }

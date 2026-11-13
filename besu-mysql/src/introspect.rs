@@ -1,5 +1,5 @@
 use besu_core::{TypeDef, schema::IndexKind, schema::ReferenceAction};
-use besu_schema::{Column, ForeignKey, Generated, Index, Schema, Table, Unique, View};
+use besu_schema::{Column, ForeignKey, Generated, Index, IndexColumn, Schema, Table, Unique, View};
 
 use crate::Sqlx;
 
@@ -8,10 +8,9 @@ use crate::Sqlx;
 /// The result is exactly what [`besu::Database::push`] compares against, so pushing a
 /// schema that already exists produces no statements.
 ///
-/// Functional (expression) indexes are skipped as a whole, because the IR can only name
-/// columns and reporting the remaining key parts would describe an index that does not
-/// exist. `CHECK` constraints are skipped too: MySQL reports them in a form it will not
-/// accept back (see the field comment in `introspect_table`). Views are read into
+/// Functional (expression) indexes are read from `STATISTICS.EXPRESSION`. `CHECK`
+/// constraints are skipped: MySQL reports them in a form it will not accept back (see the
+/// field comment in `introspect_table`). Views are read into
 /// [`Schema::views`] for `besu pull`; MySQL has no materialised views and no sequences.
 /// Triggers are not read at all.
 pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
@@ -64,12 +63,18 @@ fn table_query(sql: &'static str, table: &str) -> besu::Fragment {
 /// One index as reported by `information_schema.STATISTICS`, before it is classified.
 struct RawIndex {
     name: String,
-    columns: Vec<String>,
+    columns: Vec<IndexColumn>,
     unique: bool,
     /// The access method, or `None` when the IR has no name for it.
     kind: Option<IndexKind>,
-    /// Whether any key part is an expression rather than a column.
-    expression: bool,
+}
+
+/// The key parts as plain column names, when every part is one.
+fn column_names(columns: &[IndexColumn]) -> Option<Vec<String>> {
+    columns
+        .iter()
+        .map(|column| column.as_column().map(ToOwned::to_owned))
+        .collect()
 }
 
 async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Table, sqlx::Error> {
@@ -113,13 +118,13 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
 
     let statistics = db
         .execute(table_query(
-            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_TYPE \
+            "SELECT INDEX_NAME, COLUMN_NAME, EXPRESSION, NON_UNIQUE, INDEX_TYPE \
              FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY' \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             &name,
         ))
-        .all::<(String, Option<String>, u64, String)>()
+        .all::<(String, Option<String>, Option<String>, u64, String)>()
         .await?;
 
     let foreign_keys = db
@@ -206,20 +211,25 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     table.foreign_keys = group_foreign_keys(foreign_keys);
 
     let mut indexes: Vec<RawIndex> = Vec::new();
-    for (index_name, column_name, non_unique, index_type) in statistics {
-        let expression = column_name.is_none();
+    for (index_name, column_name, expression, non_unique, index_type) in statistics {
+        // A column key part has a `COLUMN_NAME`; a functional one has an `EXPRESSION` and no
+        // column. A prefix length is not part of the IR, so the column is reported whole.
+        let entry = match (column_name, expression) {
+            (Some(column_name), _) => Some(IndexColumn::column(column_name)),
+            (None, Some(expression)) => Some(IndexColumn::expression(expression)),
+            (None, None) => None,
+        };
+        let Some(entry) = entry else {
+            continue;
+        };
         let kind = parse_index_type(&index_type);
         match indexes.iter_mut().find(|index| index.name == index_name) {
-            Some(index) => match column_name {
-                Some(column_name) => index.columns.push(column_name),
-                None => index.expression = true,
-            },
+            Some(index) => index.columns.push(entry),
             None => indexes.push(RawIndex {
-                columns: column_name.into_iter().collect(),
+                columns: vec![entry],
                 name: index_name,
                 unique: non_unique == 0,
                 kind,
-                expression,
             }),
         }
     }
@@ -229,33 +239,33 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
     // after the column, which is what distinguishes it from a unique index the user
     // declared themselves.
     for index in &indexes {
-        if index.unique && index.columns.len() == 1 && index.name == index.columns[0] {
-            if let Some(column) = table
+        if index.unique
+            && let Some([column_name]) = column_names(&index.columns).as_deref()
+            && index.name == column_name.as_str()
+            && let Some(column) = table
                 .columns
                 .iter_mut()
-                .find(|column| column.name == index.columns[0])
-            {
-                column.unique = true;
-            }
+                .find(|column| column.name == column_name.as_str())
+        {
+            column.unique = true;
         }
     }
 
     for index in indexes {
-        // A functional index has an expression where a column would be. Besu cannot model
-        // one, and reporting only its plain key parts would describe an index that does not
-        // exist, so the whole index is skipped rather than reported as a change every push.
-        if index.expression {
-            continue;
-        }
-
         // An access method the IR has no name for (`HASH`, which only the memory engine
-        // uses) is skipped for the same reason: reporting it as a b-tree would say an index
-        // exists that does not.
+        // uses) is skipped: reporting it as a b-tree would say an index exists that does
+        // not.
         let Some(kind) = index.kind else {
             continue;
         };
 
-        if index.unique && index.columns.len() == 1 && index.name == index.columns[0] {
+        let column_names = column_names(&index.columns);
+
+        if index.unique
+            && column_names
+                .as_deref()
+                .is_some_and(|names| names.len() == 1 && index.name == names[0])
+        {
             continue;
         }
 
@@ -263,21 +273,24 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
         // are not already indexed, named after the constraint. Reporting it would make
         // every push try to drop an index the user never wrote.
         if !index.unique
-            && table
-                .foreign_keys
-                .iter()
-                .any(|fk| fk.columns == index.columns)
+            && column_names
+                .as_deref()
+                .is_some_and(|names| table.foreign_keys.iter().any(|fk| fk.columns == names))
         {
             continue;
         }
 
         // MySQL has no constraint distinct from the unique key that enforces it, so a
         // multi-column unique key is the table's `Unique`. It is dropped with
-        // `DROP CONSTRAINT` (8.0.19+) or `DROP INDEX`, both of which name that key.
-        if index.unique && index.columns.len() > 1 {
+        // `DROP CONSTRAINT` (8.0.19+) or `DROP INDEX`, both of which name that key. A
+        // unique functional key is not a column list and stays an index.
+        if index.unique
+            && let Some(columns) = column_names
+            && columns.len() > 1
+        {
             table.uniques.push(Unique {
                 name: index.name,
-                columns: index.columns,
+                columns,
             });
             continue;
         }

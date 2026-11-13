@@ -25,9 +25,24 @@ export interface Column {
   comment?: string;
 }
 
+/**
+ * An index key part. A plain column is serialised as a bare string for backward
+ * compatibility; an expression or an operator class is an object.
+ */
+export type IndexColumn =
+  | string
+  | { column: string; opclass?: string }
+  | { expression: string; opclass?: string };
+
+/** The readable target of an index key part, without quoting. */
+export function indexColumnLabel(column: IndexColumn): string {
+  if (typeof column === "string") return column;
+  return "expression" in column ? column.expression : column.column;
+}
+
 export interface Index {
   name: string;
-  columns: string[];
+  columns: IndexColumn[];
   unique?: boolean;
   kind?: string;
   predicate?: string;

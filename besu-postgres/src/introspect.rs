@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use besu_core::TypeDef;
 use besu_core::schema::{IndexKind, ReferenceAction};
 use besu_schema::{
-    Check, Column, Enum, ForeignKey, Generated, Index, Schema, Sequence, Table, Unique, View,
-    normalise_expression, normalise_generated_expression,
+    Check, Column, Enum, ForeignKey, Generated, Index, IndexColumn, Schema, Sequence, Table,
+    Unique, View, normalise_expression, normalise_generated_expression,
 };
 
 use crate::Sqlx;
@@ -19,7 +19,6 @@ use crate::Sqlx;
 /// Objects Besu cannot model are skipped rather than reported as a lossy version of
 /// themselves, because a `push` that sees them would try to drop or recreate them:
 ///
-/// - expression indexes, which have no column list to report,
 /// - indexes with `INCLUDE` columns, which the IR cannot name,
 /// - indexes that back a constraint (exclusion constraints in particular), which the
 ///   constraint owns and `DROP INDEX` cannot remove,
@@ -728,22 +727,29 @@ async fn introspect_indexes(
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.relname, i.relname, ix.indisunique, am.amname, \
-                    ix.indnkeyatts, ix.indnatts, a.attname, pg_get_expr(ix.indpred, ix.indrelid) \
+                    ix.indnkeyatts, ix.indnatts, a.attname, \
+                    pg_get_indexdef(ix.indexrelid, k.ord::int, true), \
+                    opc.opcname, opc.opcdefault, \
+                    pg_get_expr(ix.indpred, ix.indrelid) \
              FROM pg_index ix \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) \
+             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) \
+               ON k.ord <= ix.indnkeyatts \
+             JOIN LATERAL unnest(ix.indclass) WITH ORDINALITY AS class(opcoid, ord) \
+               ON class.ord = k.ord \
+             JOIN pg_opclass opc ON opc.oid = class.opcoid \
+             LEFT JOIN pg_attribute a \
+               ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum <> 0 \
              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
                AND n.nspname NOT LIKE 'pg_toast%' \
                AND NOT ix.indisprimary \
-               AND array_position(ix.indkey, a.attnum) <= ix.indnkeyatts \
                AND NOT EXISTS ( \
                    SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid \
                ) \
-             ORDER BY n.nspname, t.relname, i.relname, \
-                      array_position(ix.indkey, a.attnum)"
+             ORDER BY n.nspname, t.relname, i.relname, k.ord"
         ))
         .all::<(
             String,
@@ -753,7 +759,10 @@ async fn introspect_indexes(
             String,
             i16,
             i16,
+            Option<String>,
             String,
+            String,
+            bool,
             Option<String>,
         )>()
         .await?;
@@ -765,21 +774,49 @@ async fn introspect_indexes(
         kind: IndexKind,
         keys: usize,
         attributes: usize,
-        columns: Vec<String>,
+        columns: Vec<IndexColumn>,
         predicate: Option<String>,
     }
 
     let mut indexes: Vec<PgIndex> = Vec::new();
-    for (schema, table, name, unique, method, keys, attributes, column, predicate) in rows {
+    for (
+        schema,
+        table,
+        name,
+        unique,
+        method,
+        keys,
+        attributes,
+        column,
+        key_definition,
+        opclass,
+        default_opclass,
+        predicate,
+    ) in rows
+    {
         let Some(kind) = parse_access_method(&method) else {
             continue;
         };
         let table = qualified(&schema, &table, current);
+        // `indkey` names the column when the key part is one, and is zero for an
+        // expression; `pg_get_indexdef` returns the expression text for that ordinal. The
+        // operator class is separate, and only worth recording when it is not the type's
+        // default: otherwise every ordinary index would carry `text_ops` and never converge
+        // against a declaration that does not name one.
+        let entry = match column {
+            Some(column) => IndexColumn::column(column),
+            None => IndexColumn::expression(key_definition),
+        };
+        let entry = if default_opclass {
+            entry
+        } else {
+            entry.with_opclass(opclass)
+        };
         match indexes
             .iter_mut()
             .find(|index| index.table == table && index.name == name)
         {
-            Some(index) => index.columns.push(column),
+            Some(index) => index.columns.push(entry),
             None => indexes.push(PgIndex {
                 table,
                 name,
@@ -787,26 +824,19 @@ async fn introspect_indexes(
                 kind,
                 keys: usize::try_from(keys).unwrap_or(0),
                 attributes: usize::try_from(attributes).unwrap_or(0),
-                columns: vec![column],
+                columns: vec![entry],
                 predicate: predicate.map(|predicate| normalise_expression(&predicate)),
             }),
         }
     }
 
     for index in indexes {
-        // An index on an expression has fewer joined columns than it has key attributes,
-        // because the expression is not an attribute of the table. The IR has no way to
-        // express one, so it is skipped rather than reported as a plain index that `push`
-        // would then try to replace. Indexes that back a constraint — a primary key, a
-        // `UNIQUE`, or an exclusion constraint, which has no representation at all — are
-        // excluded by the query, because `DROP INDEX` cannot remove them.
-        if index.columns.len() != index.keys {
-            continue;
-        }
-
         // A non-key `INCLUDE` column is not a key column, and the IR cannot name one. An
         // index with `INCLUDE` would otherwise be reported as a plain index over its key
-        // columns only, which is not the index that exists; skip it instead.
+        // columns only, which is not the index that exists; skip it instead. Indexes that
+        // back a constraint — a primary key, a `UNIQUE`, or an exclusion constraint, which
+        // has no representation at all — are excluded by the query, because `DROP INDEX`
+        // cannot remove them.
         if index.attributes != index.keys {
             continue;
         }

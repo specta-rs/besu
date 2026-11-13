@@ -70,16 +70,69 @@ pub created_at: chrono::DateTime<chrono::Utc>,
 CREATE INDEX "users_created_at_idx" ON "users" ("created_at")
 ```
 
-A composite index has no attribute, but the IR expresses one, so a hand-built `Schema` can declare
-it — `Schema::from_defs` gives you the tables and `table_mut` lets you push onto the list:
+A table-level `#[besu(index(columns(...)))]` declares anything wider: several columns, an
+expression, an operator class, a unique index or an access method. `columns` takes column names
+and raw SQL expressions, in key order:
 
 ```rust
-use besu::schema::{Index, IndexKind, Schema};
+#[derive(Table)]
+#[besu(table = "users")]
+#[besu(index(columns(team_id, created_at)))]
+#[besu(index(
+    columns(lower(email)),
+    name = "users_email_lower",
+    unique,
+    using = "gin",
+    opclass = "gin_trgm_ops"
+))]
+pub struct User {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub team_id: i64,
+    pub email: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+```sql
+CREATE INDEX "users_team_id_created_at_idx" ON "users" ("team_id", "created_at")
+CREATE UNIQUE INDEX "users_email_lower" ON "users" USING gin (lower(email) gin_trgm_ops)
+```
+
+The keys inside `index(...)` are `columns(...)`, `name = "..."`, `unique`,
+`using = "..."` (`btree`, `gin`, `gist`, `brin`, `fulltext` or `spatial`) and `opclass`. An
+operator class may be written once for a single-entry index:
+
+```rust
+#[besu(index(columns(email), opclass = "text_pattern_ops"))]
+```
+
+or by column name for a composite one:
+
+```rust
+#[besu(index(columns(email, lower(name)), opclass(email = "text_pattern_ops")))]
+```
+
+`opclass(a = "...")` names a column, not an expression. An expression that needs its own
+operator class has no name to match, so declare that index in the `Schema` IR (which attaches
+the class to the entry directly) or as a hand-written `TableDef`. A bare `opclass` requires
+exactly one entry.
+
+Without a `name`, the index is called `{table}_{column}_idx` for a single column (the same name
+`#[besu(index)]` uses), `{table}_{col1}_{col2}_idx` for several, and an expression contributes
+`expr{position}`. For example `columns(a, lower(email))` on `users` is `users_a_expr2_idx`.
+Naming an index yourself keeps that name, which is what makes introspection converge: the DDL
+always writes the explicit name.
+
+An index can also be built by hand in a `Schema`, which is how a partial index gets a predicate:
+
+```rust
+use besu::schema::{Index, IndexColumn, IndexKind, Schema};
 
 let mut schema = Schema::from_defs(&[users.def()]);
 schema.table_mut("users").unwrap().indexes.push(Index {
     name: "users_name_email_idx".into(),
-    columns: vec!["name".into(), "email".into()],
+    columns: vec![IndexColumn::column("name"), IndexColumn::column("email")],
     unique: false,
     kind: IndexKind::Btree,
     predicate: None,
@@ -88,13 +141,15 @@ schema.table_mut("users").unwrap().indexes.push(Index {
 db.push_schema(&schema).await?;
 ```
 
-```sql
-CREATE INDEX "users_name_email_idx" ON "users" ("name", "email")
-```
+`IndexColumn::expression("lower(email)")` is the expression spelling, and
+`IndexColumn::column("email").with_opclass("text_pattern_ops")` attaches an operator class.
+`From<&str>` and `From<String>` produce a plain column, so `vec!["name".into()]` still works.
 
-A `TableDef` is also a plain public struct, so a hand-written const can carry a composite index or
-a multi-column foreign key. It cannot carry a unique, a predicate or a check: those live only in
-the `Schema` IR. An access method is part of `Index`, so a hand-written `TableDef` can declare one.
+A `TableDef` is also a plain public struct, so a hand-written const can carry a composite,
+expression or operator-class index. It cannot carry a predicate or a check: those live only in
+the `Schema` IR. An access method is part of `Index`, so a hand-written `TableDef` can declare
+one. Its entries are `besu::IndexEntry`, which has `column`, `expression` and `with_opclass`
+`const fn` constructors.
 
 ### Access methods
 
@@ -105,11 +160,11 @@ what `#[besu(index)]` declares, and it is left out of a JSON snapshot so a snaps
 access methods existed loads unchanged.
 
 ```rust
-use besu::schema::IndexKind;
+use besu::schema::{IndexColumn, IndexKind};
 
 schema.table_mut("events").unwrap().indexes.push(Index {
     name: "events_payload_idx".into(),
-    columns: vec!["payload".into()],
+    columns: vec![IndexColumn::column("payload")],
     unique: false,
     kind: IndexKind::Gin,
     predicate: None,
@@ -167,9 +222,11 @@ Only PostgreSQL reads a predicate back into the IR. `Index::predicate` is the `W
 appended verbatim.
 
 ```rust
+use besu::schema::IndexColumn;
+
 schema.table_mut("events").unwrap().indexes.push(Index {
     name: "events_errors_idx".into(),
-    columns: vec!["kind".into()],
+    columns: vec![IndexColumn::column("kind")],
     unique: false,
     kind: IndexKind::Btree,
     predicate: Some("kind = 'error'".into()),
@@ -181,6 +238,44 @@ CREATE INDEX "events_errors_idx" ON "events" ("kind") WHERE kind = 'error'
 ```
 
 SQLite exposes no predicate in its catalogue, so a partial index is skipped; MySQL has none.
+
+### Expression indexes
+
+A key entry can be a raw SQL expression instead of a column:
+
+```rust
+#[besu(index(columns(lower(email)), name = "users_email_lower_idx"))]
+```
+
+```sql
+CREATE INDEX "users_email_lower_idx" ON "users" (lower(email))
+```
+
+The expression is raw SQL, so it is the caller's responsibility that each target database
+accepts it. SQLite takes it as written; PostgreSQL adds the parentheses its grammar requires
+around a non-function expression (`(a + b)`), and MySQL 8 spells a functional key part as
+`(expression)`, so the same declaration renders
+`KEY users_email_lower_idx ((lower(email)))`. An expression is never quoted as an identifier,
+and a changed expression is a drop and a create like any other index change.
+
+### Operator classes
+
+An operator class follows its key entry and is PostgreSQL-only. The other dialects omit it
+rather than render a statement they reject; because SQLite and MySQL have no operator-class
+concept, omitting it does not change the index they build.
+
+```rust
+#[besu(index(columns(email), opclass = "text_pattern_ops"))]
+#[besu(index(columns(email, lower(name)), opclass(email = "text_pattern_ops")))]
+```
+
+```sql
+CREATE INDEX "users_email_idx" ON "users" ("email" text_pattern_ops)
+```
+
+`text_pattern_ops` is not the type's default operator class, so introspection reports it back.
+The default class (`text_ops`, `int4_ops`, ...) is not reported, which is what keeps a plain
+`columns(email)` declaration converging instead of looking like a change on every push.
 
 ## Foreign keys
 
@@ -235,16 +330,18 @@ a check inside the `CREATE TABLE` text and MySQL reports a `CHECK_CLAUSE` it wil
 | `UNIQUE`, single column | Yes | Yes | Yes |
 | `UNIQUE`, composite | No | No | Yes |
 | Index, single column | Yes | Yes | Yes |
-| Index, composite | No | Yes | Yes |
-| Index access method | No | Yes | Yes |
+| Index, composite | Yes | Yes | Yes |
+| Index, expression | Yes | Yes | Yes |
+| Index operator class | Yes | Yes | Yes |
+| Index access method | Yes | Yes | Yes |
 | Partial index | No | No | Yes (PostgreSQL) |
 | Foreign key, single column | Yes | Yes | Yes |
 | Foreign key, composite | No | Yes | Yes |
 | `CHECK` | No | No | Yes |
 
-A table definition pushed from Rust therefore declares its keys, single-column uniques and indexes,
-and its single-column foreign keys. Everything else needs a hand-written `TableDef`, a `besu pull`
-snapshot or a migration.
+A table definition pushed from Rust therefore declares its keys, uniques (one column), indexes
+(composite, expression, operator class and access method), and its single-column foreign keys.
+Everything else needs a hand-written `TableDef`, a `besu pull` snapshot or a migration.
 
 ## Generated columns
 
@@ -285,10 +382,12 @@ converges against the `to_tsvector('english'::regconfig, bio)` PostgreSQL report
 
 ## Safety
 
-Adding an index, unique, foreign key or check is `Risky`: it validates existing rows. Changing an
-index's access method is reported as a drop plus a create, and dropping an index, unique or check
-is `Destructive`; dropping a foreign key is only `Risky`. Adding a generated column is `Safe`,
-because there is no value to invent: the database computes one for every row.
+Adding an index, unique, foreign key or check is `Risky`: it validates existing rows. Changing any
+part of an index — its key entries, an operator class, uniqueness, the access method or a
+predicate — is reported as a drop plus a create, because both statements use the same name.
+Dropping an index, unique or check is `Destructive`; dropping a foreign key is only `Risky`.
+Adding a generated column is `Safe`, because there is no value to invent: the database computes
+one for every row.
 
 ## Gotchas
 
@@ -301,9 +400,15 @@ because there is no value to invent: the database computes one for every row.
   than by name. Renaming a unique in a snapshot is not a change.
 - MySQL stores a single-column `UNIQUE` as an index named after the column and introspects it back
   onto the column; a unique index you name yourself stays an index.
-- An expression index, an index with `INCLUDE` columns and a PostgreSQL exclusion constraint are
-  invisible to the IR: introspection skips them, so `push` never drops one. So is an index using
-  `hash` or `spgist`, which has no `IndexKind`.
+- An index with `INCLUDE` columns and a PostgreSQL exclusion constraint are invisible to the IR:
+  introspection skips them, so `push` never drops one. So is an index using `hash` or `spgist`,
+  which has no `IndexKind`.
+- SQLite introspection reads an expression key part from the `CREATE INDEX` text in
+  `sqlite_master`. A partial index is still skipped, because the IR has no predicate for one on
+  SQLite, and an index whose expression cannot be matched to its key part is skipped rather than
+  reported as a smaller index.
+- MySQL introspects a functional index from `STATISTICS.EXPRESSION` and reports the expression in
+  MySQL's own backticked spelling; comparison folds identifier quoting away.
 - A `FULLTEXT` or `SPATIAL` index pushed to PostgreSQL becomes a GIN or GiST index, and a GIN,
   GiST or BRIN index pushed to MySQL or SQLite becomes a plain b-tree. Introspection reports the
   kind that is really there, so declare the kind the target database supports.

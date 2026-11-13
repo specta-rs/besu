@@ -11,7 +11,7 @@
 
 use besu::Driver;
 use besu::prelude::*;
-use besu::schema::Ddl;
+use besu::schema::{Ddl, IndexColumn};
 use besu_mysql::Sqlx;
 use sqlx::MySqlPool;
 
@@ -645,7 +645,7 @@ async fn secondary_indexes_round_trip() {
     let table = introspected.table("tags").unwrap();
     assert_eq!(table.indexes.len(), 1);
     assert_eq!(table.indexes[0].name, "tags_name_idx");
-    assert_eq!(table.indexes[0].columns, ["name"]);
+    assert_eq!(table.indexes[0].columns, [IndexColumn::column("name")]);
     assert!(!table.indexes[0].unique);
 }
 
