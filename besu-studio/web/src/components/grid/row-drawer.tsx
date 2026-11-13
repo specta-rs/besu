@@ -1,7 +1,6 @@
 import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
 import { KeyRound, Trash2, TriangleAlert } from "lucide-solid";
 import { cellText } from "../../lib/format";
-import { source } from "../../lib/source";
 import { useStudio } from "../../lib/store";
 import type { Column, Json } from "../../lib/types";
 import { Drawer, Modal, Spinner } from "../../lib/ui";
@@ -154,7 +153,7 @@ export function RowDrawer(props: RowDrawerProps): JSX.Element {
     setBusy(true);
     setMessage(null);
     try {
-      await source.update(props.table, key(), values);
+      await studio.client().update(props.table, key(), values);
       studio.toast("Row updated", "ok");
       studio.refresh();
       props.onClose();
@@ -170,7 +169,7 @@ export function RowDrawer(props: RowDrawerProps): JSX.Element {
     setBusy(true);
     setMessage(null);
     try {
-      await source.remove(props.table, key());
+      await studio.client().remove(props.table, key());
       studio.toast("Row deleted", "ok");
       studio.refresh();
       setConfirming(false);

@@ -1,7 +1,8 @@
 {
-  // The hosted build of the studio: a static demo bundle (`vite build --mode demo`)
-  // with fixture data, no Rust server and no API. `wrangler deploy` uploads `dist`
-  // as static assets only, so this Worker never runs code.
+  // The hosted copy of the studio: the same bundle the binary embeds, with no Rust
+  // server behind it. The page connects to a local `besu studio` and falls back to
+  // fixture data. `wrangler deploy` uploads `dist` as static assets only, so this
+  // Worker never runs code.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "besu-studio",
   "compatibility_date": "2025-12-31",

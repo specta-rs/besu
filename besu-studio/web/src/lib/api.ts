@@ -19,8 +19,8 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+async function request<T>(base: string, path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${base}${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
@@ -29,7 +29,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   const body = await response.text();
-  const parsed: unknown = body ? JSON.parse(body) : null;
+  let parsed: unknown = null;
+  try {
+    parsed = body ? JSON.parse(body) : null;
+  } catch {
+    // A studio server always answers with JSON. Anything else is a proxy, a
+    // stale service worker or the static host's SPA fallback, and the caller
+    // deserves to hear that rather than a parser message.
+    throw new ApiError(
+      `${path} did not answer with JSON — is that address a besu studio server?`,
+      response.status,
+    );
+  }
 
   if (!response.ok) {
     const message =
@@ -57,39 +68,48 @@ function queryString(query: RowQuery): string {
   return params.toString();
 }
 
-/** The client for a live `besu studio` server. */
-export const httpSource: DataSource = {
-  info: () => request("/api/info"),
-  schema: () => request<Schema>("/api/schema"),
+/**
+ * A client for one `besu studio` server.
+ *
+ * `base` is empty when the app was served by the server itself, and an origin
+ * such as `http://127.0.0.1:4983` when the hosted page connects to a local
+ * process.
+ */
+export function httpSource(base = ""): DataSource {
+  return {
+    info: () => request(base, "/api/info"),
+    schema: () => request<Schema>(base, "/api/schema"),
 
-  rows: (table, query) =>
-    request<RowsPage>(
-      `/api/tables/${encodeURIComponent(table)}/rows?${queryString(query)}`,
-    ),
+    rows: (table, query) =>
+      request<RowsPage>(
+        base,
+        `/api/tables/${encodeURIComponent(table)}/rows?${queryString(query)}`,
+      ),
 
-  insert: (table, values) =>
-    request<WriteResult>(`/api/tables/${encodeURIComponent(table)}/rows`, {
-      method: "POST",
-      body: JSON.stringify({ values }),
-    }),
+    insert: (table, values) =>
+      request<WriteResult>(base, `/api/tables/${encodeURIComponent(table)}/rows`, {
+        method: "POST",
+        body: JSON.stringify({ values }),
+      }),
 
-  update: (table, key, values) =>
-    request<WriteResult>(`/api/tables/${encodeURIComponent(table)}/rows`, {
-      method: "PATCH",
-      body: JSON.stringify({ key, values }),
-    }),
+    update: (table, key, values) =>
+      request<WriteResult>(base, `/api/tables/${encodeURIComponent(table)}/rows`, {
+        method: "PATCH",
+        body: JSON.stringify({ key, values }),
+      }),
 
-  remove: (table, key) =>
-    request<WriteResult>(`/api/tables/${encodeURIComponent(table)}/rows`, {
-      method: "DELETE",
-      body: JSON.stringify({ key }),
-    }),
+    remove: (table, key) =>
+      request<WriteResult>(base, `/api/tables/${encodeURIComponent(table)}/rows`, {
+        method: "DELETE",
+        body: JSON.stringify({ key }),
+      }),
 
-  query: (sql) =>
-    request<QueryResult>("/api/query", {
-      method: "POST",
-      body: JSON.stringify({ sql }),
-    }),
-};
+    query: (sql) =>
+      request<QueryResult>(base, "/api/query", {
+        method: "POST",
+        body: JSON.stringify({ sql }),
+      }),
+  };
+}
 
 export type { DataSource, Filter, Json, QueryResult, RowsPage, RowQuery, Schema };

@@ -24,9 +24,14 @@ mod assets;
 use axum::{
     Router,
     extract::Request,
+    http::{HeaderValue, Method, header},
+    middleware::Next,
+    response::Response,
     routing::{get, post},
 };
 use besu_any::AnyDatabase;
+use std::time::Duration;
+use tower_http::cors::CorsLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
@@ -72,6 +77,10 @@ pub async fn serve(
 /// - `POST /api/query` — one SQL statement, executed against the database,
 /// - everything else — the single-page application.
 ///
+/// The API answers CORS preflights from `https://studio.besu.specta.dev`, the
+/// hosted copy of the frontend, so that page can drive a studio running on the
+/// same machine. No other origin is allowed.
+///
 /// `db` must outlive the router logically rather than by reference: the value is cloned into
 /// the router's state, and every clone shares the underlying connection pool.
 pub fn router(db: AnyDatabase, connection: impl Into<String>) -> Router {
@@ -102,12 +111,60 @@ pub fn router(db: AnyDatabase, connection: impl Into<String>) -> Router {
         )
         .route("/api/query", post(api::query))
         .fallback(fallback)
+        .layer(cors())
+        .layer(axum::middleware::from_fn(allow_private_network))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(state)
+}
+
+/// The origins allowed to read this server from a browser.
+///
+/// The hosted frontend is a static page that connects to a local studio, which
+/// makes this a cross-origin request. Only those two origins are allowed;
+/// everything else keeps the default, which is to refuse. `Vary: Origin` comes
+/// with it, so a cache cannot serve one origin's headers to another.
+fn cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin([
+            HeaderValue::from_static("https://studio.besu.specta.dev"),
+            // The Vite dev server, for working on the frontend itself.
+            HeaderValue::from_static("http://localhost:5173"),
+            HeaderValue::from_static("http://127.0.0.1:5173"),
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+        .max_age(Duration::from_secs(600))
+}
+
+/// Answer Chrome's private-network preflight.
+///
+/// A page served over HTTPS may only reach `127.0.0.1` after a preflight that
+/// asks for permission with `Access-Control-Request-Private-Network`; the
+/// answer has to be explicit or the request is blocked before it is sent.
+async fn allow_private_network(request: Request, next: Next) -> Response {
+    let requested = request
+        .headers()
+        .get("access-control-request-private-network")
+        .is_some_and(|value| value == "true");
+
+    let mut response = next.run(request).await;
+    if requested {
+        response.headers_mut().insert(
+            "access-control-allow-private-network",
+            HeaderValue::from_static("true"),
+        );
+    }
+    response
 }
 
 /// Serve an asset, or the app shell for a client-side route.

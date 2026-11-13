@@ -14,8 +14,9 @@ besu studio 0.1.0 listening on http://127.0.0.1:4983
 `--allow-remote` binds every interface; it is off by default because the studio runs arbitrary
 SQL and has no authentication. Use it against a development database, never production.
 
-The hosted demo at [studio.besu.specta.dev](https://studio.besu.specta.dev) is the same UI
-against fixture data, for looking around without a database.
+The hosted copy at [studio.besu.specta.dev](https://studio.besu.specta.dev) is the same UI
+without a server: it asks for the port a local `besu studio` is listening on and drives that.
+Fixture data is there as a second option, for looking around without a database.
 
 ## Frontend
 
@@ -28,7 +29,7 @@ pnpm --dir web dev     # http://localhost:5173, proxying /api to :4983
 pnpm --dir web build   # rewrites web/dist, which is committed
 ```
 
-`pnpm --dir web deploy` builds the demo bundle and deploys it to Cloudflare Workers.
+`pnpm --dir web deploy` builds the bundle and publishes it to Cloudflare Workers.
 
 ## Documentation
 

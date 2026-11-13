@@ -66,6 +66,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         );
     } else {
         println!("It is bound to loopback only; pass --allow-remote to expose it.");
+        println!();
+        println!("https://studio.besu.specta.dev can connect to it, if you would rather use");
+        println!("that copy of the frontend than the one served here.");
     }
 
     besu_studio::serve(listener, db, args.database)

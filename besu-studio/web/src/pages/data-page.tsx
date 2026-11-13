@@ -21,7 +21,6 @@ import {
   writeSession,
 } from "../components/grid/session";
 import { download, toCsv } from "../lib/format";
-import { source } from "../lib/source";
 import { useStudio } from "../lib/store";
 import type { Column, Filter, Json, Sort } from "../lib/types";
 import { EmptyState, Spinner } from "../lib/ui";
@@ -79,7 +78,7 @@ function TableBrowser(props: { table: string }): JSX.Element {
       revision: studio.revision(),
     }),
     (input) =>
-      source.rows(input.table, {
+      studio.client().rows(input.table, {
         limit: input.limit,
         offset: input.offset,
         sort: input.sort.length > 0 ? input.sort : undefined,

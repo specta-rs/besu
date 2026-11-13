@@ -13,14 +13,13 @@ import { HistoryMenu } from "../components/console/history-menu";
 import { SqlEditor } from "../components/console/editor";
 import { ResultGrid } from "../components/console/result-grid";
 import { duration } from "../lib/format";
-import { source } from "../lib/source";
 import { useStudio } from "../lib/store";
 import type { QueryResult } from "../lib/types";
 import { EmptyState, Spinner } from "../lib/ui";
 
 /**
  * The statements the hosted demo answers. Keep in sync with the canned queries
- * in `src/demo/source.ts` — the fixtures are only imported by the demo build, so
+ * in `src/demo/source.ts` — the fixtures are imported by the demo source, so
  * this list is duplicated rather than pulling the demo into the live bundle.
  */
 const DEMO_EXAMPLES = [
@@ -107,7 +106,7 @@ function Affected(props: { result: QueryResult }) {
 export function SqlPage(): JSX.Element {
   const studio = useStudio();
 
-  const [sql, setSql] = createSignal(studio.isDemo ? (DEMO_EXAMPLES[0]?.sql ?? "") : "");
+  const [sql, setSql] = createSignal(studio.isDemo() ? (DEMO_EXAMPLES[0]?.sql ?? "") : "");
   const [result, setResult] = createSignal<QueryResult | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [running, setRunning] = createSignal(false);
@@ -136,7 +135,7 @@ export function SqlPage(): JSX.Element {
 
     const started = performance.now();
     try {
-      const output = await source.query(statement);
+      const output = await studio.client().query(statement);
       if (id !== ticket) return;
       setResult(output);
       setLastDuration(output.duration_ms ?? Math.round(performance.now() - started));
@@ -243,7 +242,7 @@ export function SqlPage(): JSX.Element {
           </span>
         </Show>
 
-        <Show when={studio.isDemo}>
+        <Show when={studio.isDemo()}>
           <span class="ml-1 hidden text-[11px] text-ink-3 md:inline">
             demo · canned queries only
           </span>
@@ -263,7 +262,7 @@ export function SqlPage(): JSX.Element {
         </div>
       </header>
 
-      <Show when={studio.isDemo}>
+      <Show when={studio.isDemo()}>
         <div class="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-accent-soft px-3 py-1.5 text-[11.5px] text-ink-2">
           <span class="flex items-center gap-1.5 font-medium text-ink">
             <Terminal size={12} class="text-accent" />

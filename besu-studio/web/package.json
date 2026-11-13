@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "deploy": "vite build --mode demo && wrangler deploy"
+    "deploy": "vite build && wrangler deploy"
   },
   "dependencies": {
     "lucide-solid": "^1.72.0",

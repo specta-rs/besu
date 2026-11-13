@@ -324,8 +324,9 @@ a primary key refuses an update rather than guessing which row was meant.
 The frontend is a Vite + SolidJS application in `besu-studio/web`. It is built to
 `web/dist`, committed, and embedded into the binary by a build script, so `cargo build` needs
 no Node toolchain and the published crate serves a working UI with no CDN and no asset
-directory to lose. The same bundle is deployed to Cloudflare as a read-only demo, with the
-HTTP client swapped for fixture data.
+directory to lose. The same bundle is deployed to Cloudflare, where it is a client for a local
+process rather than a server: the API allows that origin and answers Chrome's private-network
+preflight, which is what an HTTPS page needs before it may read `127.0.0.1`.
 
 The SQL console reads a statement's result through two passes: a `LIMIT 1` probe, whose row
 gives the result column names through `Driver::column_names`, then the same statement wrapped

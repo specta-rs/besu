@@ -141,14 +141,17 @@ const matches = (column: Column, value: Json, filter: Filter): boolean => {
   }
 };
 
+/** What the connection card shows while the fixtures are in use. */
+export const DEMO_INFO: ConnectionInfo = {
+  dialect: "sqlite",
+  database: "demo.db",
+  version: "0.1.0",
+  read_only: false,
+};
+
 export const demoSource: DataSource = {
   async info(): Promise<ConnectionInfo> {
-    return {
-      dialect: "sqlite",
-      database: "demo.db",
-      version: "0.1.0",
-      read_only: false,
-    };
+    return DEMO_INFO;
   },
 
   async schema() {

@@ -2,14 +2,11 @@ import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
 
-// The demo build is what `studio.besu.specta.dev` serves: a static bundle with
-// fixture data instead of the Rust API. Everything else proxies `/api` to the
-// local server so `pnpm dev` is a normal Vite workflow.
-export default defineConfig(({ mode }) => ({
+// One bundle serves every deployment: the hosted page connects to a local
+// `besu studio` over HTTP, and the binary serves the same files from its own
+// origin. `pnpm dev` proxies `/api` so a local server is one command away.
+export default defineConfig(() => ({
   plugins: [solid(), tailwindcss()],
-  define: {
-    __DEMO__: JSON.stringify(mode === "demo"),
-  },
   server: {
     port: 5173,
     proxy: {

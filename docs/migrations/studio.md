@@ -71,20 +71,29 @@ are kept for recall; in a browser, they survive navigation.
 | `⌘↵` / `Ctrl ↵` | Run the statement (SQL console) |
 | `↑` `↓` | Recall a previous statement (SQL console) |
 
-## The hosted demo
+## The hosted frontend
 
-[studio.besu.specta.dev](https://studio.besu.specta.dev) is the same frontend against fixture
-data — three tables generated from a real SQLite database. It needs no server: the demo build
-swaps the HTTP client for an in-memory one, so browsing, filtering and the editors all work and
-nothing leaves the page. The SQL console explains that it needs a local process, because
-arbitrary SQL cannot run without a database behind it.
+[studio.besu.specta.dev](https://studio.besu.specta.dev) serves the same frontend without a
+database behind it. It asks for the port `besu studio` is running on, probes
+`http://127.0.0.1:<port>/api/info`, and then drives that local server directly — the hosted page
+is only the UI, and every row, write and query reaches the database through the process on your
+machine.
+
+The server allows that origin (and the Vite dev server) in its CORS layer, and answers Chrome's
+private-network preflight, which is what lets an HTTPS page reach loopback at all. Nothing else
+is allowed: a different site cannot read this studio, and the server is still loopback-only.
+
+If no server answers, the page says so and shows the command to start one. "Explore with demo
+data" is a quiet second option: three fixture tables in memory, where browsing, filtering and
+the editors work, writes never leave the page, and the SQL console explains that it needs a
+local process.
 
 ## How it ships
 
-The frontend is Vite + SolidJS + Tailwind in `besu-studio/web`. It is built to
-`besu-studio/web/dist`, committed, and embedded into the binary by `besu-studio/build.rs`, so
-`cargo build` needs no Node toolchain and the published crate serves a working UI. The server
-answers:
+The frontend is Vite + SolidJS + Tailwind in `besu-studio/web`. It is built once to
+`besu-studio/web/dist` and committed; `besu-studio/build.rs` embeds that directory into the
+binary, so `cargo build` needs no Node toolchain, and the same files are uploaded to Cloudflare
+for the hosted copy. The server answers:
 
 | Route | Purpose |
 | --- | --- |

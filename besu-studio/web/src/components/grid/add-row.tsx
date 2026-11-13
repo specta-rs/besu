@@ -1,5 +1,4 @@
 import { For, Show, createSignal, type JSX } from "solid-js";
-import { source } from "../../lib/source";
 import { useStudio } from "../../lib/store";
 import type { Column, Json } from "../../lib/types";
 import { Modal, Spinner } from "../../lib/ui";
@@ -95,7 +94,7 @@ export function AddRowModal(props: AddRowModalProps): JSX.Element {
     setBusy(true);
     setMessage(null);
     try {
-      await source.insert(props.table, values);
+      await studio.client().insert(props.table, values);
       studio.toast("Row added", "ok");
       studio.refresh();
       props.onClose();

@@ -16,6 +16,7 @@ import {
   Sun,
   Table2,
   Terminal,
+  Unplug,
 } from "lucide-solid";
 import { href, linkClick, navigate, route } from "../../lib/router";
 import type { Route } from "../../lib/router";
@@ -45,7 +46,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
   const views = () => studio.schema()?.views ?? [];
   const database = () => studio.info()?.database ?? "besu studio";
   const dialect = () => {
-    if (studio.info.loading) return "connecting…";
+    if (studio.connecting()) return "connecting…";
     return studio.info()?.dialect ?? "not connected";
   };
 
@@ -228,7 +229,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
               >
                 {database()}
               </span>
-              <Show when={studio.isDemo}>
+              <Show when={studio.isDemo()}>
                 <span class="shrink-0 rounded-full bg-accent-soft px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.08em] text-accent">
                   demo
                 </span>
@@ -236,6 +237,22 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             </div>
             <p class="truncate text-[11px] text-ink-3">{dialect()}</p>
           </div>
+          <button
+            class="btn btn-ghost btn-icon shrink-0"
+            onClick={() => studio.disconnect()}
+            aria-label={
+              studio.isDemo()
+                ? "Leave the demo and connect a database"
+                : "Disconnect and choose another database"
+            }
+            title={
+              studio.isDemo()
+                ? "Leave the demo and connect a database"
+                : "Disconnect and choose another database"
+            }
+          >
+            <Unplug size={12} aria-hidden="true" />
+          </button>
         </div>
 
         <div class="shrink-0 px-2 pt-2 pb-1">

@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Table2,
 } from "lucide-solid";
+import { ConnectPage } from "./pages/connect-page";
 import { CommandPalette, rememberRecent } from "./components/shell/palette";
 import { Sidebar } from "./components/shell/sidebar";
 import { Toasts } from "./components/shell/toasts";
@@ -24,6 +25,7 @@ import { TopBar } from "./components/shell/topbar";
 import { DataPage } from "./pages/data-page";
 import { SchemaPage } from "./pages/schema-page";
 import { SqlPage } from "./pages/sql-page";
+import { createConnection } from "./lib/connection";
 import { href, linkClick, navigate, route } from "./lib/router";
 import { createStudioState, StudioProvider, useStudio } from "./lib/store";
 import type { Table } from "./lib/types";
@@ -65,7 +67,7 @@ function Welcome(): JSX.Element {
   return (
     <div class="h-full overflow-y-auto">
       <div class="mx-auto w-full max-w-[1000px] px-6 py-8 sm:px-8">
-        <Show when={studio.isDemo}>
+        <Show when={studio.isDemo()}>
           <section
             class="mb-6 flex items-start gap-3 rounded-[10px] border border-accent/35 bg-accent-soft px-4 py-3"
             aria-label="Demo notice"
@@ -390,12 +392,28 @@ function Studio(): JSX.Element {
   );
 }
 
+/** The connect screen until there is a database to show. */
+function Shell(): JSX.Element {
+  const studio = useStudio();
+
+  return (
+    <Show when={studio.connected()} fallback={<ConnectPage />}>
+      <Studio />
+    </Show>
+  );
+}
+
 export function App() {
-  const studio = createStudioState();
+  const connection = createConnection();
+  const studio = createStudioState(connection);
+
+  onMount(() => {
+    void connection.start();
+  });
 
   return (
     <StudioProvider value={studio}>
-      <Studio />
+      <Shell />
     </StudioProvider>
   );
 }
