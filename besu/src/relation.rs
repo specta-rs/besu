@@ -75,17 +75,75 @@
 //! level gets an empty `Vec` there. A statement is only sent when the level above it
 //! produced at least one key.
 //!
+//! # Per-parent limits and ordering
+//!
+//! A relation can order its children and keep at most `n` of them *per parent*:
+//!
+//! ```ignore
+//! let users: Vec<(User, Vec<Post>)> = db
+//!     .select(users)
+//!     .with(
+//!         has_many(users.id, posts.author_id)
+//!             .order_by(posts.created_at.desc())
+//!             .limit(3),
+//!     )
+//!     .await?;
+//! ```
+//!
+//! The limit is not a global `LIMIT`: every parent gets its own `ROW_NUMBER()` partition, so
+//! three parents with ten posts each receive three posts each, not three posts in total.
+//!
+//! Ordering a has-many on its own is still the plain child statement with an `ORDER BY`
+//! appended. A limit adds a derived table, because a window function cannot be used in the
+//! `WHERE` that filters it:
+//!
+//! ```sql
+//! SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id"
+//!   FROM (
+//!         SELECT "posts"."id", "posts"."title", "posts"."author_id",
+//!                ROW_NUMBER() OVER (
+//!                    PARTITION BY "posts"."author_id"
+//!                    ORDER BY "posts"."created_at" DESC
+//!                ) AS "besu_row"
+//!           FROM "posts" WHERE ("posts"."author_id" IN ($1, $2))
+//!        ) AS "posts"
+//!  WHERE ("posts"."besu_row" <= $3)
+//!  ORDER BY "posts"."besu_row" ASC;
+//! ```
+//!
+//! Still one statement for the whole level, not one per parent, and the same statement shape
+//! works on PostgreSQL, MySQL 8 and SQLite 3.25+. An inner ordered `LIMIT` would be wrong for
+//! every parent but one, and a lateral join is not portable.
+//!
+//! A limit with no order falls back to the child table's primary key, so the rows kept are
+//! stable rather than whatever the database returned first. It is still worth ordering by
+//! the column you actually want: the fallback says "these rows" deterministically, not "the
+//! right rows".
+//!
+//! A many-to-many ranks after the join, because the order names a child column and the join
+//! rows themselves have no order. Ordering or a limit therefore collapses the join and child
+//! statements into one statement that numbers the joined rows per parent and then joins the
+//! child table again to project the model; an unconfigured many-to-many keeps the cheaper
+//! join + child pair. Each nested level carries its own order and limit independently.
+//!
+//! An unconfigured relation stays `Copy` and renders exactly the SQL it did before. Adding an
+//! order or a limit replaces the configuration with [`PerParent`], which owns the order
+//! terms, so the configured relation is `Clone` but not `Copy`.
+//!
 //! # What is not modelled
 //!
 //! A relation is described entirely by the columns it joins on, so the schema layer does not
-//! change: there is no relation list on [`TableDef`], and no lookup by name. Per-parent
-//! limits and ordering, and inserting a parent and its children together, are not part of
-//! this API; they need a different statement shape rather than another column pair. There is
-//! no `belongs_to` (a child does not load its parent), and a many-to-many yields the child
-//! models rather than the join rows, so a join table with data of its own is queried directly.
+//! change: there is no relation list on [`TableDef`], and no lookup by name. Inserting a
+//! parent and its children together is not part of this API either: the insert builder is
+//! generic over an executor, which has no portable way to begin a transaction, and MySQL has
+//! no `RETURNING` to hand back the generated parent key. Write the two inserts inside
+//! [`Database::transaction`](crate::Database::transaction) instead. There is no `belongs_to`
+//! (a child does not load its parent), and a many-to-many yields the child models rather than
+//! the join rows, so a join table with data of its own is queried directly.
 //!
-//! Children arrive in the order the database returned them. Add an `ORDER BY` to the child
-//! statement by hand if the order matters — this API deliberately does not invent one.
+//! An unconfigured child statement has no `ORDER BY`, so the order is the database's. Add
+//! [`HasMany::order_by`] or [`ManyToMany::order_by`] when it matters; the API does not invent
+//! an order you did not ask for.
 //!
 //! # What the compiler checks
 //!
@@ -240,10 +298,77 @@ use alloc::vec::Vec;
 
 use besu_core::{Decode, Dialect, DialectOf, Driver, ErrorOf, Executor, Sql, TableDef, Value};
 
-use crate::expr::{ExprKind, Operand};
-use crate::query::{Select, SelectQuery};
+use crate::expr::{ExprKind, IntoOrder, Operand, Order, OrderClause, Window, row_number};
+use crate::query::{DerivedSource, From, JoinClause, JoinKind, QueryBody, Select, SelectQuery};
 use crate::table::Table;
 use crate::types::{Column, NonNull, SqlType};
+
+/// The name the per-parent rank is given in the derived table.
+///
+/// It is an internal column: the outer statement filters on it and orders by it, and the
+/// result never exposes it. A child column with this exact name would collide, which is the
+/// one thing to avoid if you name columns after Besu's internals.
+const RANK_COLUMN: &str = "besu_row";
+
+/// The alias of the derived table a limited many-to-many ranks inside.
+const RANK_ALIAS: &str = "besu_ranked";
+
+/// How a relation orders and limits the children of each parent.
+///
+/// The unit type is the unconfigured state — no `ORDER BY` and no limit — which is what keeps
+/// a relation declared with [`has_many`] or [`many_to_many`] `Copy` and free to construct.
+/// [`PerParent`] is the configured state that [`HasMany::order_by`], [`HasMany::limit`],
+/// [`ManyToMany::order_by`] and [`ManyToMany::limit`] produce.
+///
+/// This is public because it appears in the type of a configured relation, but it is not
+/// meant to be implemented outside this crate.
+pub trait RelationConfig: Clone + Sync + 'static {
+    /// The `ORDER BY` terms, in the order they were added.
+    fn order_by(&self) -> &[OrderClause];
+
+    /// The maximum number of children each parent receives, if one was set.
+    fn limit(&self) -> Option<i64>;
+}
+
+impl RelationConfig for () {
+    fn order_by(&self) -> &[OrderClause] {
+        &[]
+    }
+
+    fn limit(&self) -> Option<i64> {
+        None
+    }
+}
+
+/// Per-parent ordering and limiting for a relation.
+///
+/// Created by [`HasMany::order_by`], [`HasMany::limit`], [`ManyToMany::order_by`] or
+/// [`ManyToMany::limit`]. A relation carrying this configuration is no longer `Copy` (it owns
+/// its order terms), but it can still be cloned:
+///
+/// ```ignore
+/// let recent = has_many(users.id, posts.author_id)
+///     .order_by(posts.created_at.desc())
+///     .limit(3);
+///
+/// db.select(users).with(recent.clone()).await?;
+/// db.select(users).with(recent).await?;
+/// ```
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PerParent {
+    order_by: Vec<OrderClause>,
+    limit: Option<i64>,
+}
+
+impl RelationConfig for PerParent {
+    fn order_by(&self) -> &[OrderClause] {
+        &self.order_by
+    }
+
+    fn limit(&self) -> Option<i64> {
+        self.limit
+    }
+}
 
 /// A has-many relation: one parent row owns any number of child rows.
 ///
@@ -260,28 +385,41 @@ use crate::types::{Column, NonNull, SqlType};
 ///
 /// `K` is the relation's own children, the unit type when there are none. See
 /// [`HasMany::with`].
-pub struct HasMany<P, C, S: SqlType, K = ()> {
+pub struct HasMany<P, C, S: SqlType, K = (), Cfg = ()> {
     parent: &'static TableDef,
     parent_column: &'static str,
     child: &'static TableDef,
     child_column: &'static str,
     children: K,
+    /// How many children each parent gets, and in what order.
+    ///
+    /// `()` is the unconfigured state, so a relation built with [`has_many`] stays `Copy`.
+    /// The builder methods replace it with [`PerParent`].
+    config: Cfg,
     phantom: PhantomData<fn() -> (P, C, S)>,
 }
 
-impl<P, C, S: SqlType, K> HasMany<P, C, S, K> {
+impl<P, C, S: SqlType, K, Cfg> HasMany<P, C, S, K, Cfg> {
     /// The parent key, as a renderable column reference.
     fn parent_ref(&self) -> ExprKind {
         column_ref(self.parent.name, self.parent_column)
     }
 
-    /// The child foreign key, as a renderable column reference.
-    fn child_ref(&self) -> ExprKind {
-        column_ref(self.child.name, self.child_column)
+    /// Move the same relation under a different configuration.
+    fn map_config<C2>(self, config: C2) -> HasMany<P, C, S, K, C2> {
+        HasMany {
+            parent: self.parent,
+            parent_column: self.parent_column,
+            child: self.child,
+            child_column: self.child_column,
+            children: self.children,
+            config,
+            phantom: PhantomData,
+        }
     }
 }
 
-impl<P, C, S: SqlType, K: Clone> Clone for HasMany<P, C, S, K> {
+impl<P, C, S: SqlType, K: Clone, Cfg: Clone> Clone for HasMany<P, C, S, K, Cfg> {
     fn clone(&self) -> Self {
         Self {
             parent: self.parent,
@@ -289,14 +427,15 @@ impl<P, C, S: SqlType, K: Clone> Clone for HasMany<P, C, S, K> {
             child: self.child,
             child_column: self.child_column,
             children: self.children.clone(),
+            config: self.config.clone(),
             phantom: PhantomData,
         }
     }
 }
 
-impl<P, C, S: SqlType, K: Copy> Copy for HasMany<P, C, S, K> {}
+impl<P, C, S: SqlType, K: Copy, Cfg: Copy> Copy for HasMany<P, C, S, K, Cfg> {}
 
-impl<P, C, S: SqlType, K> fmt::Debug for HasMany<P, C, S, K> {
+impl<P, C, S: SqlType, K, Cfg> fmt::Debug for HasMany<P, C, S, K, Cfg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HasMany")
             .field(
@@ -311,7 +450,7 @@ impl<P, C, S: SqlType, K> fmt::Debug for HasMany<P, C, S, K> {
     }
 }
 
-impl<P, C, S> HasMany<P, C, S, ()>
+impl<P, C, S> HasMany<P, C, S, (), ()>
 where
     P: Table,
     C: Table,
@@ -344,8 +483,102 @@ where
             child: self.child,
             child_column: self.child_column,
             children: Nested(children),
+            config: (),
             phantom: PhantomData,
         }
+    }
+}
+
+impl<P, C, S> HasMany<P, C, S, (), PerParent>
+where
+    P: Table,
+    C: Table,
+    S: SqlType,
+{
+    /// Attach a relation for the child table, keeping the per-parent configuration.
+    ///
+    /// This mirrors [`HasMany::with`] for a relation that orders or limits its children:
+    ///
+    /// ```ignore
+    /// let authors: Vec<(User, Vec<(Post, Vec<Comment>)>)> = db
+    ///     .select(users)
+    ///     .with(
+    ///         has_many(users.id, posts.author_id)
+    ///             .order_by(posts.created_at.desc())
+    ///             .limit(3)
+    ///             .with(has_many(posts.id, comments.post_id).limit(2)),
+    ///     )
+    ///     .await?;
+    /// ```
+    ///
+    /// The limit applies to this level only; the inner relation carries its own.
+    pub fn with<N>(self, children: N) -> HasMany<P, C, S, Nested<N>, PerParent>
+    where
+        N: Relation<Parent = C>,
+    {
+        HasMany {
+            parent: self.parent,
+            parent_column: self.parent_column,
+            child: self.child,
+            child_column: self.child_column,
+            children: Nested(children),
+            config: self.config,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<P, C, S: SqlType, K> HasMany<P, C, S, K, ()> {
+    /// Order each parent's children, and start a per-parent configuration.
+    ///
+    /// ```ignore
+    /// let users: Vec<(User, Vec<Post>)> = db
+    ///     .select(users)
+    ///     .with(has_many(users.id, posts.author_id).order_by(posts.created_at.desc()))
+    ///     .await?;
+    /// ```
+    ///
+    /// Ordering alone renders a plain `ORDER BY` on the child statement. Combine it with
+    /// [`HasMany::limit`] and the two become a windowed statement instead.
+    pub fn order_by<O: IntoOrder>(self, order: O) -> HasMany<P, C, S, K, PerParent> {
+        let mut config = PerParent::default();
+        config.order_by.push(order.into_order());
+        self.map_config(config)
+    }
+
+    /// Keep at most `limit` children for each parent.
+    ///
+    /// This is per parent, not a global limit: every parent gets its own `ROW_NUMBER()`
+    /// partition and the first `limit` rows of it. A parent with fewer children keeps all of
+    /// them, and a parent with none is still present with an empty `Vec`.
+    ///
+    /// ```ignore
+    /// db.select(users).with(has_many(users.id, posts.author_id).limit(3))
+    /// ```
+    ///
+    /// Without an explicit [`HasMany::order_by`], the children are ordered by the child
+    /// table's primary key, so the rows kept are stable rather than whatever the database
+    /// happened to return. The limit is not arbitrary, but it is also not meaningful until
+    /// you say which children you want — add an order in almost every real use.
+    pub fn limit(self, limit: i64) -> HasMany<P, C, S, K, PerParent> {
+        self.map_config(PerParent {
+            order_by: Vec::new(),
+            limit: Some(limit),
+        })
+    }
+}
+
+impl<P, C, S: SqlType, K> HasMany<P, C, S, K, PerParent> {
+    /// Add another `ORDER BY` term for each parent's children.
+    pub fn order_by<O: IntoOrder>(mut self, order: O) -> Self {
+        self.config.order_by.push(order.into_order());
+        self
+    }
+
+    /// Replace the per-parent limit.
+    pub fn limit(mut self, limit: i64) -> Self {
+        self.config.limit = Some(limit);
+        self
     }
 }
 
@@ -381,6 +614,7 @@ where
         child: C::DEF,
         child_column: child.name(),
         children: (),
+        config: (),
         phantom: PhantomData,
     }
 }
@@ -394,7 +628,7 @@ where
 /// `P` is the parent table, `J` the join table, `C` the child table, `S` the parent-side key
 /// type and `T` the child-side key type. `K` is the relation's own children, `()` when there
 /// are none. See [`ManyToMany::with`].
-pub struct ManyToMany<P, J, C, S: SqlType, T: SqlType, K = ()> {
+pub struct ManyToMany<P, J, C, S: SqlType, T: SqlType, K = (), Cfg = ()> {
     parent: &'static TableDef,
     parent_column: &'static str,
     join: &'static TableDef,
@@ -403,10 +637,15 @@ pub struct ManyToMany<P, J, C, S: SqlType, T: SqlType, K = ()> {
     child: &'static TableDef,
     child_column: &'static str,
     children: K,
+    /// How many children each parent gets, and in what order.
+    ///
+    /// `()` is the unconfigured state, so a relation built with [`many_to_many`] stays
+    /// `Copy`. The builder methods replace it with [`PerParent`].
+    config: Cfg,
     phantom: PhantomData<fn() -> (P, J, C, S, T)>,
 }
 
-impl<P, J, C, S: SqlType, T: SqlType, K> ManyToMany<P, J, C, S, T, K> {
+impl<P, J, C, S: SqlType, T: SqlType, K, Cfg> ManyToMany<P, J, C, S, T, K, Cfg> {
     fn parent_ref(&self) -> ExprKind {
         column_ref(self.parent.name, self.parent_column)
     }
@@ -419,12 +658,26 @@ impl<P, J, C, S: SqlType, T: SqlType, K> ManyToMany<P, J, C, S, T, K> {
         column_ref(self.join.name, self.join_child_column)
     }
 
-    fn child_ref(&self) -> ExprKind {
-        column_ref(self.child.name, self.child_column)
+    /// Move the same relation under a different configuration.
+    fn map_config<C2>(self, config: C2) -> ManyToMany<P, J, C, S, T, K, C2> {
+        ManyToMany {
+            parent: self.parent,
+            parent_column: self.parent_column,
+            join: self.join,
+            join_parent_column: self.join_parent_column,
+            join_child_column: self.join_child_column,
+            child: self.child,
+            child_column: self.child_column,
+            children: self.children,
+            config,
+            phantom: PhantomData,
+        }
     }
 }
 
-impl<P, J, C, S: SqlType, T: SqlType, K: Clone> Clone for ManyToMany<P, J, C, S, T, K> {
+impl<P, J, C, S: SqlType, T: SqlType, K: Clone, Cfg: Clone> Clone
+    for ManyToMany<P, J, C, S, T, K, Cfg>
+{
     fn clone(&self) -> Self {
         Self {
             parent: self.parent,
@@ -435,14 +688,18 @@ impl<P, J, C, S: SqlType, T: SqlType, K: Clone> Clone for ManyToMany<P, J, C, S,
             child: self.child,
             child_column: self.child_column,
             children: self.children.clone(),
+            config: self.config.clone(),
             phantom: PhantomData,
         }
     }
 }
 
-impl<P, J, C, S: SqlType, T: SqlType, K: Copy> Copy for ManyToMany<P, J, C, S, T, K> {}
+impl<P, J, C, S: SqlType, T: SqlType, K: Copy, Cfg: Copy> Copy
+    for ManyToMany<P, J, C, S, T, K, Cfg>
+{
+}
 
-impl<P, J, C, S: SqlType, T: SqlType, K> fmt::Debug for ManyToMany<P, J, C, S, T, K> {
+impl<P, J, C, S: SqlType, T: SqlType, K, Cfg> fmt::Debug for ManyToMany<P, J, C, S, T, K, Cfg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ManyToMany")
             .field(
@@ -464,7 +721,7 @@ impl<P, J, C, S: SqlType, T: SqlType, K> fmt::Debug for ManyToMany<P, J, C, S, T
     }
 }
 
-impl<P, J, C, S, T> ManyToMany<P, J, C, S, T, ()>
+impl<P, J, C, S, T> ManyToMany<P, J, C, S, T, (), ()>
 where
     P: Table,
     J: Table,
@@ -489,8 +746,91 @@ where
             child: self.child,
             child_column: self.child_column,
             children: Nested(children),
+            config: (),
             phantom: PhantomData,
         }
+    }
+}
+
+impl<P, J, C, S, T> ManyToMany<P, J, C, S, T, (), PerParent>
+where
+    P: Table,
+    J: Table,
+    C: Table,
+    S: SqlType,
+    T: SqlType,
+{
+    /// Attach a relation for the child table, keeping the per-parent configuration.
+    ///
+    /// The limit applies to the children of the join table, after the join: one child may be
+    /// reachable through several join rows, and the rank partitions by the parent side of the
+    /// join table.
+    pub fn with<N>(self, children: N) -> ManyToMany<P, J, C, S, T, Nested<N>, PerParent>
+    where
+        N: Relation<Parent = C>,
+    {
+        ManyToMany {
+            parent: self.parent,
+            parent_column: self.parent_column,
+            join: self.join,
+            join_parent_column: self.join_parent_column,
+            join_child_column: self.join_child_column,
+            child: self.child,
+            child_column: self.child_column,
+            children: Nested(children),
+            config: self.config,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<P, J, C, S: SqlType, T: SqlType, K> ManyToMany<P, J, C, S, T, K, ()> {
+    /// Order each parent's children, and start a per-parent configuration.
+    ///
+    /// ```ignore
+    /// let posts: Vec<(Post, Vec<Tag>)> = db
+    ///     .select(posts)
+    ///     .with(TAGS.order_by(tags.name.asc()))
+    ///     .await?;
+    /// ```
+    ///
+    /// Ordering switches to the ranked statement, because the join rows have no order of
+    /// their own: the rank is what carries the child's order back to each parent. An
+    /// unconfigured many-to-many keeps the cheaper join + child pair.
+    pub fn order_by<O: IntoOrder>(self, order: O) -> ManyToMany<P, J, C, S, T, K, PerParent> {
+        let mut config = PerParent::default();
+        config.order_by.push(order.into_order());
+        self.map_config(config)
+    }
+
+    /// Keep at most `limit` children for each parent.
+    ///
+    /// The rank is computed after the join, partitioned by the join table's parent key, so
+    /// it is per parent rather than a global row limit. Without an explicit
+    /// [`ManyToMany::order_by`], children are ordered by the child table's primary key.
+    ///
+    /// A duplicated `(parent, child)` join row still counts against the limit here, because
+    /// the rank is assigned before duplicates are folded; for a unique join table — the usual
+    /// case — this never matters.
+    pub fn limit(self, limit: i64) -> ManyToMany<P, J, C, S, T, K, PerParent> {
+        self.map_config(PerParent {
+            order_by: Vec::new(),
+            limit: Some(limit),
+        })
+    }
+}
+
+impl<P, J, C, S: SqlType, T: SqlType, K> ManyToMany<P, J, C, S, T, K, PerParent> {
+    /// Add another `ORDER BY` term for each parent's children.
+    pub fn order_by<O: IntoOrder>(mut self, order: O) -> Self {
+        self.config.order_by.push(order.into_order());
+        self
+    }
+
+    /// Replace the per-parent limit.
+    pub fn limit(mut self, limit: i64) -> Self {
+        self.config.limit = Some(limit);
+        self
     }
 }
 
@@ -533,6 +873,7 @@ where
         child: C::DEF,
         child_column: child.name(),
         children: (),
+        config: (),
         phantom: PhantomData,
     }
 }
@@ -630,8 +971,12 @@ pub trait RelationChildren<C: Table>: Sync + 'static {
     /// The payload attached to one child row.
     type Item: Send + 'static;
 
-    /// The column appended to the child statement for the next level, if any.
-    fn link(&self) -> Option<ExprKind>;
+    /// The column appended to the child statement for the next level, if any: its name and a
+    /// renderable reference.
+    ///
+    /// The name is separate from the expression because the windowed statement projects the
+    /// column from a derived table, where a reference to the child table is no longer valid.
+    fn link(&self) -> Option<(&'static str, ExprKind)>;
 
     /// Combine a child model with the next level's payloads for it.
     fn assemble(&self, model: C::Model, nested: Self::Nested) -> Self::Item;
@@ -675,7 +1020,7 @@ where
     type Nested = ();
     type Item = C::Model;
 
-    fn link(&self) -> Option<ExprKind> {
+    fn link(&self) -> Option<(&'static str, ExprKind)> {
         None
     }
 
@@ -728,8 +1073,16 @@ where
     type Nested = Vec<N::Item>;
     type Item = (C::Model, Vec<N::Item>);
 
-    fn link(&self) -> Option<ExprKind> {
-        Some(self.0.parent_key())
+    fn link(&self) -> Option<(&'static str, ExprKind)> {
+        let expr = self.0.parent_key();
+        let column = match &expr {
+            ExprKind::Column { column, .. } | ExprKind::UnprefixedColumn { column, .. } => *column,
+            // Every relation in this crate links on a column, so this is only reachable for a
+            // hand-written relation. Dropping the link is better than emitting a reference
+            // the next level cannot use.
+            _ => return None,
+        };
+        Some((column, expr))
     }
 
     fn assemble(&self, model: C::Model, nested: Vec<N::Item>) -> Self::Item {
@@ -777,12 +1130,13 @@ where
     }
 }
 
-impl<P, C, S, K> Relation for HasMany<P, C, S, K>
+impl<P, C, S, K, Cfg> Relation for HasMany<P, C, S, K, Cfg>
 where
     P: Table,
     C: Table,
     S: SqlType,
     K: RelationChildren<C>,
+    Cfg: RelationConfig,
 {
     type Parent = P;
     type Key = S;
@@ -798,20 +1152,22 @@ where
         keys: &mut dyn Iterator<Item = Vec<Value>>,
     ) -> Vec<Sql<D>> {
         let own = keys.next().unwrap_or_default();
+        let link = self.children.link();
         let mut out = Vec::with_capacity(1);
         out.push(render_child_statement::<D>(
             self.child,
-            &self.child_ref(),
-            self.children.link().as_ref(),
+            self.child_column,
+            link.as_ref().map(|(name, expr)| (*name, expr)),
             own,
             prefix.clone(),
+            &self.config,
         ));
         out.extend(self.children.sql::<D>(prefix, keys));
         out
     }
 }
 
-impl<P, C, S, K, DriverImpl> RelationLoader<DriverImpl> for HasMany<P, C, S, K>
+impl<P, C, S, K, Cfg, DriverImpl> RelationLoader<DriverImpl> for HasMany<P, C, S, K, Cfg>
 where
     P: Table,
     C: Table,
@@ -820,6 +1176,7 @@ where
     C::Model: Decode<DriverImpl> + Send,
     K: RelationChildrenLoader<C, DriverImpl>,
     K::Link: Decode<DriverImpl>,
+    Cfg: RelationConfig,
 {
     async fn load<'e, E>(
         &'e self,
@@ -836,12 +1193,14 @@ where
             return Ok(HashMap::new());
         }
 
+        let link = self.children.link();
         let statement = render_child_statement::<DialectOf<E>>(
             self.child,
-            &self.child_ref(),
-            self.children.link().as_ref(),
+            self.child_column,
+            link.as_ref().map(|(name, expr)| (*name, expr)),
             keys.into_iter().map(Into::into),
             exec.table_prefix(),
+            &self.config,
         );
         let rows = exec.query(&statement).await?;
 
@@ -879,7 +1238,7 @@ where
     }
 }
 
-impl<P, J, C, S, T, K> Relation for ManyToMany<P, J, C, S, T, K>
+impl<P, J, C, S, T, K, Cfg> Relation for ManyToMany<P, J, C, S, T, K, Cfg>
 where
     P: Table,
     J: Table,
@@ -887,6 +1246,7 @@ where
     S: SqlType,
     T: SqlType,
     K: RelationChildren<C>,
+    Cfg: RelationConfig,
 {
     type Parent = P;
     type Key = S;
@@ -902,6 +1262,30 @@ where
         keys: &mut dyn Iterator<Item = Vec<Value>>,
     ) -> Vec<Sql<D>> {
         let own = keys.next().unwrap_or_default();
+        let link = self.children.link();
+
+        // Ordering and a per-parent limit both need the child row that the rank orders by,
+        // so the join and child statements collapse into one ranked statement. Without
+        // either, the usual two statements are cheaper and stay unchanged.
+        if self.config.limit().is_some() || !self.config.order_by().is_empty() {
+            let order = effective_order(self.child, &self.config);
+            let mut out = Vec::with_capacity(1);
+            out.push(render_ranked_many_to_many_statement::<D>(
+                self.join,
+                self.join_parent_column,
+                self.join_child_column,
+                self.child,
+                self.child_column,
+                link.as_ref().map(|(name, _)| *name),
+                own,
+                prefix.clone(),
+                order,
+                self.config.limit(),
+            ));
+            out.extend(self.children.sql::<D>(prefix, keys));
+            return out;
+        }
+
         let join_parent = self.join_parent_ref();
         let mut join = SelectQuery::new(self.join);
         join.projection = Some(vec![join_parent.clone(), self.join_child_ref()]);
@@ -911,10 +1295,11 @@ where
         let child_keys = keys.next().unwrap_or_default();
         let child_statement = render_child_statement::<D>(
             self.child,
-            &self.child_ref(),
-            self.children.link().as_ref(),
+            self.child_column,
+            link.as_ref().map(|(name, expr)| (*name, expr)),
             child_keys,
             prefix.clone(),
+            &self.config,
         );
 
         let mut out = alloc::vec![join_statement, child_statement];
@@ -923,7 +1308,8 @@ where
     }
 }
 
-impl<P, J, C, S, T, K, DriverImpl> RelationLoader<DriverImpl> for ManyToMany<P, J, C, S, T, K>
+impl<P, J, C, S, T, K, Cfg, DriverImpl> RelationLoader<DriverImpl>
+    for ManyToMany<P, J, C, S, T, K, Cfg>
 where
     P: Table,
     J: Table,
@@ -936,6 +1322,7 @@ where
     K::Link: Decode<DriverImpl>,
     K::Item: Clone,
     T::Rust: Decode<DriverImpl> + Clone + Eq + Hash + Send,
+    Cfg: RelationConfig,
 {
     async fn load<'e, E>(
         &'e self,
@@ -950,56 +1337,102 @@ where
             return Ok(HashMap::new());
         }
 
-        // First the join rows: they name the children each parent references, and the
-        // distinct child keys become the next statement's `IN` list.
-        let join_parent = self.join_parent_ref();
-        let mut join = SelectQuery::new(self.join);
-        join.projection = Some(vec![join_parent.clone(), self.join_child_ref()]);
-        join.filter
-            .push(in_list(&join_parent, keys.into_iter().map(Into::into)));
-        let statement = join.build::<DialectOf<E>>(exec.table_prefix());
-        let rows = exec.query(&statement).await?;
-
         let mut by_parent: HashMap<S::Rust, Vec<T::Rust>> = HashMap::new();
         let mut pairs: HashSet<(S::Rust, T::Rust)> = HashSet::new();
-        let mut child_keys: Vec<T::Rust> = Vec::new();
-        let mut seen: HashSet<T::Rust> = HashSet::new();
-        for row in &rows {
-            let (parent, child) = <(S::Rust, T::Rust)>::decode(row, &mut 0)?;
-            // The result is a `Vec` of distinct child rows, so a duplicated join row
-            // attaches the child once.
-            if pairs.insert((parent.clone(), child.clone())) {
-                by_parent.entry(parent).or_default().push(child.clone());
-            }
-            if seen.insert(child.clone()) {
-                child_keys.push(child);
-            }
-        }
-
-        if child_keys.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let statement = render_child_statement::<DialectOf<E>>(
-            self.child,
-            &self.child_ref(),
-            self.children.link().as_ref(),
-            child_keys.into_iter().map(Into::into),
-            exec.table_prefix(),
-        );
-        let rows = exec.query(&statement).await?;
-
-        let mut loaded: HashMap<T::Rust, (C::Model, K::Link)> = HashMap::with_capacity(rows.len());
+        let mut loaded: HashMap<T::Rust, (C::Model, K::Link)> = HashMap::new();
         let mut links: Vec<K::Link> = Vec::new();
         let mut link_seen: HashSet<K::Link> = HashSet::new();
-        for row in &rows {
-            let mut offset = 0;
-            let (model, key) = <(C::Model, T::Rust)>::decode(row, &mut offset)?;
-            let link = self.children.decode_link(row, &mut offset)?;
-            if link_seen.insert(link.clone()) {
-                links.push(link.clone());
+
+        if self.config.limit().is_some() || !self.config.order_by().is_empty() {
+            // Ordering or a limit ranks the joined rows, so the join and the child load are
+            // one statement and every row already carries the child model.
+            let order = effective_order(self.child, &self.config);
+            let link = self.children.link();
+            let statement = render_ranked_many_to_many_statement::<DialectOf<E>>(
+                self.join,
+                self.join_parent_column,
+                self.join_child_column,
+                self.child,
+                self.child_column,
+                link.as_ref().map(|(name, _)| *name),
+                keys.into_iter().map(Into::into),
+                exec.table_prefix(),
+                order,
+                self.config.limit(),
+            );
+            let rows = exec.query(&statement).await?;
+
+            for row in &rows {
+                let mut offset = 0;
+                let (model, child) = <(C::Model, T::Rust)>::decode(row, &mut offset)?;
+                let parent = S::Rust::decode(row, &mut offset)?;
+                let link = self.children.decode_link(row, &mut offset)?;
+                // A duplicated join row still appears once in the result, even though it
+                // was assigned its own rank.
+                if pairs.insert((parent.clone(), child.clone())) {
+                    by_parent.entry(parent).or_default().push(child.clone());
+                }
+                if link_seen.insert(link.clone()) {
+                    links.push(link.clone());
+                }
+                // A child shared by several parents is decoded once per join row, so the
+                // first wins and the rest are dropped; each parent still gets an item
+                // below.
+                loaded.entry(child).or_insert((model, link));
             }
-            loaded.insert(key, (model, link));
+        } else {
+            // First the join rows: they name the children each parent references, and the
+            // distinct child keys become the next statement's `IN` list.
+            let join_parent = self.join_parent_ref();
+            let mut join = SelectQuery::new(self.join);
+            join.projection = Some(vec![join_parent.clone(), self.join_child_ref()]);
+            join.filter
+                .push(in_list(&join_parent, keys.into_iter().map(Into::into)));
+            let statement = join.build::<DialectOf<E>>(exec.table_prefix());
+            let rows = exec.query(&statement).await?;
+
+            let mut child_keys: Vec<T::Rust> = Vec::new();
+            let mut seen: HashSet<T::Rust> = HashSet::new();
+            for row in &rows {
+                let (parent, child) = <(S::Rust, T::Rust)>::decode(row, &mut 0)?;
+                // The result is a `Vec` of distinct child rows, so a duplicated join row
+                // attaches the child once.
+                if pairs.insert((parent.clone(), child.clone())) {
+                    by_parent.entry(parent).or_default().push(child.clone());
+                }
+                if seen.insert(child.clone()) {
+                    child_keys.push(child);
+                }
+            }
+
+            if child_keys.is_empty() {
+                return Ok(HashMap::new());
+            }
+
+            let link = self.children.link();
+            let statement = render_child_statement::<DialectOf<E>>(
+                self.child,
+                self.child_column,
+                link.as_ref().map(|(name, expr)| (*name, expr)),
+                child_keys.into_iter().map(Into::into),
+                exec.table_prefix(),
+                &self.config,
+            );
+            let rows = exec.query(&statement).await?;
+
+            for row in &rows {
+                let mut offset = 0;
+                let (model, key) = <(C::Model, T::Rust)>::decode(row, &mut offset)?;
+                let link = self.children.decode_link(row, &mut offset)?;
+                if link_seen.insert(link.clone()) {
+                    links.push(link.clone());
+                }
+                loaded.insert(key, (model, link));
+            }
+        }
+
+        if loaded.is_empty() {
+            return Ok(HashMap::new());
         }
 
         let mut nested = self.children.load(exec, links).await?;
@@ -1057,6 +1490,11 @@ where
 /// 2. for a has-many, the child query selecting every child column plus the foreign key,
 ///    with `foreign_key IN (parent keys)`; for a many-to-many, the join rows for those
 ///    parents and then the child query for the join rows' child keys.
+///
+/// A relation that orders or limits its children keeps the same shape when only ordering is
+/// set. A limit replaces the child statement with a windowed derived table that numbers each
+/// parent's children, and a limited many-to-many replaces its join and child statements with
+/// one ranked statement. Both are still one statement for the whole level.
 ///
 /// The keys are deduplicated before each statement, so a hundred parents with three distinct
 /// keys bind three parameters, not a hundred.
@@ -1290,31 +1728,272 @@ fn in_list(key: &ExprKind, keys: impl IntoIterator<Item = Value>) -> ExprKind {
 
 /// Render the child statement of a relation: every child column, then the key that groups
 /// the row, then the next level's key when the relation nests.
+///
+/// With no limit this is one plain `SELECT` with the configured `ORDER BY`. With a limit it
+/// is a windowed statement, because a global `LIMIT` would keep the wrong children for every
+/// parent but one.
 fn render_child_statement<D: Dialect>(
     child: &'static TableDef,
-    child_key: &ExprKind,
-    link: Option<&ExprKind>,
+    child_column: &'static str,
+    link: Option<(&'static str, &ExprKind)>,
     keys: impl IntoIterator<Item = Value>,
     prefix: Option<Arc<str>>,
+    config: &impl RelationConfig,
 ) -> Sql<D> {
+    if let Some(limit) = config.limit() {
+        let order = effective_order(child, config);
+        return render_ranked_child_statement::<D>(
+            child,
+            child_column,
+            link.map(|(name, _)| name),
+            keys,
+            prefix,
+            order,
+            limit,
+        );
+    }
+
+    let child_key = column_ref(child.name, child_column);
     let mut query = SelectQuery::new(child);
 
     // The foreign key is what lets the rows be grouped back onto their parent, so it is
     // selected alongside the declared columns.
     let mut projection = Vec::with_capacity(child.columns.len() + 2);
     for column in child.columns {
-        projection.push(ExprKind::Column {
-            table: child.name,
-            column: column.name,
-        });
+        projection.push(column_ref(child.name, column.name));
     }
     projection.push(child_key.clone());
-    if let Some(link) = link {
+    if let Some((_, link)) = link {
         projection.push(link.clone());
     }
     query.projection = Some(projection);
 
-    query.filter.push(in_list(child_key, keys));
+    query.filter.push(in_list(&child_key, keys));
+    for order in config.order_by() {
+        query.order_by.push(order.clone());
+    }
 
     query.build::<D>(prefix)
+}
+
+/// Render a has-many child statement with a per-parent `ROW_NUMBER()` limit.
+///
+/// The rank has to be computed in a derived table: SQL evaluates window functions after
+/// `WHERE`, and a window function cannot be used in the same statement's `WHERE` clause. The
+/// rank is partitioned by the foreign key, so each parent's children are numbered from one.
+fn render_ranked_child_statement<D: Dialect>(
+    child: &'static TableDef,
+    child_column: &'static str,
+    link: Option<&'static str>,
+    keys: impl IntoIterator<Item = Value>,
+    prefix: Option<Arc<str>>,
+    order: Vec<OrderClause>,
+    limit: i64,
+) -> Sql<D> {
+    let child_key = column_ref(child.name, child_column);
+
+    // Every child column appears once in the derived table. The foreign key is one of them,
+    // and so is the next level's key, so the outer statement reaches them through the
+    // derived alias rather than selecting them again here.
+    let mut inner = SelectQuery::new(child);
+    let mut projection = Vec::with_capacity(child.columns.len() + 1);
+    for column in child.columns {
+        projection.push(column_ref(child.name, column.name));
+    }
+    projection.push(rank_expr(child_key.clone(), order));
+    inner.projection = Some(projection);
+    inner.filter.push(in_list(&child_key, keys));
+
+    let rank = statement_column(child.name, RANK_COLUMN);
+    let mut columns: Vec<Option<&'static str>> = child
+        .columns
+        .iter()
+        .map(|column| Some(column.name))
+        .collect();
+    columns.push(Some(RANK_COLUMN));
+    let mut outer = SelectQuery::from_source(From::Derived(DerivedSource {
+        alias: child.name,
+        columns,
+        body: Box::new(QueryBody::Select(inner)),
+    }));
+
+    // The output keeps the shape of the plain child statement: the declared columns, the
+    // foreign key, then the next level's key.
+    let mut projection = Vec::with_capacity(child.columns.len() + 2);
+    for column in child.columns {
+        projection.push(statement_column(child.name, column.name));
+    }
+    projection.push(statement_column(child.name, child_column));
+    if let Some(link) = link {
+        projection.push(statement_column(child.name, link));
+    }
+    outer.projection = Some(projection);
+
+    outer
+        .filter
+        .push(less_or_equal(rank.clone(), Value::Int(limit)));
+    // Rank order is enough: the loader groups rows by parent and keeps their relative
+    // order, so each parent's `Vec` comes out in rank order even though the parents are
+    // interleaved.
+    outer.order_by.push(OrderClause {
+        expr: rank,
+        direction: Order::Asc,
+        nulls: None,
+    });
+
+    outer.build::<D>(prefix)
+}
+
+/// Render a many-to-many statement with a per-parent `ROW_NUMBER()` limit.
+///
+/// This replaces the usual two statements (join rows, then children) with one: the rank has
+/// to order by a child column, so the child table is joined while the numbering happens. The
+/// outer statement joins the child table again to project the model from the ranked join
+/// rows.
+#[allow(clippy::too_many_arguments)]
+fn render_ranked_many_to_many_statement<D: Dialect>(
+    join: &'static TableDef,
+    join_parent_column: &'static str,
+    join_child_column: &'static str,
+    child: &'static TableDef,
+    child_column: &'static str,
+    link: Option<&'static str>,
+    keys: impl IntoIterator<Item = Value>,
+    prefix: Option<Arc<str>>,
+    order: Vec<OrderClause>,
+    limit: Option<i64>,
+) -> Sql<D> {
+    let join_parent = column_ref(join.name, join_parent_column);
+    let join_child = column_ref(join.name, join_child_column);
+    let child_key = column_ref(child.name, child_column);
+
+    // Rank the joined rows per parent. Only the join keys and the rank leave this subquery,
+    // so a child column cannot clash with a join column of the same name.
+    let mut inner = SelectQuery::new(join);
+    inner.projection = Some(vec![
+        join_parent.clone(),
+        join_child.clone(),
+        rank_expr(join_parent.clone(), order),
+    ]);
+    inner.joins.push(JoinClause {
+        kind: JoinKind::Inner,
+        source: From::Table(child),
+        on: Some(equals(child_key.clone(), join_child)),
+    });
+    inner.filter.push(in_list(&join_parent, keys));
+
+    let rank = statement_column(RANK_ALIAS, RANK_COLUMN);
+    let mut outer = SelectQuery::from_source(From::Derived(DerivedSource {
+        alias: RANK_ALIAS,
+        columns: alloc::vec![
+            Some(join_parent_column),
+            Some(join_child_column),
+            Some(RANK_COLUMN)
+        ],
+        body: Box::new(QueryBody::Select(inner)),
+    }));
+    outer.joins.push(JoinClause {
+        kind: JoinKind::Inner,
+        source: From::Table(child),
+        on: Some(equals(
+            child_key.clone(),
+            statement_column(RANK_ALIAS, join_child_column),
+        )),
+    });
+
+    // Columns are decoded in this order: the child model, its key, the parent key the row
+    // belongs to, then the next level's key.
+    let mut projection = Vec::with_capacity(child.columns.len() + 3);
+    for column in child.columns {
+        projection.push(column_ref(child.name, column.name));
+    }
+    projection.push(child_key);
+    projection.push(statement_column(RANK_ALIAS, join_parent_column));
+    if let Some(link) = link {
+        projection.push(column_ref(child.name, link));
+    }
+    outer.projection = Some(projection);
+
+    if let Some(limit) = limit {
+        outer
+            .filter
+            .push(less_or_equal(rank.clone(), Value::Int(limit)));
+    }
+    outer.order_by.push(OrderClause {
+        expr: rank,
+        direction: Order::Asc,
+        nulls: None,
+    });
+
+    outer.build::<D>(prefix)
+}
+
+/// A column of a name that exists only in the statement, such as a derived table's alias.
+fn statement_column(table: &'static str, column: &'static str) -> ExprKind {
+    ExprKind::UnprefixedColumn { table, column }
+}
+
+/// `expr <= value`.
+fn less_or_equal(expr: ExprKind, value: Value) -> ExprKind {
+    ExprKind::Binary {
+        op: "<=",
+        left: Operand::new(expr),
+        right: Operand::new(ExprKind::Value(value)),
+    }
+}
+
+/// `left = right`.
+fn equals(left: ExprKind, right: ExprKind) -> ExprKind {
+    ExprKind::Binary {
+        op: "=",
+        left: Operand::new(left),
+        right: Operand::new(right),
+    }
+}
+
+/// `ROW_NUMBER() OVER (PARTITION BY partition ORDER BY order...) AS "besu_row"`.
+fn rank_expr(partition: ExprKind, order: Vec<OrderClause>) -> ExprKind {
+    let mut window = Window::new();
+    window.add_partition(partition);
+    for clause in order {
+        window.add_order(clause);
+    }
+    // The alias is what makes the rank a column the outer statement can filter on. A
+    // database names an unaliased `ROW_NUMBER()` itself, and the three do not agree.
+    ExprKind::Alias {
+        expr: Operand::new(row_number::<()>().over(window).into_kind()),
+        name: RANK_COLUMN,
+    }
+}
+
+/// The order a limited relation falls back to when the caller gave none.
+///
+/// The primary key is unique, so a limit over it is stable rather than arbitrary. A table
+/// with no declared key falls back to every column, which is deterministic for a row but can
+/// still tie two identical rows; that is the best a schema-level fallback can do.
+fn fallback_order(child: &'static TableDef) -> Vec<OrderClause> {
+    let keyed = child.columns.iter().any(|column| column.primary_key);
+    child
+        .columns
+        .iter()
+        .filter(|column| !keyed || column.primary_key)
+        .map(|column| OrderClause {
+            expr: column_ref(child.name, column.name),
+            direction: Order::Asc,
+            nulls: None,
+        })
+        .collect()
+}
+
+/// The order a statement uses: the configured terms, or the deterministic fallback.
+fn effective_order<Cfg: RelationConfig>(
+    child: &'static TableDef,
+    config: &Cfg,
+) -> Vec<OrderClause> {
+    let configured = config.order_by();
+    if configured.is_empty() {
+        fallback_order(child)
+    } else {
+        configured.to_vec()
+    }
 }

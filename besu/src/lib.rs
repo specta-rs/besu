@@ -152,7 +152,10 @@ pub use query::{
     InsertReturning, IntoQueryBody, JoinKind, OnConflict, Select, SetOp, SetQuery, Update,
     UpdateReturning, alias, alias_as, derived,
 };
-pub use relation::{HasMany, ManyToMany, Nested, Relation, WithRelation, has_many, many_to_many};
+pub use relation::{
+    HasMany, ManyToMany, Nested, PerParent, Relation, RelationConfig, WithRelation, has_many,
+    many_to_many,
+};
 pub use seed::{Seed, SeedError, SeedReport, TableSeed, seed};
 pub use selection::Selection;
 pub use stream::Rows;

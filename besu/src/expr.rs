@@ -114,6 +114,12 @@ pub enum ExprKind {
         /// Boxed because a window is much larger than the other nodes.
         window: Box<Window>,
     },
+    /// `expr AS "name"`, a projection column with a name of its own.
+    ///
+    /// A database names an expression itself, and the three do not agree, so a statement
+    /// that reads an expression column back from a derived table has to name it. This is
+    /// only rendered in a projection.
+    Alias { expr: Operand, name: &'static str },
     /// `EXTRACT(field FROM expr)`, spelled per dialect.
     Extract { field: DateField, expr: Operand },
     /// The number of whole days from `right` to `left`.
@@ -915,6 +921,11 @@ impl ExprKind {
                 window.render::<D>(out);
                 out.push_raw(")");
             }
+            Self::Alias { expr, name } => {
+                expr.render(out);
+                out.push_raw(" AS ");
+                out.push_ident(name);
+            }
             Self::Extract { field, expr } => render_extract::<D>(out, *field, expr),
             Self::DateDiff { left, right } => render_date_diff::<D>(out, left, right),
             Self::DateAdd {
@@ -1310,7 +1321,9 @@ impl ExprKind {
                 left.unqualify();
                 right.unqualify();
             }
-            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } => expr.unqualify(),
+            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } | Self::Alias { expr, .. } => {
+                expr.unqualify()
+            }
             Self::Function { args, .. } => {
                 for arg in args {
                     arg.unqualify();
@@ -1463,6 +1476,7 @@ impl ExprKind {
                 expr.reads_upsert_row() || condition.reads_upsert_row()
             }
             Self::Over { expr, window } => expr.reads_upsert_row() || window.reads_upsert_row(),
+            Self::Alias { expr, .. } => expr.reads_upsert_row(),
             Self::FullText { column, .. } => column.reads_upsert_row(),
             Self::Column { .. }
             | Self::UnprefixedColumn { .. }
@@ -1486,7 +1500,9 @@ impl ExprKind {
                 left.set_upsert_row(row);
                 right.set_upsert_row(row);
             }
-            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } => expr.set_upsert_row(row),
+            Self::Prefix { expr, .. } | Self::Postfix { expr, .. } | Self::Alias { expr, .. } => {
+                expr.set_upsert_row(row)
+            }
             Self::Function { args, .. } => {
                 for arg in args {
                     arg.set_upsert_row(row);
@@ -2129,6 +2145,19 @@ impl Window {
     /// An empty window, which is the whole result set.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Add a `PARTITION BY` expression that has already been rendered.
+    ///
+    /// This is for expressions the query builder holds as an [`ExprKind`] rather than as a
+    /// typed [`Expr`], such as a relation's foreign key.
+    pub(crate) fn add_partition(&mut self, expr: ExprKind) {
+        self.partition_by.push(expr);
+    }
+
+    /// Add an `ORDER BY` term that has already been rendered.
+    pub(crate) fn add_order(&mut self, order: OrderClause) {
+        self.order_by.push(order);
     }
 
     /// Add a `PARTITION BY` expression, restarting the window for each distinct value.

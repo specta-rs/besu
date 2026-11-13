@@ -39,7 +39,9 @@ let users_with_posts: Vec<(User, Vec<Post>)> = db
 
 `HasMany` and `ManyToMany` are `Copy` when their children are, so passing `POSTS` to `with`
 does not consume it. The constructors are `const fn`, which is what lets the value live in a
-`const` or `static`.
+`const` or `static`. Adding an order or a limit makes the relation own its order terms, so it
+is `Clone` rather than `Copy` after that; see [Per-parent limits and
+ordering](#per-parent-limits-and-ordering).
 
 ## The result
 
@@ -141,6 +143,92 @@ with nothing at any level gets `Vec::new()` there. A statement is not sent when 
 above it produced no rows, so an empty intermediate result costs nothing beyond the statement
 that discovered it.
 
+## Per-parent limits and ordering
+
+`order_by` and `limit` control the children of each parent. The limit is per parent, not a
+global row count: every parent gets at most `n` children in the requested order.
+
+```rust
+let users_with_recent_posts: Vec<(User, Vec<Post>)> = db
+    .select(users)
+    .with(
+        has_many(users.id, posts.author_id)
+            .order_by(posts.created_at.desc())
+            .limit(3),
+    )
+    .await?;
+```
+
+A limit cannot be a plain `LIMIT` on the child statement: that would keep three children for
+the whole result, which is wrong for every parent but one. It also cannot be a lateral join,
+which SQLite does not have. The statement is a derived table with a window function, which
+PostgreSQL, MySQL 8 and SQLite 3.25+ all support:
+
+```sql
+SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id"
+  FROM (
+        SELECT "posts"."id", "posts"."title", "posts"."author_id",
+               ROW_NUMBER() OVER (
+                   PARTITION BY "posts"."author_id"
+                   ORDER BY "posts"."created_at" DESC
+               ) AS "besu_row"
+          FROM "posts" WHERE ("posts"."author_id" IN ($1, $2))
+       ) AS "posts"
+ WHERE ("posts"."besu_row" <= $3)
+ ORDER BY "posts"."besu_row" ASC;
+```
+
+It is still one statement for the whole level, not one per parent. The outer `ORDER BY` keeps
+the rows in rank order so each parent's `Vec` arrives in the requested order.
+
+Ordering a has-many on its own needs no window: the child statement simply gets an `ORDER BY`. A limit
+with no explicit order falls back to the child table's primary key, so it keeps a stable set
+of rows rather than an arbitrary one. Add an order whenever you care which children survive.
+
+The same applies to a many-to-many. Ordering or a limit both use the ranked statement: the
+order names a child column, and the join rows have no order that could carry it back to each
+parent. An unconfigured many-to-many keeps the cheaper join + child pair. The ranked form is
+one statement, because only the ranking join needs to happen before the rank:
+
+```sql
+SELECT "tags"."id", "tags"."name", "tags"."id", "besu_ranked"."post_id"
+  FROM (
+        SELECT "post_tags"."post_id", "post_tags"."tag_id",
+               ROW_NUMBER() OVER (
+                   PARTITION BY "post_tags"."post_id"
+                   ORDER BY "tags"."name" ASC
+               ) AS "besu_row"
+          FROM "post_tags"
+          INNER JOIN "tags" ON ("tags"."id" = "post_tags"."tag_id")
+         WHERE ("post_tags"."post_id" IN ($1, $2))
+       ) AS "besu_ranked"
+ INNER JOIN "tags" ON ("tags"."id" = "besu_ranked"."tag_id")
+ WHERE ("besu_ranked"."besu_row" <= $3)
+ ORDER BY "besu_ranked"."besu_row" ASC;
+```
+
+A duplicated `(parent, child)` join row is still folded into one child in the result, but it
+counts against the limit because the rank is assigned before duplicates are folded. A join
+table with a primary key — the usual case — cannot produce such a row.
+
+A nested relation gives every level its own order and limit:
+
+```rust
+let authors: Vec<(User, Vec<(Post, Vec<Comment>)>)> = db
+    .select(users)
+    .with(
+        has_many(users.id, posts.author_id)
+            .order_by(posts.created_at.desc())
+            .limit(3)
+            .with(
+                has_many(posts.id, comments.post_id)
+                    .order_by(comments.created_at.desc())
+                    .limit(2),
+            ),
+    )
+    .await?;
+```
+
 ## Why it is not a join
 
 A join returns a tuple, `(User, Option<Post>)`, and repeats the same parent columns once per
@@ -220,14 +308,21 @@ the inspection methods still render it so the shape is visible.
 
 ## What is not modelled
 
-- **Per-parent limits and ordering.** The child statement has no `ORDER BY` and no `LIMIT`.
-  A global limit on children would be wrong for every parent but one, and a per-parent limit
-  needs a window function or a lateral join. This is a separate part of
-  [#97](https://github.com/specta-rs/besu/issues/97).
 - **The other direction.** There is no `belongs_to`: a child does not carry a loaded parent.
   Query the parent by key, or use a join.
-- **Writing.** Inserting a parent and its children together is not part of this API. It is a
-  separate part of the same issue.
+- **Writing.** Inserting a parent and its children together is not part of this API. The
+  insert builder is generic over an executor, which has no portable way to begin a
+  transaction, and MySQL has no `RETURNING` to hand back a generated parent key. Write the two
+  inserts inside [`Database::transaction`], or make the foreign key deferrable and insert the
+  children once the parent key is known:
+  ```rust
+  db.transaction(async |tx| {
+      let user = tx.insert(users).value(users.insert(..)).returning(users).await?;
+      tx.insert(posts).value(posts.insert("Title", user[0].id)).await?;
+      Ok(())
+  })
+  .await?;
+  ```
 - **Relationships in the schema.** Nothing is stored on `TableDef`. The foreign key is a
   separate declaration, and a relation works whether or not the database enforces it.
 - **Join rows in the result.** A many-to-many yields the child models, not the join rows. If
@@ -243,5 +338,11 @@ the inspection methods still render it so the shape is visible.
   two `NonNull` columns. Declare the key non-null, or query those children separately.
 - The child statement binds one parameter per distinct key. A level with more distinct keys
   than the database's parameter limit allows will fail at build time; narrow the parent query.
-- Children arrive in the order the database returned them. Add an `ORDER BY` to the child
-  statement by hand if the order matters — this API deliberately does not invent one.
+- An unconfigured child statement has no `ORDER BY`, so the order is the database's. Call
+  `order_by` when it matters. A limit without an order uses the child's primary key, which is
+  stable but not necessarily the children you want.
+- A relation with an order or limit is `Clone` rather than `Copy`, because it owns its order
+  terms. An unconfigured relation is still `Copy` and renders exactly the same SQL it did
+  before.
+
+[`Database::transaction`]: https://docs.rs/besu/latest/besu/struct.Database.html#method.transaction

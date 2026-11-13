@@ -486,3 +486,380 @@ async fn filters_order_limit_and_pick_still_apply_to_the_parent() {
     assert_eq!(nested[0].1[0].1, vec![tag.clone()]);
     assert_eq!(nested[0].1[1].1, vec![tag]);
 }
+
+/// The limit is per parent, and the order moves within each parent rather than across the
+/// whole result: Alice gets her newest post, Bob his only one, Carol still gets an empty
+/// `Vec`.
+#[tokio::test]
+async fn per_parent_limit_and_order_on_has_many() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let loaded: Vec<(User, Vec<Post>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.id.desc())
+                .limit(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        loaded[0]
+            .1
+            .iter()
+            .map(|post| post.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Alice two"]
+    );
+    assert_eq!(
+        loaded[1]
+            .1
+            .iter()
+            .map(|post| post.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Bob one"]
+    );
+    assert!(loaded[2].1.is_empty());
+}
+
+/// A limit larger than the number of children keeps all of them, in the requested order.
+#[tokio::test]
+async fn a_limit_larger_than_the_child_count_keeps_every_child() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let loaded: Vec<(User, Vec<Post>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.title.asc())
+                .limit(50),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        loaded[0]
+            .1
+            .iter()
+            .map(|post| post.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Alice one", "Alice two"]
+    );
+    assert_eq!(loaded[1].1.len(), 1);
+    assert!(loaded[2].1.is_empty());
+}
+
+/// With no order, a limit falls back to the child's primary key rather than returning an
+/// arbitrary row.
+#[tokio::test]
+async fn a_limit_without_an_order_uses_the_child_key() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let loaded: Vec<(User, Vec<Post>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(has_many(users.id, posts.author_id).limit(1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        loaded[0]
+            .1
+            .iter()
+            .map(|post| post.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Alice one"]
+    );
+    assert_eq!(loaded[1].1[0].title, "Bob one");
+}
+
+/// `pick` replaces the parent row type; the limit still applies to the children and the
+/// parent still gets an entry, even with none.
+#[tokio::test]
+async fn a_limit_works_with_a_parent_pick() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let loaded: Vec<(String, Vec<Post>)> = db
+        .select(users)
+        .order_by(users.name.asc())
+        .pick(users.name)
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.id.desc())
+                .limit(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["Alice", "Bob", "Carol"]
+    );
+    assert_eq!(loaded[0].1.len(), 1);
+    assert_eq!(loaded[0].1[0].title, "Alice two");
+    assert_eq!(loaded[1].1.len(), 1);
+    assert!(loaded[2].1.is_empty());
+}
+
+/// Many-to-many children are ranked per parent after the join, so each post gets its own
+/// top tag and a post with none keeps an empty `Vec`.
+#[tokio::test]
+async fn per_parent_limit_and_order_on_many_to_many() {
+    let db = setup().await;
+    let seeded = seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    for name in ["rust", "sql", "orm"] {
+        db.insert(tags).value(tags.insert(name)).await.unwrap();
+    }
+    let created: Vec<Tag> = db.select(tags).order_by(tags.id.asc()).await.unwrap();
+    for (post, tag) in [
+        (posts_by_id[0].id, created[0].id),
+        (posts_by_id[0].id, created[1].id),
+        (posts_by_id[1].id, created[0].id),
+        (posts_by_id[2].id, created[2].id),
+    ] {
+        db.insert(post_tags)
+            .value(post_tags.insert(post, tag))
+            .await
+            .unwrap();
+    }
+    db.insert(posts)
+        .value(posts.insert("Bob two", seeded[1].id))
+        .await
+        .unwrap();
+
+    let limited: Vec<(Post, Vec<Tag>)> = db
+        .select(posts)
+        .order_by(posts.id.asc())
+        .with(TAGS.order_by(tags.name.desc()).limit(1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        limited[0]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["sql"]
+    );
+    assert_eq!(
+        limited[1]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["rust"]
+    );
+    assert_eq!(
+        limited[2]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["orm"]
+    );
+    assert!(limited[3].1.is_empty());
+
+    let all: Vec<(Post, Vec<Tag>)> = db
+        .select(posts)
+        .order_by(posts.id.asc())
+        .with(TAGS.order_by(tags.name.desc()).limit(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        all[0]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["sql", "rust"]
+    );
+}
+
+/// Each level of a nested relation carries its own limit and order.
+#[tokio::test]
+async fn per_parent_limits_apply_at_each_nested_level() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    for (body, post) in [
+        ("Alice one first", posts_by_id[0].id),
+        ("Alice one second", posts_by_id[0].id),
+        ("Bob one first", posts_by_id[2].id),
+    ] {
+        db.insert(comments)
+            .value(comments.insert(body, post))
+            .await
+            .unwrap();
+    }
+
+    let loaded: Vec<(User, Vec<(Post, Vec<Comment>)>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.id.asc())
+                .limit(2)
+                .with(
+                    has_many(posts.id, comments.post_id)
+                        .order_by(comments.id.desc())
+                        .limit(1),
+                ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(loaded[0].1.len(), 2);
+    assert_eq!(
+        loaded[0].1[0]
+            .1
+            .iter()
+            .map(|comment| comment.body.as_str())
+            .collect::<Vec<_>>(),
+        ["Alice one second"]
+    );
+    assert!(loaded[0].1[1].1.is_empty());
+    assert_eq!(loaded[1].1.len(), 1);
+    assert_eq!(loaded[1].1[0].1[0].body, "Bob one first");
+    assert!(loaded[2].1.is_empty());
+}
+
+/// The exact SQL a real PostgreSQL load runs: one statement with a windowed derived table.
+#[tokio::test]
+async fn generated_sql_for_a_per_parent_limit() {
+    let db = besu::dry::<besu_postgres::Postgres>();
+
+    let statements = db
+        .select(users)
+        .filter(users.age.gt(18))
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.title.desc())
+                .limit(3),
+        )
+        .to_sql([3, 5]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id" "#,
+            r#"FROM (SELECT "posts"."id", "posts"."title", "posts"."author_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "posts"."author_id" ORDER BY "posts"."title" DESC) "#,
+            r#"AS "besu_row" FROM "posts" WHERE ("posts"."author_id" IN ($1, $2))) AS "posts" "#,
+            r#"WHERE ("posts"."besu_row" <= $3) ORDER BY "posts"."besu_row" ASC"#,
+            "\n/* besu:iii */"
+        )
+    );
+}
+
+/// A limited many-to-many can sit under a limited has-many: each level ranks independently.
+#[tokio::test]
+async fn a_limited_many_to_many_nests_under_a_limited_has_many() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    for name in ["rust", "sql", "orm"] {
+        db.insert(tags).value(tags.insert(name)).await.unwrap();
+    }
+    let created: Vec<Tag> = db.select(tags).order_by(tags.id.asc()).await.unwrap();
+    for (post, tag) in [
+        (posts_by_id[0].id, created[0].id),
+        (posts_by_id[0].id, created[1].id),
+        (posts_by_id[1].id, created[0].id),
+        (posts_by_id[2].id, created[2].id),
+    ] {
+        db.insert(post_tags)
+            .value(post_tags.insert(post, tag))
+            .await
+            .unwrap();
+    }
+
+    let loaded: Vec<(User, Vec<(Post, Vec<Tag>)>)> = db
+        .select(users)
+        .order_by(users.id.asc())
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.id.asc())
+                .limit(2)
+                .with(TAGS.order_by(tags.name.desc()).limit(1)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(loaded[0].1.len(), 2);
+    assert_eq!(
+        loaded[0].1[0]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["sql"]
+    );
+    assert_eq!(loaded[0].1[1].1[0].name, "rust");
+    assert_eq!(loaded[1].1[0].1[0].name, "orm");
+    assert!(loaded[2].1.is_empty());
+}
+
+/// Ordering a many-to-many without a limit still uses the ranked statement, because the
+/// join rows do not carry the child order.
+#[tokio::test]
+async fn many_to_many_order_without_a_limit_orders_children() {
+    let db = setup().await;
+    seed(&db).await;
+
+    let posts_by_id: Vec<Post> = db.select(posts).order_by(posts.id.asc()).await.unwrap();
+    for name in ["rust", "sql", "orm"] {
+        db.insert(tags).value(tags.insert(name)).await.unwrap();
+    }
+    let created: Vec<Tag> = db.select(tags).order_by(tags.id.asc()).await.unwrap();
+    for (post, tag) in [
+        (posts_by_id[0].id, created[0].id),
+        (posts_by_id[0].id, created[1].id),
+        (posts_by_id[2].id, created[2].id),
+    ] {
+        db.insert(post_tags)
+            .value(post_tags.insert(post, tag))
+            .await
+            .unwrap();
+    }
+
+    let loaded: Vec<(Post, Vec<Tag>)> = db
+        .select(posts)
+        .order_by(posts.id.asc())
+        .with(TAGS.order_by(tags.name.asc()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        loaded[0]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["rust", "sql"]
+    );
+    assert!(loaded[1].1.is_empty());
+    assert_eq!(
+        loaded[2]
+            .1
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["orm"]
+    );
+}

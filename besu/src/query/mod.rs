@@ -195,6 +195,9 @@ pub(crate) fn projection_names(query: &SelectQuery) -> Vec<Option<&'static str>>
 fn column_name(expr: &ExprKind) -> Option<&'static str> {
     match expr {
         ExprKind::Column { column, .. } | ExprKind::UnprefixedColumn { column, .. } => Some(column),
+        // An alias is the name the projection gives the column, which is exactly what a
+        // derived table needs to know.
+        ExprKind::Alias { name, .. } => Some(name),
         _ => None,
     }
 }

@@ -158,6 +158,17 @@ pub struct PostLabel {
     label_id: i64,
 }
 
+/// A child of `labels`, so a configured many-to-many can be nested one level further.
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "label_notes")]
+pub struct LabelNote {
+    #[besu(primary_key, auto_increment)]
+    id: i64,
+    #[besu(references = "labels.id")]
+    label_id: i64,
+    body: String,
+}
+
 /// A table that refers to itself, so a query can read it twice: every employee has at most
 /// one manager, who is another employee.
 #[derive(Table, Debug, Clone, PartialEq)]
@@ -2142,4 +2153,271 @@ fn a_many_to_many_can_be_nested_under_a_has_many() {
         statements[3].sql(),
         r#"SELECT "labels"."id", "labels"."name", "labels"."id" FROM "labels" WHERE ("labels"."id" IN ($1))"#
     );
+}
+
+/// A limit is per parent, not global: each parent's children are numbered in its own
+/// partition and the statement keeps the first `n` of each. The rank is computed in a
+/// derived table because a window function cannot appear in the same `WHERE` clause.
+#[test]
+fn a_has_many_limit_ranks_children_per_parent() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.title.desc())
+                .limit(3),
+        )
+        .to_sql([1, 2]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id" "#,
+            r#"FROM (SELECT "posts"."id", "posts"."title", "posts"."author_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "posts"."author_id" ORDER BY "posts"."title" DESC) "#,
+            r#"AS "besu_row" FROM "posts" WHERE ("posts"."author_id" IN ($1, $2))) AS "posts" "#,
+            r#"WHERE ("posts"."besu_row" <= $3) ORDER BY "posts"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(
+        statements[1].args(),
+        [Value::Int(1), Value::Int(2), Value::Int(3)]
+    );
+}
+
+/// With no explicit order, a limit falls back to the child's primary key, so the rows kept
+/// are stable instead of whatever the database returned first.
+#[test]
+fn a_limit_without_an_order_falls_back_to_the_child_key() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .with(has_many(users.id, posts.author_id).limit(2))
+        .to_sql([1]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id" "#,
+            r#"FROM (SELECT "posts"."id", "posts"."title", "posts"."author_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "posts"."author_id" ORDER BY "posts"."id" ASC) "#,
+            r#"AS "besu_row" FROM "posts" WHERE ("posts"."author_id" IN ($1))) AS "posts" "#,
+            r#"WHERE ("posts"."besu_row" <= $2) ORDER BY "posts"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(statements[1].args(), [Value::Int(1), Value::Int(2)]);
+}
+
+/// Ordering on its own needs no window: the plain child statement gets an `ORDER BY`.
+#[test]
+fn an_order_without_a_limit_is_a_plain_order_by() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .with(has_many(users.id, posts.author_id).order_by(posts.title.desc()))
+        .to_sql([1]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].sql(),
+        r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id" FROM "posts" WHERE ("posts"."author_id" IN ($1)) ORDER BY "posts"."title" DESC"#
+    );
+    assert_eq!(statements[1].args(), [Value::Int(1)]);
+}
+
+/// Every level of a nested relation carries its own limit and order, and each becomes its
+/// own windowed statement.
+#[test]
+fn a_nested_relation_limits_each_level() {
+    let db = dry::<TestDialect>();
+    let statements = db
+        .select(users)
+        .with(
+            has_many(users.id, posts.author_id)
+                .order_by(posts.id.desc())
+                .limit(2)
+                .with(
+                    has_many(posts.id, comments.post_id)
+                        .order_by(comments.id.desc())
+                        .limit(1),
+                ),
+        )
+        .to_sql_levels([vec![Value::Int(1)], vec![Value::Int(10)]]);
+
+    assert_eq!(statements.len(), 3);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "posts"."id", "posts"."title", "posts"."author_id", "posts"."author_id", "posts"."id" "#,
+            r#"FROM (SELECT "posts"."id", "posts"."title", "posts"."author_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "posts"."author_id" ORDER BY "posts"."id" DESC) "#,
+            r#"AS "besu_row" FROM "posts" WHERE ("posts"."author_id" IN ($1))) AS "posts" "#,
+            r#"WHERE ("posts"."besu_row" <= $2) ORDER BY "posts"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(statements[1].args(), [Value::Int(1), Value::Int(2)]);
+    assert_eq!(
+        statements[2].sql(),
+        concat!(
+            r#"SELECT "comments"."id", "comments"."body", "comments"."post_id", "comments"."post_id" "#,
+            r#"FROM (SELECT "comments"."id", "comments"."body", "comments"."post_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "comments"."post_id" ORDER BY "comments"."id" DESC) "#,
+            r#"AS "besu_row" FROM "comments" WHERE ("comments"."post_id" IN ($1))) AS "comments" "#,
+            r#"WHERE ("comments"."besu_row" <= $2) ORDER BY "comments"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(statements[2].args(), [Value::Int(10), Value::Int(1)]);
+}
+
+/// A many-to-many limit ranks after the join, because the order names a child column. The
+/// join and child statements collapse into one ranked statement plus its outer read.
+#[test]
+fn a_many_to_many_limit_ranks_after_the_join() {
+    let db = dry::<TestDialect>();
+    let labels_relation = many_to_many(
+        posts.id,
+        post_labels.post_id,
+        post_labels.label_id,
+        labels.id,
+    );
+    let statements = db
+        .select(posts)
+        .with(labels_relation.order_by(labels.name.asc()).limit(2))
+        .to_sql([1, 2]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "labels"."id", "labels"."name", "labels"."id", "besu_ranked"."post_id" "#,
+            r#"FROM (SELECT "post_labels"."post_id", "post_labels"."label_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "post_labels"."post_id" ORDER BY "labels"."name" ASC) "#,
+            r#"AS "besu_row" FROM "post_labels" INNER JOIN "labels" "#,
+            r#"ON ("labels"."id" = "post_labels"."label_id") "#,
+            r#"WHERE ("post_labels"."post_id" IN ($1, $2))) AS "besu_ranked" "#,
+            r#"INNER JOIN "labels" ON ("labels"."id" = "besu_ranked"."label_id") "#,
+            r#"WHERE ("besu_ranked"."besu_row" <= $3) ORDER BY "besu_ranked"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(
+        statements[1].args(),
+        [Value::Int(1), Value::Int(2), Value::Int(2)]
+    );
+}
+
+/// A many-to-many needs the ranked statement for ordering as well as for a limit: the join
+/// rows have no order of their own, so the child's `ORDER BY` alone would not reach the
+/// per-parent `Vec`. A limit adds the filter; an order alone does not.
+#[test]
+fn a_many_to_many_order_uses_the_ranked_statement() {
+    let db = dry::<TestDialect>();
+    let labels_relation = many_to_many(
+        posts.id,
+        post_labels.post_id,
+        post_labels.label_id,
+        labels.id,
+    );
+    let statements = db
+        .select(posts)
+        .with(labels_relation.order_by(labels.name.asc()))
+        .to_sql([1]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "labels"."id", "labels"."name", "labels"."id", "besu_ranked"."post_id" "#,
+            r#"FROM (SELECT "post_labels"."post_id", "post_labels"."label_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "post_labels"."post_id" ORDER BY "labels"."name" ASC) "#,
+            r#"AS "besu_row" FROM "post_labels" INNER JOIN "labels" "#,
+            r#"ON ("labels"."id" = "post_labels"."label_id") "#,
+            r#"WHERE ("post_labels"."post_id" IN ($1))) AS "besu_ranked" "#,
+            r#"INNER JOIN "labels" ON ("labels"."id" = "besu_ranked"."label_id") "#,
+            r#"ORDER BY "besu_ranked"."besu_row" ASC"#
+        )
+    );
+
+    // A limit with no order still falls back to the child key.
+    let limited = db.select(posts).with(labels_relation.limit(1)).to_sql([1]);
+    assert_eq!(
+        limited[1].sql(),
+        concat!(
+            r#"SELECT "labels"."id", "labels"."name", "labels"."id", "besu_ranked"."post_id" "#,
+            r#"FROM (SELECT "post_labels"."post_id", "post_labels"."label_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "post_labels"."post_id" ORDER BY "labels"."id" ASC) "#,
+            r#"AS "besu_row" FROM "post_labels" INNER JOIN "labels" "#,
+            r#"ON ("labels"."id" = "post_labels"."label_id") "#,
+            r#"WHERE ("post_labels"."post_id" IN ($1))) AS "besu_ranked" "#,
+            r#"INNER JOIN "labels" ON ("labels"."id" = "besu_ranked"."label_id") "#,
+            r#"WHERE ("besu_ranked"."besu_row" <= $2) ORDER BY "besu_ranked"."besu_row" ASC"#
+        )
+    );
+}
+
+/// A configured relation owns its order terms, so it is `Clone` rather than `Copy`. Cloning
+/// it renders the same statement, which is what makes a reusable value still reusable.
+#[test]
+fn a_configured_relation_can_be_cloned() {
+    let db = dry::<TestDialect>();
+    let recent = has_many(users.id, posts.author_id)
+        .order_by(posts.id.desc())
+        .limit(2);
+
+    let first = db.select(users).with(recent.clone()).to_sql([1]);
+    let second = db.select(users).with(recent).to_sql([1]);
+
+    assert_eq!(first[1].sql(), second[1].sql());
+    assert_eq!(first[1].args(), second[1].args());
+}
+
+/// A configured many-to-many can carry a nested relation of its own, so every level of an
+/// `m2m -> has-many` tree gets its own order and limit.
+#[test]
+fn a_limited_has_many_can_be_nested_under_a_limited_many_to_many() {
+    let db = dry::<TestDialect>();
+    let labels_relation = many_to_many(
+        posts.id,
+        post_labels.post_id,
+        post_labels.label_id,
+        labels.id,
+    );
+    let statements = db
+        .select(posts)
+        .with(
+            labels_relation.order_by(labels.name.asc()).limit(1).with(
+                has_many(labels.id, label_notes.label_id)
+                    .order_by(label_notes.id.desc())
+                    .limit(1),
+            ),
+        )
+        .to_sql_levels([vec![Value::Int(1)], vec![Value::Int(7)]]);
+
+    assert_eq!(statements.len(), 3);
+    assert_eq!(
+        statements[1].sql(),
+        concat!(
+            r#"SELECT "labels"."id", "labels"."name", "labels"."id", "besu_ranked"."post_id", "labels"."id" "#,
+            r#"FROM (SELECT "post_labels"."post_id", "post_labels"."label_id", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "post_labels"."post_id" ORDER BY "labels"."name" ASC) "#,
+            r#"AS "besu_row" FROM "post_labels" INNER JOIN "labels" "#,
+            r#"ON ("labels"."id" = "post_labels"."label_id") "#,
+            r#"WHERE ("post_labels"."post_id" IN ($1))) AS "besu_ranked" "#,
+            r#"INNER JOIN "labels" ON ("labels"."id" = "besu_ranked"."label_id") "#,
+            r#"WHERE ("besu_ranked"."besu_row" <= $2) ORDER BY "besu_ranked"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(
+        statements[2].sql(),
+        concat!(
+            r#"SELECT "label_notes"."id", "label_notes"."label_id", "label_notes"."body", "label_notes"."label_id" "#,
+            r#"FROM (SELECT "label_notes"."id", "label_notes"."label_id", "label_notes"."body", "#,
+            r#"ROW_NUMBER() OVER (PARTITION BY "label_notes"."label_id" ORDER BY "label_notes"."id" DESC) "#,
+            r#"AS "besu_row" FROM "label_notes" WHERE ("label_notes"."label_id" IN ($1))) AS "label_notes" "#,
+            r#"WHERE ("label_notes"."besu_row" <= $2) ORDER BY "label_notes"."besu_row" ASC"#
+        )
+    );
+    assert_eq!(statements[2].args(), [Value::Int(7), Value::Int(1)]);
 }
