@@ -56,12 +56,13 @@ The default is inserted verbatim, so it is only valid once the extension exists.
 
 ## Types
 
-A type an extension adds arrives as `TypeDef::Custom(name)`, and Besu renders that name
-verbatim. It can be created, introspected and compared. `citext` and PostGIS's `geometry` and
-`geography` all take this path.
+Most extension types arrive as `TypeDef::Custom(name)`, and Besu renders that name
+verbatim. It can be created, introspected and compared. `citext` and `hstore` take this path.
+PostGIS's `geometry` and `geography` and pgvector's `vector` are the exceptions: they have
+their own `TypeDef` variants and a Rust value (`Geometry`, `Vector`), so they round-trip
+through DDL and the driver.
 
-What Besu does not have is a `Decode` implementation for them, so reading one into a Rust
-value needs a cast:
+A `Custom` type has no `Decode` implementation, so reading one into a Rust value needs a cast:
 
 ```rust
 let names: Vec<String> = db
@@ -78,11 +79,12 @@ let names: Vec<String> = db
   so reading it without a `::text` cast fails at decode time. Declaring one in Rust needs a
   custom `SqlType` marker named with `#[besu(sql_type = "...")]`; a snapshot is the shorter
   path.
-- **PostGIS loses its typmod.** A `geometry(Point, 4326)` column is reported as `geometry`,
-  and DDL generated for it writes bare `geometry`. Create the column in a migration.
-- **An index with an operator class is not modelled.** `USING gin (name gin_trgm_ops)` is
-  reported as a plain index over `name`, because the IR records no access method and no
-  operator class. A snapshot from `besu pull` round-trips it; a snapshot built from the derive
-  does not contain it, and `besu generate` will write a `DROP INDEX` for it.
+- **PostGIS functions are raw SQL.** A `geometry` or `geography` column keeps its shape and
+  SRID and decodes into `Geometry`; predicates and constructors such as `ST_Intersects` are
+  written through `sql!`.
+- **An operator class is part of the index, not the extension.** `USING gin (name gin_trgm_ops)`
+  is declared with `opclass` and introspected back like any other index option; the extension
+  only has to exist before the index is created. `pg_trgm`'s similarity functions are still raw
+  SQL.
 - **`push` will not drop an extension**, and it will not remove one either. There is no
   `DROP EXTENSION` in any generated plan.

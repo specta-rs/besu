@@ -2,7 +2,9 @@
 
 A query in Besu *is* a value. A builder is a plain struct with a type parameter for the
 executor, so it can be bound to a variable, built conditionally, returned from a function and
-handed to another function. There is no separate dynamic mode to opt into.
+handed to another function. There is no separate dynamic mode to opt into for that; when the
+type-state genuinely cannot follow, [`Select::dynamic`](../queries/select.md) erases the row
+set while keeping the row type.
 
 ## Building conditionally
 
@@ -74,7 +76,7 @@ The same function works inside a transaction, because `&mut Transaction<'_, Dr>`
 ```rust
 db.transaction(async |tx| {
     let rows = scope(tx.select(users), Some(18), Some("A%")).await?;
-    Ok::<_, sqlx::Error>(rows)
+    Ok::<_, besu_sqlite::NativeError>(rows)
 })
 .await?;
 ```

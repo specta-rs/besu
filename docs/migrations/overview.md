@@ -11,6 +11,7 @@ difference can be computed rather than remembered: `push` applies it directly, a
 pub struct Schema {
     pub tables: Vec<Table>,
     pub enums: Vec<Enum>,
+    pub domains: Vec<Domain>,
     pub views: Vec<View>,
     pub sequences: Vec<Sequence>,
 }
@@ -32,7 +33,7 @@ equivalent schemas produce the same DDL and the same JSON. Empty lists are omitt
 
 What the differ manages:
 
-- **Tables, enums and their `ALTER`s.** Including whole-row changes.
+- **Tables, enums, domains and their `ALTER`s.** Including whole-row changes.
 - **Views and sequences.** A view is compared by its definition text, after folding away the
   qualifiers and formatting a database adds; a changed one is `CREATE OR REPLACE` (or dropped and
   created, where the dialect has no `OR REPLACE`). A sequence is compared by all its options.

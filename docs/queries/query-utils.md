@@ -20,9 +20,9 @@ println!("{}", sql.sql());
 assert_eq!(sql.args(), [besu::Value::Int(18)]);
 ```
 
-It exists on `Select`, `Insert`, `Update`, `Delete` and `RawQuery`. It does **not** exist once
-`returning` is called: that changes the builder's type, and the `RETURNING` clause cannot be
-rendered.
+It exists on every statement builder — `Select`, `SetQuery`, `DynamicSelect`, `Insert`,
+`Update`, `Delete` and `RawQuery` — and on the `RETURNING` forms of the writes. A `RETURNING`
+clause is rendered like any other.
 
 `to_sql` never fails on a query the builder rejected. Building records the error inside the
 `Sql` instead of returning it, so check `sql.error()` when you render something that might not
@@ -139,16 +139,14 @@ against a rendering from that dialect rather than a hand-written string.
 
 ## What Drizzle has that Besu does not
 
-- **`$count`** — no shortcut for wrapping a query in `SELECT COUNT(*)`. Use `pick(count_all())`
-  with the same filters, or write it with `sql!`.
 - **`$with`** — the relational `with` covers has-many, many-to-many and nested relation
-  values, but there is no general `$with` for arbitrary queries.
-- **`$dynamic`** — a query is a value and can be stored, passed and composed, but there is no
-  mutable dynamic handle with a changed result type.
-- **A subquery as a table** is [`derived`](select.md#derived-table), with typed columns
-  reached through the handle. There is no shorthand that infers an alias.
+  values, but there is no general `$with` for composing arbitrary queries.
+- **An inferred subquery alias.** A subquery as a table is
+  [`derived`](select.md#derived-table), with an explicit name and columns reached through the
+  handle. There is no shorthand that invents the alias.
 
-See [#104](https://github.com/specta-rs/besu/issues/104) for the composition gaps behind them.
+`$count` has the same job as `Select::count` / `SetQuery::count`, and `$dynamic` corresponds
+to `Select::dynamic` (with the row type kept), so neither is a missing feature.
 
 ## Gotchas
 
@@ -160,4 +158,6 @@ See [#104](https://github.com/specta-rs/besu/issues/104) for the composition gap
   placeholders as if they were the same statement.
 - **A stream keeps the connection busy.** The stream borrows the transaction mutably, so the
   `Rows` must be dropped before the next statement on it.
-- **`returning` has no `to_sql`.** Assert the statement before adding the clause.
+- **`returning` has a `to_sql`.** The builder changes type, but `InsertReturning`,
+  `UpdateReturning` and `DeleteReturning` all render, so assert the exact statement you will
+  run.

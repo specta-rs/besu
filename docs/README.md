@@ -57,6 +57,8 @@ are in the query, and whether a bulk write was intentional.
 - [Seeding](advanced/seeding.md)
 - [Cache](advanced/cache.md)
 - [Read replicas](advanced/read-replicas.md)
+- [Browser bridge](drivers.md#the-bridge-driver) — typed queries in a browser through an HTTP
+  endpoint
 
 ## Reference
 

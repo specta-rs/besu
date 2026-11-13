@@ -81,12 +81,12 @@ The CLI's equivalent is `--destructive`; the library calls it `push_destructive`
 
 ## What it ignores
 
-`push` manages tables, columns, indexes, uniques, foreign keys, checks, PostgreSQL enum types
-and — when the declaration names them — views and sequences. Everything else the IR cannot
-express is left exactly as it is:
+`push` manages tables, columns, indexes, uniques, foreign keys, checks, PostgreSQL enum and
+domain types and — when the declaration names them — views and sequences. Everything else the
+IR cannot express is left exactly as it is:
 
 - extensions, see [extensions](../schema/extensions.md);
-- triggers, expression indexes, `INCLUDE` indexes and exclusion constraints.
+- triggers, `INCLUDE` indexes and exclusion constraints.
 
 **Views and sequences are opt-in**, and this is the one asymmetry worth memorising. A
 declaration that names *no* views cannot distinguish "I did not mention views" from "I want

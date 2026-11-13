@@ -91,9 +91,9 @@ details and examples:
 - [extensions](../schema/extensions.md) — `CREATE EXTENSION` and the types it adds;
 - [sequences](../schema/sequences.md) — a standalone sequence and its `nextval` default.
 
-The same applies to triggers and expression indexes. On SQLite a composite `UNIQUE` or a
-`CHECK` cannot be added to an existing table at all, and on both SQLite and MySQL a `CHECK` is
-not introspected. A data backfill belongs here too:
+The same applies to triggers and partial indexes. On SQLite a composite `UNIQUE` cannot be
+added to or dropped from an existing table; a `CHECK` change is applied by rebuilding the
+table, and MySQL introspects a check only on 8.0.16 or later. A data backfill belongs here too:
 
 ```sql
 -- 0004_backfill_emails.sql

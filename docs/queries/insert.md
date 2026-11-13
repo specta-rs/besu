@@ -282,7 +282,7 @@ attach it to.
   `do_update_filter` after it.
 - **Do not write `.into()` on insert arguments.** The parameter is `impl Into<String>`, so the
   target type is not concrete and the compiler sees several `From` implementations.
-- **`to_sql()` is not available once you call `returning`.** The builder changes type, so assert
-  the plain insert instead.
+- **`returning` changes the builder type but still renders.** `InsertReturning::to_sql` exists,
+  so assert the exact `INSERT ... RETURNING` rather than assuming the pre-returning text.
 - **A `NOT NULL` column with `#[besu(default = ..)]` is optional too**, and an upsert target
   must match a real unique constraint — the columns are checked, the constraint is not.

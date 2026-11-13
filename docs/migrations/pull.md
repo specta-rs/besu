@@ -26,8 +26,9 @@ besu pull --database postgres://user:pass@host/db --out schema.json
 besu pull --database sqlite:app.db > schema.json
 ```
 
-The output is `Schema` serialised with `serde_json`: tables, enum types, views and sequences
-where the dialect has them. Empty lists are omitted, so a SQLite snapshot contains only tables.
+The output is `Schema` serialised with `serde_json`: tables, enum and domain types, views and
+sequences where the dialect has them. Empty lists are omitted, so a SQLite snapshot contains
+only tables.
 
 ```json
 {
@@ -50,7 +51,7 @@ The exact fields are the ones in [the overview](overview.md#the-schema-ir).
 - **Columns**, including nullability, identity, defaults, primary keys and single-column
   uniques.
 - **Indexes, composite uniques, foreign keys and checks** where the driver can report them.
-- **Enum types**, on PostgreSQL.
+- **Enum and domain types**, on PostgreSQL.
 - **Views**, so the snapshot names them. The differ ignores them.
 
 A table in the connection's `current_schema()` is written unqualified; a table anywhere else
@@ -62,11 +63,11 @@ carries its schema, because a table's identity is `(schema, name)`. See
 Introspection skips an object the IR cannot describe rather than reporting a lossy version of
 it, because `push` would then try to drop or replace it:
 
-- expression indexes and `INCLUDE` indexes;
+- `INCLUDE` indexes;
 - indexes behind a constraint, and exclusion constraints;
 - triggers;
 - a view whose definition the connected role cannot see;
-- `CHECK` constraints on SQLite and MySQL;
+- `CHECK` constraints on a MySQL server older than 8.0.16;
 - a partial index's predicate on SQLite and MySQL.
 
 ## Gotchas

@@ -30,11 +30,11 @@
 //!
 //! # The honest limits
 //!
-//! A batch is **not** one round trip. sqlx has no pipeline API, so the statements are sent
-//! one after another over the transaction's connection, exactly as if you had awaited them
-//! in sequence yourself. What a batch buys is the transaction and the typing, not fewer
-//! messages. If a round trip count matters, a multi-row `INSERT` or a `VALUES` list is the
-//! tool; see [`Insert::values`].
+//! A batch is **not** one round trip. No shipped driver here exposes PostgreSQL's pipeline
+//! protocol, so the statements are sent one after another over the transaction's connection,
+//! exactly as if you had awaited them in sequence yourself. What a batch buys is the
+//! transaction and the typing, not fewer messages. If a round trip count matters, a multi-row
+//! `INSERT` or a `VALUES` list is the tool; see [`Insert::values`].
 //!
 //! A batch is a **fixed-arity tuple**, not a list. That is a deliberate choice: the tuple is
 //! what makes each element keep its own output type, so `db.batch((insert, select))` can
@@ -554,9 +554,9 @@ impl<Dr: TransactionDriver> Database<Dr> {
     ///
     /// # One `await`, not one round trip
     ///
-    /// The statements are sent one after another: sqlx exposes no pipeline, so this is not
-    /// fewer round trips than awaiting each statement. It is one `await`, one transaction
-    /// and a typed tuple, and that is all it claims.
+    /// The statements are sent one after another: no shipped driver exposes PostgreSQL's
+    /// pipeline protocol, so this is not fewer round trips than awaiting each statement. It is
+    /// one `await`, one transaction and a typed tuple, and that is all it claims.
     ///
     /// # Fixed arity
     ///

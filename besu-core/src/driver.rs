@@ -6,9 +6,9 @@ use crate::{Dialect, Error, Sql};
 
 /// A stream of rows, borrowed from the statement and the connection it was started on.
 ///
-/// Streaming has to borrow rather than own: sqlx needs the SQL text to outlive the cursor, and
-/// a transaction needs to stay borrowed for as long as the cursor is open. The lifetime is why
-/// [`Sql`] is passed by reference.
+/// Streaming has to borrow rather than own: a driver needs the SQL text to outlive the cursor,
+/// and a transaction needs to stay borrowed for as long as the cursor is open. The lifetime is
+/// why [`Sql`] is passed by reference.
 pub type RowStream<'a, D> =
     Pin<Box<dyn Stream<Item = Result<<D as Driver>::Row, <D as Driver>::Error>> + Send + 'a>>;
 

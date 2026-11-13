@@ -308,13 +308,13 @@ the inspection methods still render it so the shape is visible.
 
 ## What is not modelled
 
-- **The other direction.** There is no `belongs_to`: a child does not carry a loaded parent.
-  Query the parent by key, or use a join.
-- **Writing.** Inserting a parent and its children together is not part of this API. The
-  insert builder is generic over an executor, which has no portable way to begin a
-  transaction, and MySQL has no `RETURNING` to hand back a generated parent key. Write the two
-  inserts inside [`Database::transaction`], or make the foreign key deferrable and insert the
-  children once the parent key is known:
+- **Writing a parent and its children together.** This is the one relation feature still
+  missing: relation values, many-to-many, nested eager loading and per-parent limits/ordering
+  are all supported, but the insert builder has no parent+children form. The insert builder is
+  generic over an executor, which has no portable way to begin a transaction, and MySQL has
+  no `RETURNING` to hand back a generated parent key. Write the two inserts inside
+  [`Database::transaction`], or make the foreign key deferrable and insert the children once
+  the parent key is known:
   ```rust
   db.transaction(async |tx| {
       let user = tx.insert(users).value(users.insert(..)).returning(users).await?;
@@ -323,6 +323,8 @@ the inspection methods still render it so the shape is visible.
   })
   .await?;
   ```
+- **The other direction.** There is no `belongs_to`: a child does not carry a loaded parent.
+  Query the parent by key, or use a join.
 - **Relationships in the schema.** Nothing is stored on `TableDef`. The foreign key is a
   separate declaration, and a relation works whether or not the database enforces it.
 - **Join rows in the result.** A many-to-many yields the child models, not the join rows. If

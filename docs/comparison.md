@@ -13,7 +13,7 @@ more nuanced, because Diesel, SeaORM and sqlx occupy three different points on t
 | Async | Native | Via `diesel-async` | Native | Native | Native (JS) |
 | Query style | Method chain that mirrors SQL | Method chain over a type-level DSL | `SeaQuery` builder | SQL strings | Object/method chain |
 | Compile-time schema check | Struct declaration | `table!` declaration | Entity declaration | Live database (`query!`) | TypeScript types |
-| Relations / eager loading | No, tracked in [#97](https://github.com/specta-rs/besu/issues/97) | Joins only | Yes | Manual | Yes (relational queries) |
+| Relations / eager loading | Yes: relation values, many-to-many, nesting | Joins only | Yes | Manual | Yes (relational queries) |
 | Migrations | Schema IR diff + SQL files | `diesel_migrations` | `sea-orm-cli` | `sqlx-cli` | `drizzle-kit` |
 | Backends | SQLite, PostgreSQL, MySQL | SQLite, PostgreSQL, MySQL | SQLite, PostgreSQL, MySQL | Many | PostgreSQL, MySQL, SQLite |
 | Raw SQL | `sql!` with bound parameters | `sql_query` | `Statement` | Native | `sql` template |
@@ -48,10 +48,11 @@ and query through `Entity::find()`; `find_with_related` performs an eager load, 
 
 Where Besu differs:
 
-- **No relations.** Besu has joins, but no `Related`, no lazy loading, no `find_with_related`
-  and no entity graph. You write the join and you get a tuple. This is the single biggest
-  functional gap; relations and eager loading are tracked in
-  [#97](https://github.com/specta-rs/besu/issues/97).
+- **Relations are values, not an entity graph.** Besu has `has_many` and `many_to_many`,
+  eager loads them with one extra visible statement per level, and supports nesting and
+  per-parent limits. There is still no `Related`, no lazy loading, no `find_with_related`
+  entity API and no `belongs_to`: you attach the relation you want and get a tuple such as
+  `(User, Vec<Post>)`.
 - **No ActiveModel.** An update is `set(column, value)` / `set_expr(column, expr)`, not a
   partially populated model. There is no hidden "only changed fields" behaviour.
 - **The SQL is the API.** SeaORM's builder is pleasant but it is still an abstraction over
@@ -59,9 +60,9 @@ Where Besu differs:
 - **Migrations are schema diffs.** SeaORM's migrations are Rust files with `up`/`down`
   methods; Besu's are generated SQL reviewed by a human.
 
-Where SeaORM wins: relations, eager loading, a larger feature surface (soft deletes,
-pagination helpers, nested transactions/savepoints), and a mature migration workflow with
-rollbacks. If your application is an object graph, SeaORM's model is a better fit.
+Where SeaORM wins: an entity graph with `belongs_to` and lazy loading, a larger feature surface
+(soft deletes, pagination helpers), and a mature migration workflow with rollbacks. If your
+application is an object graph, SeaORM's model is a better fit.
 
 ## sqlx
 
@@ -101,8 +102,9 @@ Where Besu differs:
 - **A smaller Studio.** Drizzle Studio is a database browser and query inspector;
   [`besu studio`](migrations/studio.md) is a development-only page with a paged row browser and
   a one-statement SQL box.
-- **Relational queries.** Drizzle has a relational query API that returns nested objects.
-  Besu returns tuples and has no relations yet.
+- **Relational queries.** Drizzle's relational API returns nested objects. Besu's `with`
+  returns a tuple — `(User, Vec<Post>)` — so the graph is explicit and each level is a visible
+  statement, not a generated schema relation.
 - **Ecosystem.** Drizzle's ecosystem (adapters, Studio, community plugins) is much larger.
 
 Where Drizzle wins: front-end integration, a mature migration tool, relational queries, and
@@ -112,20 +114,24 @@ the enormous TypeScript ecosystem. If your application is TypeScript, Besu is no
 
 Being honest about the gaps is more useful than a feature matrix:
 
-- **No relations or eager loading.** Joins are manual and return tuples.
-- **No streaming.** `Driver::query` collects every row into a `Vec`. A large result set is
-  fully buffered.
+- **No entity graph or lazy loading.** Relations are eager and explicit: `with(has_many(..))`
+  runs its own visible statement, the result is a tuple, and there is no `belongs_to`, no lazy
+  relation and no identity map. Writing a parent and its children together is a transaction
+  you write, not an API call.
+- **Streaming is per driver.** `db.stream` decodes a row at a time on PostgreSQL and MySQL;
+  SQLite's native driver collects the rows first because its connection is synchronous.
 - **No compile-time check against the live database.** A renamed column is a runtime error.
 - **Early.** The API is not stable, the crates are `0.1`, and there are fewer escape hatches
   than in a decade-old library.
 - **No down migrations.** The runner is append-only; rolling back means writing another
   migration.
-- **No prepared-statement cache of its own.** It delegates to the driver (sqlx), so caching
-  behaviour is whatever the pool does.
-- **Fewer column types.** No ranges and no native `decimal` in Rust; a `u128` and an array are
-  modelled but some database-native types still round-trip through DDL only.
-- **No query observability hooks.** There is no tracing span, no slow-query log and no
-  `EXPLAIN` helper in the API.
+- **No prepared-statement cache of its own.** It delegates to the driver (native or sqlx), so
+  caching behaviour is whatever that driver or pool does.
+- **Fewer column types.** There is no native Rust `decimal` — decimals are exact strings — and
+  types such as `halfvec`, `sparsevec` and most extension types still round-trip through DDL
+  only.
+- **Observability is one wrapper.** `besu::logged(driver)` adds tracing, timing and a
+  slow-query warning, but there is no `EXPLAIN` helper and no metrics API.
 
 ## When to choose something else
 

@@ -128,8 +128,8 @@ that happens to match all of them is the version that reaches production.
 - **A limit does not make a delete safe.** Add a filter or `all_rows`, then the limit.
 - **There are no joins in a delete.** No `DELETE ... USING`, and no joined table in the filter.
   Filter on a subquery written with `raw`, or restructure the statement.
-- **`returning` cannot be rendered.** The builder changes type, so there is no `to_sql()` for a
-  `DELETE ... RETURNING`.
+- **`returning` still renders.** The builder changes type, but
+  `DeleteReturning::to_sql` exists, so assert the exact `DELETE ... RETURNING`.
 - **MySQL cannot return the deleted rows.** Select them first, or read `rows_affected()` from
   the driver output.
 - **`all_rows()` inside a transaction is still committed** when the transaction commits. It has

@@ -78,8 +78,8 @@ pub payload: Vec<u8>,
 
 ## Time
 
-Dates and times are stored as text in the formats sqlx uses: `%F` for a date, `%T%.f` for a
-time, `%F %T%.f` for a timestamp, and RFC 3339 (with an offset) for a `DateTime<Utc>`.
+Dates and times are stored as text in the formats both drivers use: `%F` for a date, `%T%.f`
+for a time, `%F %T%.f` for a timestamp, and RFC 3339 (with an offset) for a `DateTime<Utc>`.
 
 ```rust
 pub on: chrono::NaiveDate,                       // "2024-05-17"
@@ -107,7 +107,7 @@ marker, and it renders `JSON` here anyway.
 ## UUID
 
 `uuid::Uuid` is declared `UUID` and stored as a 16-byte `BLOB`, not as the 36-character string.
-That is what sqlx does with a `Uuid` and it is what comes back.
+Both drivers write and read it the same way.
 
 ```rust
 pub id: uuid::Uuid,
@@ -219,10 +219,10 @@ know — an existing `MONEY` or `GEOMETRY` column, for example. The type name is
 generated DDL round-trips, but no driver decodes it: there is no Rust type to decode into. Keep
 such a column out of your model, or read it through `sql!` and a cast.
 
-Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98). Intervals,
-network addresses, bit strings, MySQL's `SET`, ranges, vectors and spatial values are not
-`Custom`: they are stored as `TEXT` or `BLOB` and round-trip through the driver. A SpatiaLite
-`geometry` column is the exception, described above.
+Intervals, network addresses, bit strings, MySQL's `SET`, ranges, vectors and spatial values
+have their own `TypeDef` variants and are not `Custom`: on SQLite they are stored as `TEXT` or
+`BLOB` and round-trip through the driver. A SpatiaLite `geometry` column is the exception,
+described above; Besu ships no `Decode` implementation for a `Custom` type.
 
 ## Gotchas
 

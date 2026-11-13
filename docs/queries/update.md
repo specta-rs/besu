@@ -142,8 +142,8 @@ than a compile error.
   and no joined column in the filter. Use `raw` for a subquery, or restructure the statement.
 - **`all_rows()` removes the compiler's objection, not the risk.** It is the only way to write
   a full-table update, and it is exactly what you should read twice in a diff.
-- **`returning` cannot be rendered.** Once it is called the builder changes type and has no
-  `to_sql()`, so assert the SQL before adding the clause.
+- **`returning` still renders.** Once it is called the builder changes type, but
+  `UpdateReturning::to_sql` exists, so assert the exact `UPDATE ... RETURNING`.
 - **A nullable column needs an `Option`.** `None::<String>` is usually needed to spell the type;
   a bare `None` often cannot be inferred.
 - **MySQL cannot return the modified rows.** Select them before or after the write, or read

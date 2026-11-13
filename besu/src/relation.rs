@@ -133,10 +133,12 @@
 //! # What is not modelled
 //!
 //! A relation is described entirely by the columns it joins on, so the schema layer does not
-//! change: there is no relation list on [`TableDef`], and no lookup by name. Inserting a
-//! parent and its children together is not part of this API either: the insert builder is
-//! generic over an executor, which has no portable way to begin a transaction, and MySQL has
-//! no `RETURNING` to hand back the generated parent key. Write the two inserts inside
+//! change: there is no relation list on [`TableDef`], and no lookup by name. The one relation
+//! feature still missing is writing: inserting a parent and its children together is not part
+//! of this API. Everything else — reusable relation values, many-to-many, nesting and
+//! per-parent limits/ordering — is supported. The insert builder is generic over an executor,
+//! which has no portable way to begin a transaction, and MySQL has no `RETURNING` to hand back
+//! the generated parent key. Write the two inserts inside
 //! [`Database::transaction`](crate::Database::transaction) instead. There is no `belongs_to`
 //! (a child does not load its parent), and a many-to-many yields the child models rather than
 //! the join rows, so a join table with data of its own is queried directly.

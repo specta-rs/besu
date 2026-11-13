@@ -23,6 +23,7 @@ the second is the select's decoded rows, `Vec<User>`.
 | `INSERT`, `UPDATE`, `DELETE` | `db.insert(users).value(..)` | the driver's output, usually affected rows |
 | `SELECT` | `db.select(users).filter(..)` | `Vec<R>` |
 | `SetQuery` | `db.select(a).union(db.select(b))` | `Vec<R>` |
+| `DynamicSelect` | `db.select(users).dynamic()` | `Vec<R>` |
 | `INSERT` / `UPDATE` / `DELETE ... RETURNING` | `db.insert(users).returning(users)` | `Vec<R>` |
 
 Each element keeps its own output type, so one tuple can mix them. A select and a write in
@@ -69,9 +70,10 @@ returned at all: a partial result would invite a caller to act on a read that wa
 
 ## One `await`, not one round trip
 
-This is the part worth being honest about. PostgreSQL has a pipeline protocol, but sqlx does
-not expose it, and the SQLite and MySQL drivers do not pipeline at all. So a batch sends its
-statements **sequentially** over one connection, exactly as a sequence of `await`s would.
+This is the part worth being honest about. PostgreSQL has a pipeline protocol, but neither
+`tokio-postgres` nor sqlx exposes it, and the SQLite and MySQL drivers do not pipeline at all.
+So a batch sends its statements **sequentially** over one connection, exactly as a sequence of
+`await`s would.
 
 What a batch buys is:
 

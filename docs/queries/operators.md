@@ -328,9 +328,9 @@ database does not have, and using it records `unsupported`.
 | `log(base, value)` | `LN(value) / LN(base)`, on every dialect | | |
 
 SQLite's mathematical functions — `sqrt`, `power`, `exp`, `ln`, `log10`, `sign`, `trunc`,
-`ceil` and `floor` — need `SQLITE_ENABLE_MATH_FUNCTIONS`, which the amalgamation `sqlx`
-builds does not set. They are unavailable there and record `unsupported`; `abs`, `round` and
-`round_to` are part of SQLite's core and work.
+`ceil` and `floor` — need `SQLITE_ENABLE_MATH_FUNCTIONS`, which the bundled SQLite the drivers
+build does not enable. They are unavailable through either driver and record `unsupported`;
+`abs`, `round` and `round_to` are part of SQLite's core and work.
 
 `log(base, value)` is written as `LN(value) / LN(base)` rather than calling `LOG`, because
 there is no portable spelling: PostgreSQL's two-argument `log` wants `numeric`, MySQL's
