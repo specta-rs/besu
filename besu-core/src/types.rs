@@ -73,14 +73,27 @@ pub enum TypeDef {
     Decimal(u8, u8),
     /// A fixed-length bit string, as in PostgreSQL's `BIT(n)`.
     ///
-    /// It is modelled so a `pull` → `push` keeps the width, but no driver decodes it: there
-    /// is no bit-string [`Value`](crate::Value) variant.
+    /// MySQL's `BIT(n)` and PostgreSQL's type share the same canonical form; SQLite stores
+    /// the bits as text. The value is [`BitString`](crate::BitString).
     Bit(u32),
     /// A variable-length bit string, as in PostgreSQL's `BIT VARYING(n)`.
     ///
     /// A width of zero means the declaration had no modifier, which is unlimited. See
-    /// [`TypeDef::Bit`] for why it is modelled but not decoded.
+    /// [`TypeDef::Bit`].
     VarBit(u32),
+    /// A SQL interval.
+    ///
+    /// PostgreSQL has a native `INTERVAL`; MySQL has none, and SQLite stores the canonical
+    /// text. The value is [`SqlInterval`](crate::SqlInterval).
+    Interval,
+    /// A PostgreSQL `INET` address.
+    ///
+    /// The value is [`Inet`](crate::Inet). MySQL and SQLite store the canonical text.
+    Inet,
+    /// A PostgreSQL `CIDR` network.
+    ///
+    /// The value is [`Cidr`](crate::Cidr). MySQL and SQLite store the canonical text.
+    Cidr,
     /// A type carrying an explicit collation, as in `TEXT COLLATE "C"`.
     ///
     /// Collation is part of a column's type in every dialect Besu supports: it changes
@@ -113,11 +126,60 @@ pub enum TypeDef {
     /// [`normalise_type`](crate::Dialect) so a declaration and the column the database
     /// reports back compare equal.
     Enum(EnumDef),
+    /// A MySQL `SET`: a column that holds any combination of a fixed label set.
+    ///
+    /// The labels are the [`EnumLabels`] holder an enum uses. MySQL is the only dialect with
+    /// the type, so the DDL is inline — `SET('a','b')` — exactly as an inline enum is. The
+    /// value is a text string of the chosen labels separated by commas, which is the form
+    /// MySQL itself sends; [`TypeDef::Set`] carries the labels so a declaration and the
+    /// database converge.
+    Set(EnumLabels),
+    /// A PostgreSQL domain: a name for a base type, with optional constraints.
+    ///
+    /// PostgreSQL reports a domain as a type of its own. Keeping only [`TypeDef::Custom`]
+    /// would make the column impossible to describe, so the name and the base type are both
+    /// modelled: DDL creates the domain, the column is declared with the domain's name, and
+    /// a value is decoded and written through the base type's binary format. The constraints
+    /// and default a domain can carry are not modelled; see the PostgreSQL column-type page.
+    Domain(DomainDef),
     /// An arbitrary type the user asked for verbatim, for example a Postgres domain.
     ///
     /// Introspection uses this for database-native types Besu does not model, so it holds a
     /// `Cow` rather than a plain `&'static str`.
     Custom(alloc::borrow::Cow<'static, str>),
+}
+
+/// A PostgreSQL domain: a name and the type it is built on.
+///
+/// The name is qualified the same way a table or an enum is: `public.positive` in a schema
+/// that is not the connection's default, and `positive` otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DomainDef {
+    /// The domain's name, possibly schema-qualified.
+    pub name: alloc::borrow::Cow<'static, str>,
+    /// The type the domain is built on.
+    ///
+    /// A [`TypeRef`] rather than a `Box<TypeDef>` because a declared type is part of a `const`
+    /// [`TableDef`](crate::TableDef), and a boxed value cannot be built in a constant.
+    pub base: TypeRef,
+}
+
+impl DomainDef {
+    /// Construct a domain in a constant expression.
+    pub const fn new(name: &'static str, base: &'static TypeDef) -> Self {
+        Self {
+            name: alloc::borrow::Cow::Borrowed(name),
+            base: TypeRef::from_static(base),
+        }
+    }
+
+    /// Construct a domain whose name and base type were computed at run time.
+    pub fn owned(name: impl Into<alloc::string::String>, base: TypeDef) -> Self {
+        Self {
+            name: alloc::borrow::Cow::Owned(name.into()),
+            base: TypeRef::owned(base),
+        }
+    }
 }
 
 /// A set of enum labels, in the order they were declared.
@@ -499,5 +561,38 @@ mod tests {
         let def = EnumDef::owned("empty", Vec::<String>::new());
         assert!(def.is_empty());
         assert_eq!(def.iter().next(), None);
+    }
+
+    #[test]
+    fn a_domain_is_constructible_in_a_constant() {
+        // A domain's name and base type are part of a declared column's metadata, which lives
+        // in a `const TableDef`, so neither may allocate.
+        const POSITIVE: TypeDef = TypeDef::Domain(DomainDef::new("positive", &TypeDef::Int4));
+        let TypeDef::Domain(def) = &POSITIVE else {
+            unreachable!("the constant must be a domain");
+        };
+        assert_eq!(def.name, "positive");
+        assert_eq!(def.base.as_type(), &TypeDef::Int4);
+
+        let owned = DomainDef::owned("positive", TypeDef::Int4);
+        assert_eq!(*def, owned);
+    }
+
+    #[test]
+    fn a_domain_serialises_its_name_and_base() {
+        let ty = TypeDef::Domain(DomainDef::new("positive", &TypeDef::Int4));
+        let json = serde_json::to_string(&ty).expect("a domain must serialise");
+        assert_eq!(json, r#"{"Domain":{"name":"positive","base":"Int4"}}"#);
+        let decoded: TypeDef = serde_json::from_str(&json).expect("a domain must deserialise");
+        assert_eq!(decoded, ty);
+    }
+
+    #[test]
+    fn a_set_compares_by_its_labels() {
+        // A declared `SET` holds static labels while the one introspection reports is owned;
+        // they are the same type, so every push does not see a change.
+        let declared = TypeDef::Set(EnumLabels::from_static(&["read", "write"]));
+        let introspected = TypeDef::Set(EnumLabels::owned(vec!["read".into(), "write".into()]));
+        assert_eq!(declared, introspected);
     }
 }

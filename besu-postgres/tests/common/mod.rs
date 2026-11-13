@@ -100,11 +100,12 @@ pub async fn reset(db: &besu::Database<Sqlx>) {
     }
 
     // A type outlives the table that used it, so an interrupted run leaves it behind too.
-    let types: Vec<(String, String)> = db
+    // A domain needs `DROP DOMAIN`; an enum needs `DROP TYPE`.
+    let types: Vec<(String, String, String)> = db
         .execute(sql!(
-            "SELECT n.nspname, t.typname FROM pg_type t \
+            "SELECT n.nspname, t.typname, t.typtype::text FROM pg_type t \
              JOIN pg_namespace n ON n.oid = t.typnamespace \
-             WHERE t.typtype = 'e' \
+             WHERE t.typtype IN ('e', 'd') \
                AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
                AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'"
         ))
@@ -112,9 +113,10 @@ pub async fn reset(db: &besu::Database<Sqlx>) {
         .await
         .expect("the type list must be readable");
 
-    for (schema, name) in types {
+    for (schema, name, kind) in types {
+        let keyword = if kind == "d" { "DOMAIN" } else { "TYPE" };
         let statement = format!(
-            "DROP TYPE IF EXISTS {}.{} CASCADE",
+            "DROP {keyword} IF EXISTS {}.{} CASCADE",
             quote_ident(&schema),
             quote_ident(&name)
         );

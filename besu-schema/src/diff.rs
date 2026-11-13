@@ -1,4 +1,6 @@
-use crate::{Check, Column, Enum, ForeignKey, Index, Schema, Sequence, Table, Unique, View};
+use crate::{
+    Check, Column, Domain, Enum, ForeignKey, Index, Schema, Sequence, Table, Unique, View,
+};
 
 /// How much damage applying a [`Change`] can do.
 ///
@@ -53,6 +55,13 @@ pub enum Change {
         name: String,
         /// The value being removed.
         value: String,
+    },
+    /// A domain exists only in the desired schema.
+    CreateDomain(Domain),
+    /// A domain exists only in the current schema and nothing declares it.
+    DropDomain {
+        /// The domain's name.
+        name: String,
     },
     /// A column was added.
     AddColumn {
@@ -179,7 +188,9 @@ impl Change {
     /// How dangerous this change is.
     pub fn safety(&self) -> Safety {
         match self {
-            Self::CreateTable(_) | Self::CreateEnum(_) | Self::CreateSequence(_) => Safety::Safe,
+            Self::CreateTable(_) | Self::CreateEnum(_) | Self::CreateDomain(_) | Self::CreateSequence(_) => {
+                Safety::Safe
+            }
             // A view is only a stored query, so creating one cannot touch a row.
             Self::CreateView(_) => Safety::Safe,
             // A rename rewrites metadata, and can break views or code that named the old
@@ -230,6 +241,8 @@ impl Change {
             | Self::DropCheck { .. }
             // Rows that still hold an enum value no longer in the type are unreadable.
             | Self::DropEnum { .. }
+            // A domain's columns stop resolving when the type goes.
+            | Self::DropDomain { .. }
             // A view that something else reads from stops resolving, and a sequence that
             // another default calls starts failing.
             | Self::DropView { .. }
@@ -247,7 +260,9 @@ impl Change {
             Self::CreateEnum(_)
             | Self::DropEnum { .. }
             | Self::AddEnumValue { .. }
-            | Self::RemoveEnumValue { .. } => None,
+            | Self::RemoveEnumValue { .. }
+            | Self::CreateDomain(_)
+            | Self::DropDomain { .. } => None,
             // A view or sequence is not a table: it has no columns to rebuild and SQLite's
             // table-rebuilding path must not treat it as one.
             Self::CreateView(_)
@@ -283,6 +298,8 @@ impl core::fmt::Display for Change {
             Self::RemoveEnumValue { name, value } => {
                 write!(f, "remove value {value} from enum {name}")
             }
+            Self::CreateDomain(domain) => write!(f, "create domain {}", domain.name),
+            Self::DropDomain { name } => write!(f, "drop domain {name}"),
             Self::AddColumn { table, column } => {
                 write!(f, "add column {table}.{}", column.name)
             }
@@ -385,13 +402,10 @@ pub fn diff_with(
             .iter()
             .filter(|table| managed.contains(&table.schema.as_deref()))
             .any(|table| {
-                table.columns.iter().any(|column| match &column.ty {
-                    // A column of a type read back from PostgreSQL.
-                    besu_core::TypeDef::Custom(ty) => ty.as_ref() == name,
-                    // A column whose type carries the enum inline, as a declared one does.
-                    besu_core::TypeDef::Enum(def) => def.name.as_ref() == name,
-                    _ => false,
-                })
+                table
+                    .columns
+                    .iter()
+                    .any(|column| crate::ir::type_names(&column.ty, name))
             })
     }
 
@@ -421,6 +435,14 @@ pub fn diff_with(
                     value: value.clone(),
                 });
             }
+        }
+    }
+
+    // Domains come after the enums they can be built on and before the tables whose columns
+    // name them. One domain can be built on another, so they are added in dependency order.
+    for desired_domain in desired.ordered_domains() {
+        if current.find_domain(&desired_domain.name).is_none() {
+            changes.push(Change::CreateDomain(desired_domain.clone()));
         }
     }
 
@@ -517,6 +539,24 @@ pub fn diff_with(
         }
     }
 
+    // Domains: a table that uses one is already gone by this point, and an enum a domain is
+    // built on must still exist, so this runs before the enum drop below.
+    // A domain built on another has to go first, so the dependent is dropped first.
+    for existing in current.ordered_domains().into_iter().rev() {
+        if desired.find_domain(&existing.name).is_some() {
+            continue;
+        }
+        if required_by_a_column(desired, &existing.name, &managed) {
+            continue;
+        }
+        if !required_by_a_column(current, &existing.name, &managed) {
+            continue;
+        }
+        changes.push(Change::DropDomain {
+            name: existing.name.clone(),
+        });
+    }
+
     // Enums last: the tables that use them are already gone by this point.
     for existing in &current.enums {
         if desired.find_enum(&existing.name).is_some() {
@@ -549,6 +589,8 @@ pub fn diff_with(
         // Sequences next: a column default may call one.
         Change::CreateSequence(_) => 1,
         Change::CreateEnum(_) => 2,
+        // A domain can be built on an enum, so it follows the enum creation.
+        Change::CreateDomain(_) => 2,
         Change::CreateTable(_) => 3,
         Change::AddColumn { .. } => 4,
         Change::RenameColumn { .. } => 5,
@@ -575,10 +617,13 @@ pub fn diff_with(
         Change::CreateView(_) => 18,
         Change::DropColumn { .. } => 20,
         Change::DropTable { .. } => 21,
-        Change::RemoveEnumValue { .. } => 22,
-        Change::DropEnum { .. } => 23,
+        // A domain's columns are gone with the table, and an enum it is built on has to
+        // outlive it.
+        Change::DropDomain { .. } => 22,
+        Change::RemoveEnumValue { .. } => 23,
+        Change::DropEnum { .. } => 24,
         // A table that defaults to a sequence has to be gone before the sequence is.
-        Change::DropSequence { .. } => 24,
+        Change::DropSequence { .. } => 25,
     });
 
     changes
@@ -975,6 +1020,64 @@ mod tests {
         let changes = diff(&Schema::new(), &desired);
         assert!(matches!(&changes[0], Change::CreateEnum(e) if e.name == "mood"));
         assert!(matches!(&changes[1], Change::CreateTable(t) if t.name == "reviews"));
+    }
+
+    #[test]
+    fn a_domain_is_created_before_the_table_that_uses_it() {
+        let domain = besu_core::DomainDef::new("positive", &TypeDef::Int4);
+        let mut priced = table(
+            "priced",
+            vec![column("amount", TypeDef::Domain(domain.clone()))],
+        );
+        priced.uniques = Vec::new();
+        let desired = Schema {
+            tables: vec![priced],
+            domains: vec![crate::Domain {
+                name: "positive".into(),
+                base: TypeDef::Int4,
+            }],
+            ..Schema::default()
+        };
+
+        let changes = diff(&Schema::new(), &desired);
+        assert!(
+            matches!(&changes[0], Change::CreateDomain(domain) if domain.name == "positive"),
+            "got {changes:?}"
+        );
+        assert!(matches!(&changes[1], Change::CreateTable(t) if t.name == "priced"));
+    }
+
+    #[test]
+    fn dropping_a_domain_that_a_table_used_is_destructive_and_comes_after_the_table() {
+        let domain = besu_core::DomainDef::new("positive", &TypeDef::Int4);
+        let current = Schema {
+            tables: vec![table(
+                "priced",
+                vec![column("amount", TypeDef::Domain(domain))],
+            )],
+            domains: vec![crate::Domain {
+                name: "positive".into(),
+                base: TypeDef::Int4,
+            }],
+            ..Schema::default()
+        };
+
+        let changes = diff(&current, &Schema::new());
+        assert!(matches!(&changes[0], Change::DropTable { name } if name == "priced"));
+        assert!(matches!(&changes[1], Change::DropDomain { name } if name == "positive"));
+        assert_eq!(worst_safety(&changes), Safety::Destructive);
+    }
+
+    #[test]
+    fn a_domain_nothing_uses_is_left_alone() {
+        let current = Schema {
+            domains: vec![crate::Domain {
+                name: "positive".into(),
+                base: TypeDef::Int4,
+            }],
+            ..Schema::default()
+        };
+        assert!(diff(&current, &Schema::new()).is_empty());
     }
 
     #[test]

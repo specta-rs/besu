@@ -5,6 +5,7 @@ use core::marker::PhantomData;
 use alloc::string::String;
 
 use besu_core::TypeDef;
+pub use besu_core::scalars::{BitString, Cidr, Inet, SqlInterval};
 use besu_core::types::TypeRef;
 use besu_core::value::Value;
 
@@ -316,6 +317,60 @@ impl<const PRECISION: u8, const SCALE: u8> SqlType for Decimal<PRECISION, SCALE>
     type Rust = String;
 }
 
+/// SQL `INTERVAL`.
+///
+/// The value type names the column type itself, the way [`SqlEnum`] does: a field of
+/// [`SqlInterval`] is an interval column without an explicit `sql_type`. The name is
+/// `SqlInterval` rather than `Interval` because `besu::Interval` is the interval *literal*
+/// builder used by `date_add` and friends.
+impl SqlType for SqlInterval {
+    const DEF: TypeDef = TypeDef::Interval;
+    type Rust = SqlInterval;
+}
+
+/// SQL `INET`.
+///
+/// The value type names the column type itself. MySQL and SQLite have no address type and
+/// store the canonical text, which is why the same declaration works there too.
+impl SqlType for Inet {
+    const DEF: TypeDef = TypeDef::Inet;
+    type Rust = Inet;
+}
+
+/// SQL `CIDR`.
+///
+/// The value type names the column type itself. MySQL and SQLite store the canonical text.
+impl SqlType for Cidr {
+    const DEF: TypeDef = TypeDef::Cidr;
+    type Rust = Cidr;
+}
+
+/// SQL `BIT(n)`, a fixed-length bit string.
+///
+/// The Rust type is [`BitString`]. A field of `BitString` alone does not name a width, so
+/// this marker is reached with `#[besu(sql_type = "besu::Bit<8>")]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
+pub struct Bit<const N: u32>;
+
+impl<const N: u32> SqlType for Bit<N> {
+    const DEF: TypeDef = TypeDef::Bit(N);
+    type Rust = BitString;
+}
+
+/// SQL `BIT VARYING(n)`, a variable-length bit string.
+///
+/// `VarBit<0>` is the unbounded spelling, which PostgreSQL writes without a modifier. See
+/// [`Bit`] for the Rust type and how to reach the marker.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
+pub struct VarBit<const N: u32>;
+
+impl<const N: u32> SqlType for VarBit<N> {
+    const DEF: TypeDef = TypeDef::VarBit(N);
+    type Rust = BitString;
+}
+
 /// SQL `<inner>[]`: an array whose elements are all of one SQL type.
 ///
 /// The Rust type is `Vec<S::Rust>`, which is what makes an array column usable without a
@@ -370,7 +425,14 @@ array_types! {
     Time => TypeDef::Time,
     Timestamp => TypeDef::Timestamp,
     TimestampTz => TypeDef::TimestampTz,
+    SqlInterval => TypeDef::Interval,
+    Inet => TypeDef::Inet,
+    Cidr => TypeDef::Cidr,
 }
+
+// A `BIT`/`VARBIT` array is not given an `Array<Bit<N>>` implementation: the element width
+// is part of the array's header, but `Vec<BitString>` cannot name it in `Into<Value>`. Use a
+// `sql_type` naming a user-defined marker, or `sql!`, for an array of bit strings.
 
 impl<const N: u32> SqlType for Array<Char<N>> {
     const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::Char(N)));

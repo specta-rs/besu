@@ -1127,10 +1127,11 @@ async fn generated_columns_round_trip() {
 // Introspection fidelity
 // ---------------------------------------------------------------------------------------
 
-/// A domain is a named type, not its base type. Reading it as `integer` would make the next
-/// push `ALTER ... TYPE` the column and destroy the domain.
+/// A domain is a named type, and its base type is what a value is decoded through. Reading it
+/// as `integer` would make the next push `ALTER ... TYPE` the column and destroy the domain,
+/// so both halves are kept.
 #[tokio::test]
-async fn a_domain_round_trips_as_its_own_name() {
+async fn a_domain_round_trips_as_its_own_name_and_base_type() {
     let db = common::database().await;
     common::reset(&db).await;
     db.execute(besu::Fragment::new(
@@ -1157,10 +1158,11 @@ async fn a_domain_round_trips_as_its_own_name() {
             .column("value")
             .unwrap()
             .ty,
-        TypeDef::Custom("positive_integer".into())
+        TypeDef::Domain(besu::DomainDef::new("positive_integer", &TypeDef::Int4))
     );
 
-    // The snapshot replays to the schema that already exists: the base type is never named.
+    // The snapshot replays to the schema that already exists: the base type is never named in
+    // place of the domain.
     let pushed = db.push_schema(&introspected).await.unwrap();
     assert!(pushed.is_empty(), "got {:?}", pushed.changes);
 

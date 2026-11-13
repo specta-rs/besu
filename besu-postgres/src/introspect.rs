@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use besu_core::TypeDef;
 use besu_core::schema::{IndexKind, ReferenceAction};
+use besu_core::types::{DomainDef, TypeRef};
 use besu_schema::{
-    Check, Column, Enum, ForeignKey, Generated, Index, IndexColumn, Schema, Sequence, Table,
-    Unique, View, normalise_expression, normalise_generated_expression,
+    Check, Column, Domain, Enum, ForeignKey, Generated, Index, IndexColumn, Schema, Sequence,
+    Table, Unique, View, normalise_expression, normalise_generated_expression,
 };
 
 use crate::Sqlx;
@@ -74,6 +75,7 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
     let mut schema = Schema::new();
     schema.tables = tables.into_values().collect();
     schema.enums = introspect_enums(db, current.as_deref()).await?;
+    schema.domains = introspect_domains(db, current.as_deref()).await?;
     schema.views = introspect_views(db, current.as_deref()).await?;
     schema.sequences = introspect_sequences(db, current.as_deref()).await?;
     schema.sort();
@@ -139,6 +141,49 @@ async fn introspect_enums(
     }
 
     Ok(enums)
+}
+
+/// Read every domain into [`Schema::domains`].
+///
+/// A domain's name is qualified the same way an enum's is, and its base type goes through the
+/// same parser a column does, so the two descriptions are the same [`TypeDef`]. A domain
+/// built on another domain is read with the inner domain's name as its base, which is a
+/// [`TypeDef::Custom`]; the wire format is still the innermost base's, so values decode.
+async fn introspect_domains(
+    db: &besu::Database<Sqlx>,
+    current: Option<&str>,
+) -> Result<Vec<Domain>, sqlx::Error> {
+    let rows = db
+        .execute(besu::sql!(
+            "SELECT n.nspname, t.typname, bt.typtype::text, bn.nspname, bt.typname, \
+                    format_type(t.typbasetype, t.typtypmod) \
+             FROM pg_type t \
+             JOIN pg_namespace n ON n.oid = t.typnamespace \
+             JOIN pg_type bt ON bt.oid = t.typbasetype \
+             JOIN pg_namespace bn ON bn.oid = bt.typnamespace \
+             WHERE t.typtype = 'd' \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg_toast%' \
+             ORDER BY n.nspname, t.typname"
+        ))
+        .all::<(String, String, String, String, String, String)>()
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(schema, name, base_typtype, base_schema, base_name, formatted)| Domain {
+                name: qualified(&schema, &name, current),
+                base: parse_named_type(
+                    &base_typtype,
+                    &base_name,
+                    &base_schema,
+                    &formatted,
+                    current,
+                ),
+            },
+        )
+        .collect())
 }
 
 /// Read every view, materialised or not, into [`Schema::views`].
@@ -325,7 +370,10 @@ async fn introspect_column_types(
                     (t.typelem <> 0 AND t.typlen = -1), \
                     et.typtype::text, et.typname, etn.nspname, \
                     CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation \
-                         THEN co.collname END \
+                         THEN co.collname END, \
+                    bt.typtype::text, bn.nspname, bt.typname, \
+                    CASE WHEN t.typbasetype <> 0 \
+                         THEN format_type(t.typbasetype, t.typtypmod) END \
              FROM pg_attribute a \
              JOIN pg_class c ON c.oid = a.attrelid \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -333,6 +381,8 @@ async fn introspect_column_types(
              JOIN pg_namespace tn ON tn.oid = t.typnamespace \
              LEFT JOIN pg_type et ON et.oid = t.typelem \
              LEFT JOIN pg_namespace etn ON etn.oid = et.typnamespace \
+             LEFT JOIN pg_type bt ON bt.oid = NULLIF(t.typbasetype, 0) \
+             LEFT JOIN pg_namespace bn ON bn.oid = bt.typnamespace \
              LEFT JOIN pg_collation co ON co.oid = a.attcollation \
              WHERE a.attnum > 0 \
                AND NOT a.attisdropped \
@@ -355,6 +405,10 @@ async fn introspect_column_types(
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
         )>()
         .await?;
 
@@ -371,6 +425,10 @@ async fn introspect_column_types(
         element_typname,
         element_typnamespace,
         collation,
+        base_typtype,
+        base_typnamespace,
+        base_typname,
+        base_formatted,
     ) in rows
     {
         let Some(table) = tables.get_mut(&qualified(&schema, &table_name, current)) else {
@@ -393,6 +451,10 @@ async fn introspect_column_types(
             element_typtype.as_deref(),
             element_typname.as_deref(),
             element_typnamespace.as_deref(),
+            base_typtype.as_deref(),
+            base_typname.as_deref(),
+            base_typnamespace.as_deref(),
+            base_formatted.as_deref(),
             current,
         );
         if let Some(collation) = collation {
@@ -415,12 +477,33 @@ fn column_type(
     element_typtype: Option<&str>,
     element_typname: Option<&str>,
     element_typnamespace: Option<&str>,
+    base_typtype: Option<&str>,
+    base_typname: Option<&str>,
+    base_typnamespace: Option<&str>,
+    base_formatted: Option<&str>,
     current: Option<&str>,
 ) -> TypeDef {
-    // A domain is a named type in its own right: reporting its base type would lose the
-    // domain, and a later `push` would then alter the column to the base type.
+    // A domain is a named type of its own, but its base type is what decides the wire format
+    // a value is decoded and written through. Both are modelled, so the column is declared
+    // with the domain's name and a value is read as its base type's Rust type.
     if typtype == "d" {
-        return TypeDef::Custom(qualified(typnamespace, typname, current).into());
+        let base = match (
+            base_typtype,
+            base_typname,
+            base_typnamespace,
+            base_formatted,
+        ) {
+            (Some(kind), Some(name), Some(namespace), Some(base)) => {
+                parse_named_type(kind, name, namespace, base, current)
+            }
+            // The base type of a domain always exists; falling back to the domain's own name
+            // keeps the column describable rather than losing it entirely.
+            _ => TypeDef::Custom(qualified(typnamespace, typname, current).into()),
+        };
+        return TypeDef::Domain(DomainDef {
+            name: qualified(typnamespace, typname, current).into(),
+            base: TypeRef::owned(base),
+        });
     }
     // An enum is likewise a named type; it is also listed in `Schema::enums`.
     if typtype == "e" {
@@ -441,6 +524,26 @@ fn column_type(
         return TypeDef::Array(besu_core::types::TypeRef::owned(parse_type_name(element)));
     }
     parse_type_name(formatted)
+}
+
+/// Parse a type named by the catalogue: a base type's spelling, a named type, or an array.
+fn parse_named_type(
+    typtype: &str,
+    typname: &str,
+    typnamespace: &str,
+    formatted: &str,
+    current: Option<&str>,
+) -> TypeDef {
+    match typtype {
+        // An enum, a composite, a range or another domain is a name, not a spelling.
+        "e" | "d" | "c" | "r" => TypeDef::Custom(qualified(typnamespace, typname, current).into()),
+        _ => match formatted.strip_suffix("[]") {
+            Some(element) => {
+                TypeDef::Array(besu_core::types::TypeRef::owned(parse_type_name(element)))
+            }
+            None => parse_type_name(formatted),
+        },
+    }
 }
 
 /// Map a `format_type` spelling, which may carry a modifier, onto a canonical type.
@@ -491,8 +594,11 @@ fn parse_type_name(formatted: &str) -> TypeDef {
         "bit" => TypeDef::Bit(number(modifier).unwrap_or(1)),
         // `BIT VARYING` with no modifier is unlimited, which `VarBit(0)` records.
         "bit varying" => TypeDef::VarBit(number(modifier).unwrap_or(0)),
-        // An enum, a composite, a range, `inet`, `interval`, `tsvector` and every extension
-        // type keep their native spelling, so generated DDL names the same type.
+        "interval" => TypeDef::Interval,
+        "inet" => TypeDef::Inet,
+        "cidr" => TypeDef::Cidr,
+        // An enum, a composite, a range, `tsvector` and every extension type keep their
+        // native spelling, so generated DDL names the same type.
         _ => TypeDef::Custom(formatted.to_owned().into()),
     }
 }

@@ -29,6 +29,11 @@ driver both understand, not about storage width.
 | `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `TIMESTAMP` |
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TIMESTAMP` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
+| `besu::SqlInterval` | the type itself | `Interval` | `TEXT` |
+| `besu::Inet` | the type itself | `Inet` | `TEXT` |
+| `besu::Cidr` | the type itself | `Cidr` | `TEXT` |
+| `#[besu(sql_type = "besu::Bit<n>")]` | `Bit<n>` | `Bit(n)` | `TEXT` |
+| `#[besu(sql_type = "besu::VarBit<n>")]` | `VarBit<n>` | `VarBit(n)` | `TEXT` |
 | `#[besu(sql_type = "..")]` | e.g. `VarChar<64>` | `VarChar(64)` | `TEXT` |
 
 Every type in the table round-trips through an insert and a `SELECT`. The only types that do not
@@ -124,6 +129,27 @@ and `ORDER BY` on such a column are lexicographic unless you cast it to a number
 `Decimal<PRECISION, SCALE>` is the same `TEXT` storage, bound as the exact decimal text, so its
 `String` round-trips unchanged and `amount.eq("1.23")` works.
 
+## Interval, addresses and bit strings
+
+SQLite has no interval, network or bit type, so each is stored as its canonical text in a `TEXT`
+column:
+
+```rust
+use besu::{BitString, Cidr, Inet, SqlInterval};
+
+pub span: SqlInterval,    // "1 days 02:00:00"
+pub host: Inet,           // "192.168.0.1/24"
+pub block: Cidr,          // "192.168.1.0/24"
+#[besu(sql_type = "besu::Bit<5>")]
+pub flags: BitString,     // "10110"
+```
+
+The driver binds the same spelling `Display` writes and parses it on the way back, so a value
+round-trips exactly. There is no ordering or arithmetic a database could do with them: `ORDER BY`
+is text order, and a comparison against a hand-written literal is a string comparison. SQLite
+collapses all three onto `TEXT` when it introspects them, so the declaration converges on a second
+push.
+
 ## Arrays
 
 SQLite has no array type. A `Vec<T>` field renders `TEXT` and binding an array is an error before
@@ -146,9 +172,10 @@ SQLite's catalogue reports the declared type name, which is mapped back as follo
 
 The differ folds the types SQLite cannot distinguish — every integer width to `Int8`, `UInt(128)`
 to `Text`, `Char`/`VarChar`/`Decimal` to `Text`, `Jsonb` to `Json`, `TimestampTz` to `Timestamp`,
-a fractional-second precision to the plain time type, `Bit` to `Int8` and an array to `Json` — so
-a declared `i32` converges against the `INTEGER` that introspection reports. Without that
-folding, every push would report a column change that changes nothing.
+a fractional-second precision to the plain time type, `Bit`/`VarBit`/`Interval`/`Inet`/`Cidr`/
+`Set` to `Text`, and an array to `Json` — so a declared `i32` converges against the `INTEGER` that
+introspection reports. Without that folding, every push would report a column change that changes
+nothing. A PostgreSQL domain folds onto its base type here.
 
 ## Custom types
 
@@ -157,7 +184,9 @@ know — an existing `MONEY` or `GEOMETRY` column, for example. The type name is
 generated DDL round-trips, but no driver decodes it: there is no Rust type to decode into. Keep
 such a column out of your model, or read it through `sql!` and a cast.
 
-Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98).
+Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98). Intervals,
+network addresses, bit strings and MySQL's `SET` are not `Custom`: they are stored as `TEXT` and
+round-trip through the driver.
 
 ## Gotchas
 

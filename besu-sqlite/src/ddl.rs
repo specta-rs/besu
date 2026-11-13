@@ -117,8 +117,12 @@ impl Ddl for SQLiteDdl {
             // has to compare equal to the plain type the database reports back.
             TypeDef::TimeP(_) | TypeDef::TimeTz | TypeDef::TimeTzP(_) => TypeDef::Time,
             TypeDef::TimestampP(_) | TypeDef::TimestampTzP(_) => TypeDef::Timestamp,
-            // A bit string is stored as an integer and an array as JSON text.
-            TypeDef::Bit(_) | TypeDef::VarBit(_) => TypeDef::Int8,
+            // A bit string, an interval, an address and a `SET` are all stored as text, and a
+            // domain is stored as its base type.
+            TypeDef::Bit(_) | TypeDef::VarBit(_) => TypeDef::Text,
+            TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => TypeDef::Text,
+            TypeDef::Set(_) => TypeDef::Text,
+            TypeDef::Domain(def) => self.normalise_type(def.base.as_type()),
             TypeDef::Array(_) => TypeDef::Json,
             // SQLite has no enum: the label is stored in a `TEXT` column, so a declared enum
             // has to converge against the text type introspection reports.
@@ -407,6 +411,33 @@ mod tests {
         let declared = TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy", "sad"]));
         assert_eq!(Ddl::type_name(&SQLiteDdl, &declared), "TEXT");
         assert_eq!(Ddl::normalise_type(&SQLiteDdl, &declared), TypeDef::Text);
+    }
+
+    #[test]
+    fn textual_types_fold_onto_text() {
+        let ddl = SQLiteDdl;
+        for ty in [
+            TypeDef::Bit(5),
+            TypeDef::VarBit(0),
+            TypeDef::Interval,
+            TypeDef::Inet,
+            TypeDef::Cidr,
+            TypeDef::Set(besu_core::EnumLabels::from_static(&["a"])),
+        ] {
+            assert_eq!(Ddl::normalise_type(&ddl, &ty), TypeDef::Text, "{ty:?}");
+        }
+        assert_eq!(
+            Ddl::type_name(&ddl, &TypeDef::Bit(5)),
+            "TEXT",
+            "a bit string is stored as text, not as an integer"
+        );
+        assert_eq!(
+            Ddl::normalise_type(
+                &ddl,
+                &TypeDef::Domain(besu_core::DomainDef::new("positive", &TypeDef::Int4))
+            ),
+            TypeDef::Int8
+        );
     }
 
     #[test]

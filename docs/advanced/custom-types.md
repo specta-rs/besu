@@ -26,8 +26,8 @@ pub struct Article {
 
 `VarChar<64>` renders `VARCHAR(64)` on PostgreSQL and MySQL and `TEXT` on SQLite, whose
 storage classes have no length. `Decimal<10, 2>` renders `NUMERIC(10,2)` and `DECIMAL(10,2)`,
-but no driver decodes that back into a `String` yet, so a decimal column can be declared and
-created and cannot be read on PostgreSQL or MySQL. On SQLite it is stored as `TEXT` and works.
+and every driver decodes it back into the exact `String` at the column's own scale; SQLite stores
+it as `TEXT`.
 
 The path is resolved where the derive is used, so `crate::types::Money` and
 `besu::VarChar<64>` both work.

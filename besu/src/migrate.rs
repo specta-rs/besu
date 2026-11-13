@@ -279,6 +279,14 @@ impl<Dr: SchemaDriver> Database<Dr> {
             desired.enums.clear();
         }
 
+        // A dialect without domains renders one as its base type, so a snapshot pulled from
+        // PostgreSQL still works there. The domain list has nothing to create or drop, and
+        // leaving it in the comparison would report a change on every push.
+        if !ddl.expresses_domains() {
+            current.domains.clear();
+            desired.domains.clear();
+        }
+
         let changes = besu_schema::diff_with(&current, &desired, &|ty| ddl.normalise_type(ty));
 
         if !allow_destructive {

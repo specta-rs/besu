@@ -30,11 +30,16 @@ that holds it, or to `NUMERIC` when no integer is wide enough.
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TIMESTAMPTZ` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `Vec<T>` | `Array<T>` | `Array(T)` | `<T>[]` |
+| `besu::SqlInterval` | the type itself | `Interval` | `INTERVAL` |
+| `besu::Inet` | the type itself | `Inet` | `INET` |
+| `besu::Cidr` | the type itself | `Cidr` | `CIDR` |
+| `#[besu(sql_type = "besu::Bit<n>")]` | `Bit<n>` | `Bit(n)` | `BIT(n)` |
+| `#[besu(sql_type = "besu::VarBit<n>")]` | `VarBit<n>` | `VarBit(n)` | `BIT VARYING(n)` |
 | `#[derive(SqlEnum)]` | the enum itself | `Enum` | the enum's name |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>`, `Jsonb` | matching | `CHAR(n)`, `VARCHAR(n)`, `NUMERIC(p,s)`, `JSONB` |
 
-Everything in the table round-trips through an insert and a `SELECT`. The `Custom` types below
-round-trip through DDL only.
+Everything in the table round-trips through an insert and a `SELECT`. A pulled `Custom` type
+round-trips through DDL only.
 
 ## Integers
 
@@ -201,21 +206,83 @@ is how a schema shared with MySQL keeps working; see the [declaration guide](../
 | `time[(p)] [with|without] time zone` | `Time`, `TimeP(p)`, `TimeTz`, `TimeTzP(p)` |
 | `timestamp[(p)] [with|without] time zone` | `Timestamp`, `TimestampP(p)`, `TimestampTz`, `TimestampTzP(p)` |
 | `bit(n)`, `bit varying(n)` | `Bit(n)`, `VarBit(n)` |
+| `interval` | `Interval` |
+| `inet` | `Inet` |
+| `cidr` | `Cidr` |
 | `<inner>[]` | `Array(inner)`, read through `pg_type.typelem`/`typarray` |
-| a domain | `Custom(name)`, with its schema where it is not the default |
+| a domain | `Domain(name, base)`, where `base` is what the domain is built on |
 | an enum | `Custom(name)`, and listed in `Schema::enums` |
 | a column with `COLLATE` | `Collated(inner, name)` |
 | anything else | `Custom(format_type(oid, atttypmod))` |
 
 Type modifiers are kept: `timestamp(3)` comes back as `TimestampP(3)` and `bit(5)` as `Bit(5)`,
-so a `pull` followed by a `push` does not silently round the precision. A domain comes back as
-its own name rather than its base type, because turning a column into the base type would
-destroy the domain. A column collation is kept when it differs from the type's default.
+so a `pull` followed by a `push` does not silently round the precision. A domain keeps its own
+name *and* its base type, so the column is never altered to the base type and a value is
+decoded through it. A column collation is kept when it differs from the type's default.
 
 The differ folds the unsigned markers onto their signed storage — `UInt(8)` to `Int2`, `UInt(16)`
 to `Int4`, `UInt(32)` to `Int8`, `UInt(64)` to `Decimal(20,0)`, `UInt(128)` to `Decimal(39,0)` —
 so a declared `u16` converges against the `INTEGER` the database reports. The fold reaches inside
 an array type, so `Array(UInt(16))` converges against `Array(Int4)`.
+
+## Interval
+
+`SqlInterval` is PostgreSQL's native `INTERVAL`, with the three fields the type really has:
+months, days and microseconds. They stay separate because a month is not thirty days and a day
+is not always 86,400 seconds.
+
+```rust
+use besu::SqlInterval;
+
+pub trial: SqlInterval,   // INTERVAL, e.g. "14 mons 3 days 01:30:00"
+```
+
+```rust
+let span = SqlInterval::new(0, 1, 90 * 60 * 1_000_000); // one day and ninety minutes
+let span = SqlInterval::from(chrono::Duration::hours(36));
+```
+
+`Display` writes PostgreSQL's canonical spelling — `26 mons 3 days 01:30:00` — and `FromStr`
+accepts it plus the unit names (`1 year 2 mons 3 days 04:05:06`). The value is written in
+PostgreSQL's binary interval format (microseconds, days, months) and read back with all three
+fields intact.
+
+The name is `SqlInterval` rather than `Interval` because `besu::Interval` is the interval
+*literal* builder used by `date_add` and friends.
+
+## Network addresses
+
+`Inet` is an address with an optional prefix and `Cidr` is a network; both keep PostgreSQL's
+canonical text.
+
+```rust
+use besu::{Cidr, Inet};
+
+pub peer: Inet,         // 192.168.0.1/24, or 192.168.0.1 for a full prefix
+pub block: Cidr,        // 192.168.1.0/24, always with a prefix
+```
+
+`Cidr::new("192.168.1.7/24")` clears the host bits, so the value is the network
+`192.168.1.0/24`. `Inet` writes a `/32` or `/128` prefix the way PostgreSQL does — by leaving it
+out. Both are encoded in the binary network format (family, netmask, `is_cidr`, address length,
+address) and both decode from the binary bytes, so IPv6 works too.
+
+## Bit strings
+
+`BitString` is a string of `0` and `1`, and the width is part of the column's type:
+
+```rust
+use besu::BitString;
+
+#[besu(sql_type = "besu::Bit<8>")]
+pub flags: BitString,       // BIT(8), exactly eight bits
+#[besu(sql_type = "besu::VarBit<0>")]
+pub tail: BitString,        // BIT VARYING, unbounded
+```
+
+A `BIT(n)` value must be exactly `n` bits; a `VARBIT(n)` value at most `n`. The value is written
+in PostgreSQL's binary bit format (bit length, then the bytes most significant bit first), so
+`BitString::new("10110")` round-trips as those five bits.
 
 ## Arrays
 
@@ -238,19 +305,38 @@ typed expression path rather than a whole-model insert.
 
 ## Custom types
 
-Enums, domains, composite types, ranges, `INET`/`CIDR`, `INTERVAL`, `tsvector` and extension
-types such as `pgvector` all come back as `Custom(name)`. The name is preserved and each dotted
-part is quoted, so `MySchema.Mood` reaches the type it names rather than folding to lowercase.
-An enum is the exception to "there is no Rust type": [`#[derive(SqlEnum)]`](https://docs.rs/besu/latest/besu/derive.SqlEnum.html)
-declares one and names its variants once. Everything else still has to be read through `sql!`.
+Composite types, ranges, `tsvector` and extension types such as `pgvector` come back as
+`Custom(name)`. The name is preserved and each dotted part is quoted, so `MySchema.Mood` reaches
+the type it names rather than folding to lowercase. There is no Rust type for these, so read
+them through `sql!`.
 
-Arrays and bit strings are no longer `Custom`: they have their own `TypeDef` variants and
-round-trip as themselves.
+Enums, domains, intervals, network addresses and bit strings are not `Custom`: they have their
+own `TypeDef` variants and values that round-trip.
 
 A column over a PostgreSQL enum declared by hand is `Custom("mood")`; the type itself lives in
 `Schema::enums`, which is introspected, diffed and rendered as `CREATE TYPE`. A derived enum
 contributes its type to `Schema::enums` at declaration time, so it reaches the same place without a
 snapshot.
+
+## Domains
+
+A domain is a named base type. Both halves are modelled: the column's type is
+`TypeDef::Domain { name, base }`, DDL declares the column with the domain's name, and a value is
+decoded and written through the base type's binary format.
+
+```sql
+CREATE DOMAIN positive_integer AS integer CHECK (VALUE > 0)
+```
+
+A column over it introspects as `Domain("positive_integer", Int4)`, and a `i32` decodes from it
+because the wire format is `INTEGER`'s. `push` creates the domain before the table that names it,
+and a snapshot taken with `pull` replays into an empty database.
+
+Two limitations are deliberate. The constraints, default and `NOT NULL` a domain can carry are
+not part of the IR, so a domain created from a snapshot has only its name and base type; an
+existing domain is never altered. And a domain built on another domain records the inner domain's
+name as its base, because the IR keeps one level; its values still decode, because the wire format
+is the innermost base's.
 
 ## Gotchas
 
@@ -261,12 +347,13 @@ snapshot.
 - `DateTime<Local>` is declared `TIMESTAMPTZ` by name matching and then fails to compile when a
   query returns the model. Use `DateTime<Utc>`.
 - `TIMETZ` can be created, introspected and rendered, but not read into a Rust value.
-- An enum or domain column round-trips through `push`/`pull`. A domain is invisible to the derive;
-  an enum is declared with `#[derive(SqlEnum)]`. Dropping either is destructive and is refused
-  without `push_destructive`.
-- A `BIT` or `BIT VARYING` column round-trips, but no `Value` variant carries one, so it cannot
-  be read into Rust yet.
+- An enum or domain column round-trips through `push`/`pull`. An enum is declared with
+  `#[derive(SqlEnum)]`; a domain is not expressible by the derive, so it comes from a snapshot
+  (or from a hand-written migration) and its column is decoded through the base type. Dropping
+  either is destructive and is refused without `push_destructive`.
 - A column with an explicit `COLLATE` is part of its type: a declared `String` will report drift
   against it, exactly as it should, because the two columns sort differently.
 - A `NUMERIC` with no precision, such as a bare `numeric` column, introspects as
   `Custom("numeric")` rather than a decimal.
+- An interval with a field qualifier, such as `INTERVAL DAY TO SECOND`, keeps its full spelling
+  as `Custom`; only the plain `INTERVAL` is modelled.

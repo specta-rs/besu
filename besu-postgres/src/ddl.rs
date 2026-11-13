@@ -1,5 +1,5 @@
 use besu_core::{Dialect, TypeDef};
-use besu_schema::{Column, Ddl, Enum, ForeignKey, Index, Sequence, View, view_body};
+use besu_schema::{Column, Ddl, Domain, Enum, ForeignKey, Index, Sequence, View, view_body};
 
 use crate::Postgres;
 
@@ -51,6 +51,14 @@ impl Ddl for PostgresDdl {
             TypeDef::Collated(inner, collation) => {
                 TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
             }
+            // A MySQL `SET` is a text label list here.
+            TypeDef::Set(_) => TypeDef::Text,
+            // A domain's base type is folded like any other type, so `Domain(UInt(16))` in a
+            // snapshot compares equal to the `Domain(Int4)` introspection reports.
+            TypeDef::Domain(def) => TypeDef::Domain(besu_core::DomainDef {
+                name: def.name.clone(),
+                base: besu_core::types::TypeRef::owned(self.normalise_type(def.base.as_type())),
+            }),
             // A named enum folds onto the `Custom(name)` a column of that type is introspected
             // as, so a declaration converges against the server's own report. An enum with
             // no name has no type for PostgreSQL to create, and renders as `TEXT`.
@@ -219,6 +227,29 @@ impl Ddl for PostgresDdl {
     /// `DROP TYPE`.
     fn drop_enum(&self, name: &str) -> Vec<String> {
         vec![format!("DROP TYPE {}", self.quote_table(name))]
+    }
+
+    /// PostgreSQL is the only dialect with domains.
+    fn expresses_domains(&self) -> bool {
+        true
+    }
+
+    /// `CREATE DOMAIN name AS base_type`.
+    ///
+    /// The constraints and default a domain can carry are not part of the IR, so they are not
+    /// written here: a domain that already exists is left exactly as it is, and one created
+    /// from a snapshot is built from its name and base type alone.
+    fn create_domain(&self, domain: &Domain) -> Vec<String> {
+        vec![format!(
+            "CREATE DOMAIN {} AS {}",
+            self.quote_table(&domain.name),
+            self.type_name(&domain.base)
+        )]
+    }
+
+    /// `DROP DOMAIN`.
+    fn drop_domain(&self, name: &str) -> Vec<String> {
+        vec![format!("DROP DOMAIN {}", self.quote_table(name))]
     }
 
     /// `ALTER TYPE ... ADD VALUE`.
@@ -395,6 +426,54 @@ mod tests {
                 &TypeDef::Enum(besu_core::EnumDef::new("", &["happy", "sad"]))
             ),
             TypeDef::Text
+        );
+    }
+
+    #[test]
+    fn interval_network_and_bit_types_have_their_native_spellings() {
+        assert_eq!(Postgres::type_name(TypeDef::Interval), "INTERVAL");
+        assert_eq!(Postgres::type_name(TypeDef::Inet), "INET");
+        assert_eq!(Postgres::type_name(TypeDef::Cidr), "CIDR");
+        assert_eq!(Postgres::type_name(TypeDef::Bit(5)), "BIT(5)");
+        assert_eq!(Postgres::type_name(TypeDef::VarBit(0)), "BIT VARYING");
+        assert_eq!(Postgres::type_name(TypeDef::VarBit(7)), "BIT VARYING(7)");
+        // MySQL's `SET` has no PostgreSQL spelling, so it is text and folds the same way.
+        assert_eq!(
+            Postgres::type_name(TypeDef::Set(besu_core::EnumLabels::from_static(&["a"]))),
+            "TEXT"
+        );
+    }
+
+    #[test]
+    fn a_domain_renders_its_name_and_its_base_folds() {
+        let ddl = PostgresDdl;
+        let domain = TypeDef::Domain(besu_core::DomainDef::new("positive", &TypeDef::Int4));
+        assert_eq!(Postgres::type_name(domain.clone()), r#""positive""#);
+        assert_eq!(Ddl::normalise_type(&ddl, &domain), domain);
+
+        // A snapshot declaring `u16` as the base of a domain has to converge against the
+        // `integer` the database reports for it.
+        let declared = TypeDef::Domain(besu_core::DomainDef::new("small", &TypeDef::UInt(16)));
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &declared),
+            TypeDef::Domain(besu_core::DomainDef::new("small", &TypeDef::Int4))
+        );
+    }
+
+    #[test]
+    fn a_domain_is_created_with_its_name_and_base() {
+        let ddl = PostgresDdl;
+        let domain = besu_schema::Domain {
+            name: "positive".into(),
+            base: TypeDef::Int4,
+        };
+        assert_eq!(
+            Ddl::create_domain(&ddl, &domain),
+            [r#"CREATE DOMAIN "positive" AS INTEGER"#]
+        );
+        assert_eq!(
+            Ddl::drop_domain(&ddl, "positive"),
+            [r#"DROP DOMAIN "positive""#]
         );
     }
 

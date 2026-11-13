@@ -97,6 +97,10 @@ impl Dialect for Postgres {
                 Value::TimestampTz(_) => 'z',
                 Value::Json(_) => 'j',
                 Value::Decimal(_) => 'D',
+                Value::Interval(_) => 'v',
+                Value::Inet(_) => 'a',
+                Value::Cidr(_) => 'c',
+                Value::Bit(_) => 'B',
                 Value::Array { element, .. } => {
                     // The element OID is part of the bytes, so it has to be part of the key:
                     // `int8[]` and `text[]` bind differently into the same SQL text.
@@ -158,6 +162,15 @@ impl Dialect for Postgres {
             // A bare `BIT VARYING` has no limit, which is what `VarBit(0)` records.
             TypeDef::VarBit(0) => Cow::Borrowed("BIT VARYING"),
             TypeDef::VarBit(n) => Cow::Owned(format!("BIT VARYING({n})")),
+            TypeDef::Interval => Cow::Borrowed("INTERVAL"),
+            TypeDef::Inet => Cow::Borrowed("INET"),
+            TypeDef::Cidr => Cow::Borrowed("CIDR"),
+            // MySQL's `SET` has no PostgreSQL spelling; a label list is text here, and the
+            // type fold does the same so a schema shared with MySQL converges.
+            TypeDef::Set(_) => Cow::Borrowed("TEXT"),
+            // A domain is declared with its own name; `CREATE DOMAIN` is what makes the name
+            // exist, and the differ creates it before the tables that use it.
+            TypeDef::Domain(def) => quote_type_name(&def.name),
             // An array is spelled by appending `[]` to the element type, which is exactly
             // how `format_type` reports it back.
             TypeDef::Array(inner) => Cow::Owned(format!(

@@ -21,6 +21,14 @@ pub struct Schema {
     /// nothing to collect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enums: Vec<Enum>,
+    /// Schema-level domains, which only PostgreSQL has.
+    ///
+    /// A domain is a name for a base type. A column over one is [`TypeDef::Domain`], and the
+    /// name it holds is only meaningful when the domain itself exists, so a snapshot carries
+    /// the domains its columns use. `push` creates them before the tables that name them and
+    /// drops them after those tables are gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<Domain>,
     /// Views and materialised views.
     ///
     /// A view carries its definition as SQL, because a query is not something the IR can
@@ -524,12 +532,41 @@ pub struct Enum {
     pub values: Vec<String>,
 }
 
+/// A PostgreSQL domain: a name for a base type.
+///
+/// The name follows the same qualification rule as [`Enum`]. The base type is the canonical
+/// description, so the domain's column is decoded and written through it; the constraints a
+/// domain can carry are not part of the IR.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Domain {
+    /// The domain's name, possibly schema-qualified.
+    pub name: String,
+    /// The type it is built on.
+    pub base: TypeDef,
+}
+
+/// Whether a type is, or wraps, a named enum or domain.
+///
+/// The differ uses this to decide whether a type is still needed, and domain ordering uses it
+/// to see that one domain is built on another.
+pub(crate) fn type_names(ty: &TypeDef, name: &str) -> bool {
+    match ty {
+        TypeDef::Custom(ty) => ty.as_ref() == name,
+        TypeDef::Enum(def) => def.name.as_ref() == name,
+        TypeDef::Domain(def) => def.name.as_ref() == name,
+        TypeDef::Collated(inner, _) => type_names(inner, name),
+        TypeDef::Array(inner) => type_names(inner.as_type(), name),
+        _ => false,
+    }
+}
+
 impl Schema {
     /// An empty schema.
     pub const fn new() -> Self {
         Self {
             tables: Vec::new(),
             enums: Vec::new(),
+            domains: Vec::new(),
             views: Vec::new(),
             sequences: Vec::new(),
         }
@@ -557,6 +594,7 @@ impl Schema {
         let table = Table::from_def(def);
         for column in &table.columns {
             self.collect_enum(&column.ty);
+            self.collect_domain(&column.ty);
         }
         if let Some(slot) = self
             .tables
@@ -586,6 +624,27 @@ impl Schema {
             }
             TypeDef::Collated(inner, _) => self.collect_enum(inner),
             TypeDef::Array(inner) => self.collect_enum(inner.as_type()),
+            _ => {}
+        }
+    }
+
+    /// Record a domain a column uses, unless it is already recorded.
+    ///
+    /// The search reaches through the wrappers, so an array of a domain contributes the type
+    /// it needs to exist as well as a bare column does.
+    fn collect_domain(&mut self, ty: &TypeDef) {
+        match ty {
+            TypeDef::Domain(def) => {
+                if self.find_domain(&def.name).is_some() {
+                    return;
+                }
+                self.domains.push(Domain {
+                    name: def.name.to_string(),
+                    base: def.base.as_type().clone(),
+                });
+            }
+            TypeDef::Collated(inner, _) => self.collect_domain(inner),
+            TypeDef::Array(inner) => self.collect_domain(inner.as_type()),
             _ => {}
         }
     }
@@ -643,6 +702,47 @@ impl Schema {
         self.enums.iter().find(|e| e.name == name)
     }
 
+    /// Find a domain by name.
+    pub fn find_domain(&self, name: &str) -> Option<&Domain> {
+        self.domains.iter().find(|domain| domain.name == name)
+    }
+
+    /// Order domains so that one built on another comes after it.
+    ///
+    /// A domain's base type is part of the IR, and the base can itself be a domain (read back
+    /// as a [`TypeDef::Custom`] naming it). `CREATE DOMAIN` needs that inner type to exist
+    /// first, so DDL and the differ both use this order rather than the alphabetical one.
+    /// A cycle, which PostgreSQL rejects anyway, is broken arbitrarily.
+    pub fn ordered_domains(&self) -> Vec<&Domain> {
+        let mut ordered = Vec::with_capacity(self.domains.len());
+        let mut remaining: Vec<&Domain> = self.domains.iter().collect();
+
+        while !remaining.is_empty() {
+            let mut moved = false;
+            let mut index = 0;
+            while index < remaining.len() {
+                let domain = remaining[index];
+                // Only a domain still waiting to be created is a dependency; one already in
+                // `ordered` exists by the time this statement runs.
+                let waits = remaining.iter().any(|pending| {
+                    pending.name != domain.name && type_names(&domain.base, &pending.name)
+                });
+                if waits {
+                    index += 1;
+                } else {
+                    ordered.push(domain);
+                    remaining.remove(index);
+                    moved = true;
+                }
+            }
+            if !moved {
+                ordered.append(&mut remaining);
+            }
+        }
+
+        ordered
+    }
+
     /// Find a view by its (possibly qualified) name.
     pub fn view(&self, name: &str) -> Option<&View> {
         self.views.iter().find(|view| view.name == name)
@@ -685,6 +785,7 @@ impl Schema {
         self.tables
             .sort_by(|a, b| a.schema.cmp(&b.schema).then_with(|| a.name.cmp(&b.name)));
         self.enums.sort_by(|a, b| a.name.cmp(&b.name));
+        self.domains.sort_by(|a, b| a.name.cmp(&b.name));
         self.views.sort_by(|a, b| a.name.cmp(&b.name));
         self.sequences
             .sort_by(|a, b| a.schema.cmp(&b.schema).then_with(|| a.name.cmp(&b.name)));
@@ -1663,6 +1764,29 @@ mod tests {
             generated: None,
             renamed_from: None,
         }
+    }
+
+    #[test]
+    fn a_domain_built_on_another_is_ordered_after_it() {
+        // `CREATE DOMAIN outer AS inner` needs `inner` to exist, and sorting by name would put
+        // `outer` first.
+        let mut schema = Schema::new();
+        schema.domains = vec![
+            super::Domain {
+                name: "outer".into(),
+                base: TypeDef::Custom("inner".into()),
+            },
+            super::Domain {
+                name: "inner".into(),
+                base: TypeDef::Int4,
+            },
+        ];
+        let names: Vec<&str> = schema
+            .ordered_domains()
+            .iter()
+            .map(|domain| domain.name.as_str())
+            .collect();
+        assert_eq!(names, ["inner", "outer"]);
     }
 
     #[test]

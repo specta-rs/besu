@@ -1,6 +1,8 @@
 use std::{path::Path, str::from_utf8};
 
-use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
+use besu_core::{
+    BitString, Cidr, Decode, Driver, Error, Inet, Sql, SqlInterval, TransactionDriver, Value,
+};
 use sqlx::{
     Arguments, Column as _, Row, Sqlite, SqlitePool,
     sqlite::{
@@ -143,6 +145,12 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             // sqlx's own encoder for a zoned timestamp already sizes its `String` up front, so
             // there is nothing to win here; the naive ones are the ones that grow from empty.
             Value::TimestampTz(v) => add(&mut arguments, *v)?,
+            // SQLite has no interval, address or bit-string type: the column is `TEXT` and
+            // the canonical text is the exact value, so it round-trips unchanged.
+            Value::Interval(v) => add(&mut arguments, v.to_string())?,
+            Value::Inet(v) => add(&mut arguments, v.as_str())?,
+            Value::Cidr(v) => add(&mut arguments, v.as_str())?,
+            Value::Bit(v) => add(&mut arguments, v.as_str())?,
             // `add` takes a `&str`, and sqlx stores it as `Cow::Borrowed`, so the JSON bytes
             // are not copied. Binding the `&[u8]` instead would cost the same and lose the
             // column's `TEXT` affinity, which JSON functions rely on.
@@ -155,7 +163,14 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
                     "`sqlite` has no array type; store the elements as JSON instead",
                 )));
             }
-            _ => add(&mut arguments, None::<i64>)?,
+            // `Value` is `#[non_exhaustive]`: a future variant must fail loudly rather than
+            // silently bind `NULL`.
+            _ => {
+                return Err(<Sqlx as Driver>::error(Error::encode(
+                    value.display(),
+                    "this driver does not know how to bind this value",
+                )));
+            }
         }
     }
     Ok(arguments)
@@ -402,5 +417,44 @@ impl Decode<Sqlx> for serde_json::Value {
     fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
         let value: sqlx::types::Json<serde_json::Value> = decode_via_sqlx(row, offset)?;
         Ok(value.0)
+    }
+}
+
+impl Decode<Sqlx> for SqlInterval {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        text.trim()
+            .parse()
+            .map_err(|err: besu_core::ParseValueError| {
+                <Sqlx as Driver>::error(Error::decode(index, err.to_string()))
+            })
+    }
+}
+
+impl Decode<Sqlx> for Inet {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Self::new(text.trim())
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for Cidr {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Self::new(text.trim())
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for BitString {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Self::new(text.trim())
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
     }
 }

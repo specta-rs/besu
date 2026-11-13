@@ -1,8 +1,8 @@
 use besu_core::{IndexKind, TypeDef, Value};
 
 use crate::{
-    Change, Check, Column, Enum, ForeignKey, Index, IndexColumn, IndexTarget, ReferenceAction,
-    Schema, Sequence, Table, Unique, View, view_body,
+    Change, Check, Column, Domain, Enum, ForeignKey, Index, IndexColumn, IndexTarget,
+    ReferenceAction, Schema, Sequence, Table, Unique, View, view_body,
 };
 
 /// Render a schema as DDL for a particular database.
@@ -58,6 +58,13 @@ pub trait Ddl {
             // An enum label renders exactly as the text it is; the column supplies the type.
             Value::EnumLabel(v) => format!("'{}'", v.replace('\'', "''")),
             Value::Decimal(v) => v.clone(),
+            // The canonical text of an interval or an address is a valid literal for the
+            // column's own type; PostgreSQL and MySQL coerce the unknown literal, and SQLite
+            // stores it as text.
+            Value::Interval(v) => format!("'{v}'"),
+            Value::Inet(v) => format!("'{v}'"),
+            Value::Cidr(v) => format!("'{v}'"),
+            Value::Bit(v) => format!("'{}'", v.as_str()),
             Value::Array { values, .. } => {
                 let mut out = String::from("ARRAY[");
                 for (i, value) in values.iter().enumerate() {
@@ -368,6 +375,30 @@ pub trait Ddl {
         Vec::new()
     }
 
+    /// Whether the dialect has named types that are not part of a column.
+    ///
+    /// Only PostgreSQL does; MySQL and SQLite render a [`Domain`] as its base type and have
+    /// nothing to create. `push` uses this to leave [`Schema::domains`] out of the comparison
+    /// for a dialect that cannot express them, which would otherwise report a
+    /// [`Change::CreateDomain`] on every push.
+    fn expresses_domains(&self) -> bool {
+        false
+    }
+
+    /// Statements that create a domain.
+    ///
+    /// The default returns nothing; see [`Ddl::expresses_domains`].
+    fn create_domain(&self, _domain: &Domain) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Statements that drop a domain.
+    ///
+    /// The default returns nothing; see [`Ddl::expresses_domains`].
+    fn drop_domain(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Statements that create a view.
     ///
     /// A view carries its definition as SQL, so the statement is the header plus that body.
@@ -513,6 +544,8 @@ pub trait Ddl {
             Change::DropEnum { name } => self.drop_enum(name),
             Change::AddEnumValue { name, value } => self.add_enum_value(name, value),
             Change::RemoveEnumValue { name, value } => self.remove_enum_value(name, value),
+            Change::CreateDomain(domain) => self.create_domain(domain),
+            Change::DropDomain { name } => self.drop_domain(name),
             Change::AddColumn { table, column } => vec![self.add_column(table, column)],
             Change::RenameColumn { table, from, to } => {
                 vec![self.rename_column(table, from, to)]
@@ -553,6 +586,9 @@ pub trait Ddl {
         }
         for e in &schema.enums {
             statements.extend(self.create_enum(e));
+        }
+        for domain in schema.ordered_domains() {
+            statements.extend(self.create_domain(domain));
         }
         statements.extend(
             schema

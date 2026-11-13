@@ -32,6 +32,8 @@ pub mod driver;
 pub mod error;
 /// Where queries run: a pool, a transaction, or nowhere at all.
 pub mod executor;
+/// Interval, network address and bit-string values.
+pub mod scalars;
 /// Static table and column metadata.
 pub mod schema;
 /// A rendered SQL statement with its bound parameters.
@@ -47,10 +49,11 @@ pub use driver::{Driver, RowStream, TransactionDriver, futures_stream};
 pub use error::Error;
 pub use executor::{DialectOf, Dry, DryDriver, DryRow, ErrorOf, Executor, RowOf};
 pub use futures_core::Stream;
+pub use scalars::{BitString, Cidr, Inet, ParseValueError, SqlInterval};
 pub use schema::{
     CheckDef, ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexColumn, IndexEntry,
     IndexKind, TableDef,
 };
 pub use sql::{Rendered, Sql};
-pub use types::{EnumDef, EnumLabels, EnumLabelsIter, TypeDef};
+pub use types::{DomainDef, EnumDef, EnumLabels, EnumLabelsIter, TypeDef};
 pub use value::Value;

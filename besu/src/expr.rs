@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use besu_core::{Dialect, Executor, Sql, TypeDef, Value};
 
 use crate::types::{
-    Array, Bool, Bytes, Char, Column, Date, Decimal, Float4, Float8, I128, Int1, Int2, Int4, Int8,
-    Json, Jsonb, Nullability, SqlType, Text, Time, Timestamp, TimestampTz, TypeWitness, U128,
-    UInt1, UInt2, UInt4, UInt8, Uuid, VarChar,
+    Array, Bit, BitString, Bool, Bytes, Char, Cidr, Column, Date, Decimal, Float4, Float8, I128,
+    Inet, Int1, Int2, Int4, Int8, Json, Jsonb, Nullability, SqlInterval, SqlType, Text, Time,
+    Timestamp, TimestampTz, TypeWitness, U128, UInt1, UInt2, UInt4, UInt8, Uuid, VarBit, VarChar,
 };
 
 use crate::condition::Contains;
@@ -2738,6 +2738,36 @@ impl IntoSqlValue<Json> for serde_json::Value {
 impl IntoSqlValue<Jsonb> for serde_json::Value {
     fn into_sql_value(self) -> Value {
         Value::Json(self.to_string().into_bytes())
+    }
+}
+
+impl IntoSqlValue<SqlInterval> for SqlInterval {
+    fn into_sql_value(self) -> Value {
+        Value::Interval(self)
+    }
+}
+
+impl IntoSqlValue<Inet> for Inet {
+    fn into_sql_value(self) -> Value {
+        Value::Inet(self)
+    }
+}
+
+impl IntoSqlValue<Cidr> for Cidr {
+    fn into_sql_value(self) -> Value {
+        Value::Cidr(self)
+    }
+}
+
+impl<const N: u32> IntoSqlValue<Bit<N>> for BitString {
+    fn into_sql_value(self) -> Value {
+        Value::Bit(self)
+    }
+}
+
+impl<const N: u32> IntoSqlValue<VarBit<N>> for BitString {
+    fn into_sql_value(self) -> Value {
+        Value::Bit(self)
     }
 }
 

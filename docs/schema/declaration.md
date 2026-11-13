@@ -142,6 +142,51 @@ pub label: String,      // VARCHAR(64)
 The field's Rust type must be the `SqlType`'s `Rust` type — `String` for `Decimal`, `Char` and
 `VarChar`. A custom marker implements `SqlType`, and its `Rust` type needs `Decode` per driver.
 
+Three value types name their column type themselves, so they need no `sql_type`:
+
+```rust
+pub span: besu::SqlInterval,   // INTERVAL on PostgreSQL, TEXT elsewhere
+pub host: besu::Inet,          // INET on PostgreSQL, TEXT elsewhere
+pub network: besu::Cidr,       // CIDR on PostgreSQL, TEXT elsewhere
+```
+
+A bit string has a width, which the Rust type cannot spell, so it is reached through `sql_type`:
+
+```rust
+#[besu(sql_type = "besu::Bit<8>")]      // BIT(8)
+pub flags: besu::BitString,
+#[besu(sql_type = "besu::VarBit<64>")]  // BIT VARYING(64); VarBit<0> is unbounded
+pub tail: besu::BitString,
+```
+
+MySQL's `SET(...)` has a label list of its own, so it is declared by writing the marker:
+
+```rust
+struct Permissions;
+
+impl besu::SqlType for Permissions {
+    const DEF: besu::TypeDef =
+        besu::TypeDef::Set(besu::EnumLabels::from_static(&["read", "write", "admin"]));
+    type Rust = String;
+}
+
+impl besu::IntoSqlValue<Permissions> for String {
+    fn into_sql_value(self) -> besu::Value {
+        besu::Value::Text(self)
+    }
+}
+
+#[derive(Table)]
+pub struct Account {
+    #[besu(sql_type = "Permissions")]
+    pub permissions: String,   // SET('read','write','admin'), a comma-separated value
+}
+```
+
+A `SET` value is the comma-separated list MySQL itself sends — `"read,admin"` — so it needs no
+new value type. The labels are the type, so changing them is an `ALTER COLUMN` like an inline
+enum, and the column converges against the labels introspection reports.
+
 ## Enums
 
 `#[derive(SqlEnum)]` names a column's variants once. The enum implements `SqlType`, so a field

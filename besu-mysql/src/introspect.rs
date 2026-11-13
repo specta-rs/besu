@@ -514,12 +514,19 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
         // A `YEAR` column has its own range and formatting; `SMALLINT` is not the same type.
         "year" => TypeDef::Custom(lower.into()),
         // An enum is inline, and `COLUMN_TYPE` holds its labels and nothing else: MySQL has
-        // no type name to record, so the name is left empty. A `SET` is a different type and
-        // keeps its native spelling.
+        // no type name to record, so the name is left empty.
         "enum" => match parse_enum(column_type) {
             Some(def) => TypeDef::Enum(def),
             None => TypeDef::Custom(column_type.to_owned().into()),
         },
+        // A `SET` is inline too, and its labels are the whole type. The value is the
+        // comma-separated list of chosen labels, which is the text MySQL sends.
+        "set" => match parse_set(column_type) {
+            Some(labels) => TypeDef::Set(labels),
+            None => TypeDef::Custom(column_type.to_owned().into()),
+        },
+        // `BIT(n)` is a fixed-width bit string. MySQL reports the width in `COLUMN_TYPE`.
+        "bit" => TypeDef::Bit(length(&lower).unwrap_or(1)),
         // Anything newer than this crate knows about keeps its native spelling, so generated
         // DDL round-trips.
         _ => TypeDef::Custom(column_type.to_owned().into()),
@@ -532,8 +539,21 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
 /// (with `''` as an escaped quote), and anything that does not match the shape exactly makes
 /// the column a `Custom` type rather than a half-understood enum.
 fn parse_enum(column_type: &str) -> Option<EnumDef> {
+    Some(EnumDef {
+        name: std::borrow::Cow::Borrowed(""),
+        labels: parse_labels(column_type, "enum")?,
+    })
+}
+
+/// Parse the labels out of MySQL's inline `set('a','b')` spelling.
+fn parse_set(column_type: &str) -> Option<EnumLabels> {
+    parse_labels(column_type, "set")
+}
+
+/// Parse the quoted label list after a keyword, or `None` when the shape does not match.
+fn parse_labels(column_type: &str, keyword: &str) -> Option<EnumLabels> {
     let open = column_type.find('(')?;
-    if !column_type[..open].trim().eq_ignore_ascii_case("enum") {
+    if !column_type[..open].trim().eq_ignore_ascii_case(keyword) {
         return None;
     }
     let close = column_type.rfind(')')?;
@@ -575,10 +595,7 @@ fn parse_enum(column_type: &str) -> Option<EnumDef> {
         }
     }
 
-    Some(EnumDef {
-        name: std::borrow::Cow::Borrowed(""),
-        labels: EnumLabels::Owned(labels),
-    })
+    Some(EnumLabels::Owned(labels))
 }
 
 /// Narrow a parsed precision to the `u8` a [`TypeDef`] carries.
@@ -691,8 +708,18 @@ mod tests {
         );
         assert_eq!(
             parse_type("set", "set('a','b')"),
-            TypeDef::Custom("set('a','b')".into())
+            TypeDef::Set(EnumLabels::Owned(vec!["a".into(), "b".into()]))
         );
+        assert_eq!(
+            parse_type("set", "set(a,b)"),
+            TypeDef::Custom("set(a,b)".into())
+        );
+    }
+
+    #[test]
+    fn bit_columns_keep_their_width() {
+        assert_eq!(parse_type("bit", "bit(8)"), TypeDef::Bit(8));
+        assert_eq!(parse_type("bit", "bit(1)"), TypeDef::Bit(1));
     }
 
     #[test]

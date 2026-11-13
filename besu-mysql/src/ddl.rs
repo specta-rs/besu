@@ -186,6 +186,15 @@ impl Ddl for MySqlDdl {
             // MySQL has no array type; the declared DDL falls back to `TEXT`, so a declared
             // array has to fold onto the text column introspection reports.
             TypeDef::Array(_) => TypeDef::Text,
+            // MySQL has no interval, address or bit-string text type either: all three are
+            // declared `TEXT` and the canonical text is what comes back.
+            TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => TypeDef::Text,
+            // MySQL has one bit type. `VARBIT(n)` is declared `BIT(n)`, and an unbounded
+            // `VARBIT` is `BIT(64)`, so the two fold together by width.
+            TypeDef::VarBit(0) => TypeDef::Bit(64),
+            TypeDef::VarBit(n) => TypeDef::Bit(*n),
+            // MySQL has no domain: the column is the base type it was built on.
+            TypeDef::Domain(def) => self.normalise_type(def.base.as_type()),
             // An enum is inline, so its name names nothing and is dropped: the labels are
             // the whole type. Introspection reports the labels with no name, and folding
             // the name away is what makes the declared column equal to the one the database
@@ -590,6 +599,42 @@ mod tests {
         assert_ne!(
             Ddl::normalise_type(&MySqlDdl, &declared),
             Ddl::normalise_type(&MySqlDdl, &changed)
+        );
+    }
+
+    #[test]
+    fn bit_and_textual_types_fold_onto_their_storage() {
+        let ddl = MySqlDdl;
+        // MySQL has one bit type; `VARBIT(n)` is `BIT(n)` there.
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::VarBit(6)),
+            TypeDef::Bit(6)
+        );
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::VarBit(0)),
+            TypeDef::Bit(64)
+        );
+        // An interval and an address have no MySQL type and read back as text.
+        for ty in [TypeDef::Interval, TypeDef::Inet, TypeDef::Cidr] {
+            assert_eq!(Ddl::normalise_type(&ddl, &ty), TypeDef::Text, "{ty:?}");
+        }
+        // A `SET` is inline like an enum: the labels are the type, so the fold is identity.
+        let labels = besu_core::EnumLabels::from_static(&["a", "b"]);
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::Set(labels.clone())),
+            TypeDef::Set(labels)
+        );
+    }
+
+    #[test]
+    fn a_domain_folds_onto_its_base_type() {
+        let ddl = MySqlDdl;
+        assert_eq!(
+            Ddl::normalise_type(
+                &ddl,
+                &TypeDef::Domain(besu_core::DomainDef::new("positive", &TypeDef::Int4))
+            ),
+            TypeDef::Int4
         );
     }
 

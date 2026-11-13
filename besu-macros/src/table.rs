@@ -729,9 +729,14 @@ impl Column {
             None => None,
         };
 
-        // Every type the derive infers from a Rust field has a generator. Only an explicit
-        // `sql_type` can escape the built-in set, and then it is the caller's to fill in.
-        let seed_supported = explicit_ty.as_ref().is_none_or(seed_type_supported);
+        // Every type the derive infers from a Rust field has a generator, except the SQL-only
+        // value types added for interval, network and bit-string columns, which have none.
+        // Only an explicit `sql_type` can escape the built-in set, and then it is the
+        // caller's to fill in.
+        let seed_supported = match &explicit_ty {
+            Some(ty) => seed_type_supported(ty),
+            None => seed_inferred_supported(inner),
+        };
 
         let (sql_ty, type_def) = match explicit {
             Some(explicit) => explicit,
@@ -742,8 +747,9 @@ impl Column {
                         "besu: `{}` is not a supported column type. Supported types are signed \
                      and unsigned integers (including u128 and i128), f32/f64, bool, String, \
                      Vec<u8>, uuid::Uuid, \
-                     chrono::NaiveDate/NaiveTime/NaiveDateTime/DateTime<Utc> and \
-                     serde_json::Value, each optionally wrapped in Option.",
+                     chrono::NaiveDate/NaiveTime/NaiveDateTime/DateTime<Utc>, \
+                     serde_json::Value, besu::SqlInterval, besu::Inet and besu::Cidr, each \
+                     optionally wrapped in Option.",
                         quote!(#inner)
                     ),
                 )
@@ -878,6 +884,34 @@ fn seed_type_supported(ty: &Type) -> bool {
     }
 }
 
+/// Whether a field type the derive maps itself has a [`SeedValue`] generator.
+///
+/// Every inferred type does, because the mapping only names types `besu` ships a generator
+/// for — except the SQL-only value types, which have none. Reaching `Vec<T>` is the only
+/// wrapper that matters; `Option` was unwrapped before this is called.
+fn seed_inferred_supported(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+
+    match segment.ident.to_string().as_str() {
+        // An interval, a network address and a bit string have no obvious generated value,
+        // so the seeder leaves them unset and asks for `.set(..)` instead of inventing one.
+        "SqlInterval" | "Inet" | "Cidr" | "BitString" => false,
+        "Vec" => match &segment.arguments {
+            syn::PathArguments::AngleBracketed(args) => match args.args.first() {
+                Some(syn::GenericArgument::Type(inner)) => seed_inferred_supported(inner),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => true,
+    }
+}
+
 fn unwrap_option(ty: &Type) -> (bool, &Type) {
     if let Type::Path(path) = ty
         && let Some(segment) = path.path.segments.last()
@@ -922,6 +956,12 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
         "NaiveDateTime" => (quote!(#besu::Timestamp), quote!(#besu::TypeDef::Timestamp)),
         "NaiveDate" => (quote!(#besu::Date), quote!(#besu::TypeDef::Date)),
         "NaiveTime" => (quote!(#besu::Time), quote!(#besu::TypeDef::Time)),
+        // The SQL-only value types name their column type themselves, the way a derived enum
+        // does, so a field of one needs no `sql_type`. A `BitString` does not: the width is
+        // part of the column type, so it is reached through `sql_type` as `Bit<n>`/`VarBit<n>`.
+        "SqlInterval" => (quote!(#besu::SqlInterval), quote!(#besu::TypeDef::Interval)),
+        "Inet" => (quote!(#besu::Inet), quote!(#besu::TypeDef::Inet)),
+        "Cidr" => (quote!(#besu::Cidr), quote!(#besu::TypeDef::Cidr)),
         "Value" => (quote!(#besu::Json), quote!(#besu::TypeDef::Json)),
         "Vec" => {
             let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {

@@ -1,4 +1,6 @@
-use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
+use besu_core::{
+    BitString, Cidr, Decode, Driver, Error, Inet, Sql, SqlInterval, TransactionDriver, Value,
+};
 use core::fmt::Write as _;
 use num_traits::ToPrimitive;
 use sqlx::{
@@ -190,6 +192,16 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             Value::Time(v) => add(&mut arguments, *v)?,
             Value::Timestamp(v) => add(&mut arguments, *v)?,
             Value::TimestampTz(v) => add(&mut arguments, *v)?,
+            // MySQL has no interval type, so the column is `TEXT` and the canonical text is
+            // exactly what is stored and read back.
+            Value::Interval(v) => add(&mut arguments, v.to_string())?,
+            // MySQL has no address type either; `TEXT` holds the canonical spelling.
+            Value::Inet(v) => add(&mut arguments, v.as_str())?,
+            Value::Cidr(v) => add(&mut arguments, v.as_str())?,
+            // A `BIT(n)` column is a big-endian byte string, most significant bit first. The
+            // packed bytes are what `BIT` accepts; binding them as a binary parameter is the
+            // same value as writing `b'...'` by hand.
+            Value::Bit(v) => add(&mut arguments, v.to_bytes())?,
             Value::Json(v) => {
                 let text = std::str::from_utf8(v).unwrap_or("null");
                 add(&mut arguments, if text.is_empty() { "null" } else { text })?
@@ -202,7 +214,14 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
                     "`mysql` has no array type; store the elements as JSON instead",
                 )));
             }
-            _ => add(&mut arguments, None::<i64>)?,
+            // `Value` is `#[non_exhaustive]`: a future variant must fail loudly rather than
+            // silently bind `NULL`.
+            _ => {
+                return Err(<Sqlx as Driver>::error(Error::encode(
+                    value.display(),
+                    "this driver does not know how to bind this value",
+                )));
+            }
         }
     }
     Ok(arguments)
@@ -621,5 +640,68 @@ impl Decode<Sqlx> for serde_json::Value {
     fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
         let value: sqlx::types::Json<serde_json::Value> = decode_via_sqlx(row, offset)?;
         Ok(value.0)
+    }
+}
+
+impl Decode<Sqlx> for SqlInterval {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        text.trim()
+            .parse()
+            .map_err(|err: besu_core::ParseValueError| {
+                <Sqlx as Driver>::error(Error::decode(index, err.to_string()))
+            })
+    }
+}
+
+impl Decode<Sqlx> for Inet {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Self::new(text.trim())
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for Cidr {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Self::new(text.trim())
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for BitString {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+
+        // MySQL sends `BIT(n)` as a big-endian byte string. sqlx's blob type is not
+        // `compatible` with `BIT`, so the bytes are read through the byte decoder directly.
+        let value = row.try_get_raw(index)?;
+        if value.is_null() {
+            return Err(<Sqlx as Driver>::error(Error::decode(
+                index,
+                "a NULL bit string is not a `BitString`",
+            )));
+        }
+        let bytes = <&[u8] as sqlx::Decode<MySql>>::decode(value)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))?;
+        let bits = Self::from_bytes(bytes, bytes.len() * 8)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))?;
+
+        // `BIT(5)` holding `b'101'` arrives as the single byte `0b00000101`: MySQL keeps the
+        // value as an integer, so the width is not on the wire. The significant bits are
+        // therefore all that can be reported, and the leading zero padding the server added
+        // is dropped. A value that is all zero bits arrives as `0`.
+        let significant = bits.as_str().trim_start_matches('0');
+        Self::new(if significant.is_empty() {
+            "0"
+        } else {
+            significant
+        })
+        .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
     }
 }

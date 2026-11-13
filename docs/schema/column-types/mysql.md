@@ -29,11 +29,17 @@ timestamps are `DATETIME(6)` rather than `TIMESTAMP`.
 | `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `DATETIME(6)` |
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `DATETIME(6)` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
+| `besu::SqlInterval` | the type itself | `Interval` | `TEXT` |
+| `besu::Inet` | the type itself | `Inet` | `TEXT` |
+| `besu::Cidr` | the type itself | `Cidr` | `TEXT` |
+| `#[besu(sql_type = "besu::Bit<n>")]` | `Bit<n>` | `Bit(n)` | `BIT(n)` |
+| `#[besu(sql_type = "besu::VarBit<n>")]` | `VarBit<n>` | `Bit(n)` | `BIT(n)` |
+| a marker with `TypeDef::Set` | — | `Set(labels)` | `SET('a','b')` |
 | `#[derive(SqlEnum)]` | the enum itself | `Enum` | `ENUM('a','b')` |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>` | matching | `CHAR(n)`, `VARCHAR(n)`, `DECIMAL(p,s)` |
 
 Everything in the table round-trips through an insert and a `SELECT`. MySQL has no array type, so
-a `Vec<T>` field is not supported here; the `Custom` types below round-trip through DDL only.
+a `Vec<T>` field is not supported here; a pulled `Custom` type round-trips through DDL only.
 
 ## Integers
 
@@ -154,6 +160,67 @@ pub signed: i128,   // DECIMAL(39,0)
 Introspection cannot tell the two apart, and the differ folds `UInt(128)` onto `Decimal(39,0)`,
 so a declared `u128` converges against the `DECIMAL(39,0)` reported back.
 
+## Bit strings
+
+`BIT(n)` is a fixed-width bit string, declared with a `BitString` field and the width in
+`sql_type`:
+
+```rust
+use besu::BitString;
+
+#[besu(sql_type = "besu::Bit<8>")]
+pub flags: BitString,   // BIT(8)
+```
+
+The value is written as the packed bytes, most significant bit first, and read back the same
+way. MySQL keeps a `BIT` value as an integer, so the server sends only the significant bytes:
+writing `"00000001"` to a `BIT(8)` and reading it back gives `"1"`, while `"10110011"` round-trips
+exactly. Compare bit strings by their integer value if leading zeros matter.
+
+MySQL has one bit type and tops out at 64 bits. `VarBit(n)` is declared `BIT(n)` so a schema
+shared with PostgreSQL still creates a column; `VarBit<0>`, the unbounded spelling, is `BIT(64)`.
+Both fold onto `Bit(n)` on MySQL, so a push converges.
+
+## SET
+
+MySQL's `SET('a','b')` is a column that holds any combination of a fixed label list. It is
+modelled as `TypeDef::Set(labels)` and its value is the comma-separated list MySQL itself sends.
+
+```rust
+struct Permissions;
+
+impl besu::SqlType for Permissions {
+    const DEF: besu::TypeDef =
+        besu::TypeDef::Set(besu::EnumLabels::from_static(&["read", "write", "admin"]));
+    type Rust = String;
+}
+
+impl besu::IntoSqlValue<Permissions> for String {
+    fn into_sql_value(self) -> besu::Value {
+        besu::Value::Text(self)
+    }
+}
+
+#[derive(Table)]
+pub struct Account {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(sql_type = "Permissions")]
+    pub permissions: String,
+}
+```
+
+The column is declared `SET('read','write','admin')`, and `"read,admin"` round-trips as written.
+The labels are the type — MySQL has no named `SET` — so changing them is one
+`ALTER TABLE ... MODIFY COLUMN`, exactly like an inline enum.
+
+## Interval and network addresses
+
+MySQL has neither an interval nor an address type. `SqlInterval`, `Inet` and `Cidr` are declared
+`TEXT` and stored as their canonical spelling (`1 days 02:00:00`, `192.168.0.1/24`,
+`10.0.0.0/8`), so a model shared with PostgreSQL still works and the value round-trips; the
+database just does not understand them as dates or addresses, and comparison is textual.
+
 ## Enums
 
 A Rust enum is an inline MySQL enum. The labels are the variants, so the column's type *is* the
@@ -208,6 +275,8 @@ again on the next push.
 | `time[(p)]`, `datetime[(p)]`, `timestamp[(p)]` | `Time`/`TimeP(p)`, `Timestamp`/`TimestampP(p)`, `TimestampTz`/`TimestampTzP(p)` |
 | `decimal(p,s)`, `numeric(p,s)` | `Decimal(p, s)` |
 | `enum('a','b')` | `Enum(EnumDef { name: "", labels })` |
+| `set('a','b')` | `Set(labels)` |
+| `bit(n)` | `Bit(n)` |
 | `year` | `Custom("year")` |
 | a column whose collation differs from the table's | `Collated(inner, collation)` |
 | anything else | `Custom(column_type)` |
@@ -220,13 +289,15 @@ a declared `i8` or `String` still converges against them.
 
 ## Custom types
 
-MySQL's `SET(...)` keeps its native spelling, so a column arrives as `Custom("set('a','b')")`.
-Anything newer than the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` for the
-same reason. The DDL round-trips; the value cannot be decoded into Rust.
+Anything newer than the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` and
+keeps its native spelling. The DDL round-trips; the value cannot be decoded into Rust, so read it
+through `sql!`.
 
-Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98). Inline
-enums are no longer `Custom`: they are [`TypeDef::Enum`](https://docs.rs/besu-core/latest/besu_core/enum.TypeDef.html)
-and are declared with [`#[derive(SqlEnum)]`](https://docs.rs/besu/latest/besu/derive.SqlEnum.html).
+`SET` and `BIT` are no longer `Custom`: they are
+[`TypeDef::Set`](https://docs.rs/besu-core/latest/besu_core/enum.TypeDef.html) and
+[`TypeDef::Bit`](https://docs.rs/besu-core/latest/besu_core/enum.TypeDef.html) and round-trip as
+values. Inline enums are `TypeDef::Enum` and are declared with
+[`#[derive(SqlEnum)]`](https://docs.rs/besu/latest/besu/derive.SqlEnum.html).
 
 ## Gotchas
 

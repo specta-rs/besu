@@ -110,6 +110,23 @@ impl Dialect for MySql {
                 Cow::Owned(out)
             }
             TypeDef::Custom(name) => name,
+            // A `SET` is inline, exactly like an inline enum: the labels are the type.
+            TypeDef::Set(labels) => {
+                let mut out = String::from("SET(");
+                for (i, label) in labels.iter().enumerate() {
+                    if i != 0 {
+                        out.push(',');
+                    }
+                    out.push('\'');
+                    out.push_str(&label.replace('\'', "''"));
+                    out.push('\'');
+                }
+                out.push(')');
+                Cow::Owned(out)
+            }
+            // MySQL has no domain. A schema pulled from PostgreSQL still has to render, so the
+            // base type is the closest safe spelling; `normalise_type` folds it back.
+            TypeDef::Domain(def) => MySql::type_name(def.base.as_type().clone()),
             other => Cow::Borrowed(match other {
                 TypeDef::Bool => "BOOLEAN",
                 TypeDef::Int2 => "SMALLINT",
@@ -146,10 +163,14 @@ impl Dialect for MySql {
                     return Cow::Owned(format!("DATETIME({p})"));
                 }
                 // MySQL's bit field tops out at 64 bits; a wider one keeps the width in the
-                // name so the server's own error says which column is at fault.
-                TypeDef::Bit(n) | TypeDef::VarBit(n) => {
-                    return Cow::Owned(format!("BIT({n})"));
-                }
+                // name so the server's own error says which column is at fault. A `VarBit`
+                // with no width is a fixed 64-bit column, because MySQL has no variable one.
+                TypeDef::Bit(n) => return Cow::Owned(format!("BIT({n})")),
+                TypeDef::VarBit(0) => return Cow::Owned(String::from("BIT(64)")),
+                TypeDef::VarBit(n) => return Cow::Owned(format!("BIT({n})")),
+                // MySQL has no interval and no address type; the canonical text is exact and
+                // survives a round trip, so `TEXT` is the honest storage.
+                TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => "TEXT",
                 TypeDef::Collated(inner, collation) => {
                     return Cow::Owned(format!(
                         "{} COLLATE {}",
@@ -184,6 +205,8 @@ impl Dialect for MySql {
             // spatial type in `CAST`, and Besu cannot tell which it is, so the name is
             // passed through exactly as the DDL would write it.
             TypeDef::Custom(name) => name,
+            // A domain is not spelled in MySQL; the base type decides what a cast means.
+            TypeDef::Domain(def) => MySql::cast_type_name(def.base.as_type().clone()),
             other => Cow::Borrowed(match other {
                 // `SIGNED` is MySQL's integer cast; a boolean is the integer `0` or `1`
                 // there, so this is the same value, not a different one.
@@ -323,6 +346,32 @@ mod tests {
             MySql::type_name(TypeDef::Enum(def)),
             "ENUM('happy','it''s ok')"
         );
+    }
+
+    #[test]
+    fn a_set_is_inline_with_its_labels() {
+        let labels = besu_core::EnumLabels::from_static(&["read", "write"]);
+        assert_eq!(
+            MySql::type_name(TypeDef::Set(labels)),
+            "SET('read','write')"
+        );
+    }
+
+    #[test]
+    fn bit_interval_and_address_types_take_their_closest_storage() {
+        assert_eq!(MySql::type_name(TypeDef::Bit(8)), "BIT(8)");
+        // MySQL has one fixed-width bit type, so an unbounded `VARBIT` is a full 64 bits.
+        assert_eq!(MySql::type_name(TypeDef::VarBit(0)), "BIT(64)");
+        assert_eq!(MySql::type_name(TypeDef::VarBit(5)), "BIT(5)");
+        assert_eq!(MySql::type_name(TypeDef::Interval), "TEXT");
+        assert_eq!(MySql::type_name(TypeDef::Inet), "TEXT");
+        assert_eq!(MySql::type_name(TypeDef::Cidr), "TEXT");
+    }
+
+    #[test]
+    fn a_domain_renders_its_base_type() {
+        let domain = TypeDef::Domain(besu_core::DomainDef::new("positive", &TypeDef::Int4));
+        assert_eq!(MySql::type_name(domain), "INT");
     }
 
     /// The DDL spelling is mostly not legal after `CAST(... AS ...)`, which accepts only

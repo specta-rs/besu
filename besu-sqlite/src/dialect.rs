@@ -90,9 +90,14 @@ impl Dialect for SQLite {
             TypeDef::TimeTz | TypeDef::TimeTzP(_) => "TIME",
             TypeDef::Timestamp | TypeDef::TimestampP(_) => "TIMESTAMP",
             TypeDef::TimestampTz | TypeDef::TimestampTzP(_) => "TIMESTAMP",
-            // SQLite has no bit string; an integer is the closest storage, and `BLOB` keeps
-            // no width. The value is the caller's to write with `sql!`.
-            TypeDef::Bit(_) | TypeDef::VarBit(_) => "INTEGER",
+            // SQLite has no bit string and no interval or address type; the canonical text is
+            // the exact value and is what introspection reports back.
+            TypeDef::Bit(_) | TypeDef::VarBit(_) => "TEXT",
+            TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => "TEXT",
+            // SQLite has no `SET`; the comma-separated labels are text.
+            TypeDef::Set(_) => "TEXT",
+            // SQLite has no domains; the base type is the storage.
+            TypeDef::Domain(def) => return SQLite::type_name(def.base.as_type().clone()),
             // An array is stored as its JSON text, which is the only collection SQLite has.
             TypeDef::Array(_) => "JSON",
             // SQLite has no enum: the label is stored as text, and normalisation folds the

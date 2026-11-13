@@ -1,6 +1,8 @@
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+use crate::scalars::{BitString, Cidr, Inet, SqlInterval};
+
 /// An owned, dialect-independent SQL value.
 ///
 /// [`Sql`](crate::Sql) stores its parameters as `Vec<D::Value>` where a dialect decides how
@@ -76,6 +78,20 @@ pub enum Value {
     },
     /// JSON, kept as text so dialects can render it as `json` or `jsonb`.
     Json(Vec<u8>),
+    /// A SQL interval.
+    ///
+    /// PostgreSQL has a native `INTERVAL` and a three-field binary format; MySQL and SQLite
+    /// have no interval type at all, so they store the value's canonical text.
+    Interval(SqlInterval),
+    /// A PostgreSQL `INET`, as its canonical textual spelling.
+    Inet(Inet),
+    /// A PostgreSQL `CIDR`, as its canonical textual spelling.
+    Cidr(Cidr),
+    /// A SQL bit string, as `0` and `1` characters.
+    ///
+    /// PostgreSQL's `BIT(n)` and `BIT VARYING(n)` send a length and the packed bytes; MySQL's
+    /// `BIT(n)` sends the packed bytes alone; SQLite stores the text.
+    Bit(BitString),
 }
 
 impl Value {
@@ -125,6 +141,10 @@ impl Value {
                         f.write_str("]")
                     }
                     Value::Json(v) => write!(f, "'{}'", String::from_utf8_lossy(v).escape_debug()),
+                    Value::Interval(v) => write!(f, "'{v}'"),
+                    Value::Inet(v) => write!(f, "'{v}'"),
+                    Value::Cidr(v) => write!(f, "'{v}'"),
+                    Value::Bit(v) => write!(f, "B'{}'", v.as_str()),
                 }
             }
         }
@@ -276,6 +296,30 @@ impl From<serde_json::Value> for Value {
     }
 }
 
+impl From<SqlInterval> for Value {
+    fn from(value: SqlInterval) -> Self {
+        Self::Interval(value)
+    }
+}
+
+impl From<Inet> for Value {
+    fn from(value: Inet) -> Self {
+        Self::Inet(value)
+    }
+}
+
+impl From<Cidr> for Value {
+    fn from(value: Cidr) -> Self {
+        Self::Cidr(value)
+    }
+}
+
+impl From<BitString> for Value {
+    fn from(value: BitString) -> Self {
+        Self::Bit(value)
+    }
+}
+
 /// A `Vec` of a scalar is an array of that scalar's canonical type.
 ///
 /// The element type has to be recovered from the Rust type, because `From` is the only
@@ -320,4 +364,7 @@ from_vec! {
     chrono::NaiveDateTime => crate::TypeDef::Timestamp,
     chrono::DateTime<chrono::Utc> => crate::TypeDef::TimestampTz,
     serde_json::Value => crate::TypeDef::Json,
+    SqlInterval => crate::TypeDef::Interval,
+    Inet => crate::TypeDef::Inet,
+    Cidr => crate::TypeDef::Cidr,
 }

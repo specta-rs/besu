@@ -1,9 +1,12 @@
-use besu_core::{Decode, Driver, Error, Sql, TransactionDriver, Value};
+use besu_core::{
+    BitString, Cidr, Decode, Driver, Error, Inet, Sql, SqlInterval, TransactionDriver, Value,
+};
 use chrono::Timelike;
 use sqlx::{
     Arguments, Column as _, PgPool, Postgres as SqlxPostgres, Row, ValueRef,
     postgres::{
-        PgArgumentBuffer, PgArguments, PgQueryResult, PgRow, PgTypeInfo, PgValueFormat, PgValueRef,
+        PgArgumentBuffer, PgArguments, PgQueryResult, PgRow, PgTypeInfo, PgTypeKind, PgValueFormat,
+        PgValueRef,
     },
 };
 
@@ -15,11 +18,44 @@ const NUMERIC_OID: u32 = 1700;
 /// The OID of PostgreSQL's built-in `REAL` (`FLOAT4`) type.
 const FLOAT4_OID: u32 = 700;
 
-/// Whether a value's declared SQL type is the built-in type with this OID.
+/// The OID of PostgreSQL's built-in `INTERVAL` type.
+const INTERVAL_OID: u32 = 1186;
+
+/// The OID of PostgreSQL's built-in `INET` type.
+const INET_OID: u32 = 869;
+
+/// The OID of PostgreSQL's built-in `CIDR` type.
+const CIDR_OID: u32 = 650;
+
+/// The OID of PostgreSQL's built-in `BIT` type.
+const BIT_OID: u32 = 1560;
+
+/// The OID of PostgreSQL's built-in `VARBIT` type.
+const VARBIT_OID: u32 = 1562;
+
+/// The type behind a domain, or the type itself when it is not one.
+///
+/// sqlx resolves a domain to its base type in the statement's type description, so a value
+/// read from a domain column knows what it really is. Every decoder that branches on an OID
+/// goes through this, which is what makes a domain over `NUMERIC` read like a `NUMERIC`.
+fn base_type(ty: &PgTypeInfo) -> &PgTypeInfo {
+    let mut current = ty;
+    while let PgTypeKind::Domain(base) = current.kind() {
+        current = base;
+    }
+    current
+}
+
+/// Whether a value's declared SQL type is the built-in type with this OID, reaching through
+/// a domain.
 fn type_is(value: &PgValueRef<'_>, oid: u32) -> bool {
-    value
-        .type_info()
-        .type_eq(&PgTypeInfo::with_oid(sqlx::postgres::types::Oid(oid)))
+    let ty = value.type_info();
+    base_type(ty.as_ref()).type_eq(&PgTypeInfo::with_oid(sqlx::postgres::types::Oid(oid)))
+}
+
+/// Whether a value's declared type is a domain.
+fn is_domain(value: &PgValueRef<'_>) -> bool {
+    matches!(value.type_info().kind(), PgTypeKind::Domain(_))
 }
 
 /// A [`besu_core::Driver`] for PostgreSQL, backed by [`sqlx`].
@@ -267,6 +303,9 @@ fn element_oid(ty: &besu_core::TypeDef) -> Option<u32> {
         TypeDef::Jsonb => 3802,
         TypeDef::Bit(_) => 1560,
         TypeDef::VarBit(_) => 1562,
+        TypeDef::Interval => 1186,
+        TypeDef::Inet => 869,
+        TypeDef::Cidr => 650,
         // The unsigned markers are stored as the signed type the dialect declares, except
         // that a 64- or 128-bit one lives in `NUMERIC`.
         TypeDef::UInt(8) => 21,
@@ -274,9 +313,13 @@ fn element_oid(ty: &besu_core::TypeDef) -> Option<u32> {
         TypeDef::UInt(32) => 20,
         TypeDef::UInt(_) | TypeDef::Decimal(_, _) => 1700,
         TypeDef::Collated(inner, _) => return element_oid(inner),
-        // An enum, a domain or an array of an array is a type Besu has no binary encoder
-        // for, and guessing its OID would send bytes the server decodes as something else.
-        TypeDef::Custom(_) | TypeDef::Array(_) => return None,
+        // An enum, a domain, a MySQL `SET` or an array of an array is a type Besu has no
+        // binary encoder for, and guessing its OID would send bytes the server decodes as
+        // something else. A domain's OID is assigned by the server, so it cannot be named
+        // here; an array of a domain needs `sql!`.
+        TypeDef::Custom(_) | TypeDef::Set(_) | TypeDef::Domain(_) | TypeDef::Array(_) => {
+            return None;
+        }
         _ => return None,
     })
 }
@@ -337,6 +380,22 @@ fn encode_element(
         (TypeDef::Jsonb, Value::Json(v)) => {
             out.push(1);
             out.extend_from_slice(v);
+        }
+        (TypeDef::Interval, Value::Interval(v)) => {
+            out.extend_from_slice(&v.microseconds().to_be_bytes());
+            out.extend_from_slice(&v.days().to_be_bytes());
+            out.extend_from_slice(&v.months().to_be_bytes());
+        }
+        (TypeDef::Inet, Value::Inet(v)) => {
+            write_network(&NetworkValue::inet(v), out);
+        }
+        (TypeDef::Cidr, Value::Cidr(v)) => {
+            write_network(&NetworkValue::cidr(v), out);
+        }
+        (TypeDef::Bit(_) | TypeDef::VarBit(_), Value::Bit(v)) => {
+            let length = i32::try_from(v.len()).map_err(|_| "the bit string is too long")?;
+            out.extend_from_slice(&length.to_be_bytes());
+            out.extend_from_slice(&v.to_bytes());
         }
         (TypeDef::Date, Value::Date(v)) => {
             let days = v.signed_duration_since(postgres_epoch()).num_days();
@@ -442,6 +501,147 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedText<'_> {
 
     fn size_hint(&self) -> usize {
         self.0.len()
+    }
+}
+
+/// An interval encoded into PostgreSQL's `INTERVAL` binary format.
+#[derive(Debug, Clone, Copy)]
+struct IntervalValue(SqlInterval);
+
+impl sqlx::Type<SqlxPostgres> for IntervalValue {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(INTERVAL_OID))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for IntervalValue {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        // `interval_send` writes the time in microseconds, then whole days, then whole
+        // months — in that order, each big-endian.
+        buffer.extend_from_slice(&self.0.microseconds().to_be_bytes());
+        buffer.extend_from_slice(&self.0.days().to_be_bytes());
+        buffer.extend_from_slice(&self.0.months().to_be_bytes());
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        16
+    }
+}
+
+/// An `INET` or `CIDR` encoded into PostgreSQL's binary network format.
+///
+/// The parameter is sent untyped so the server infers `inet` or `cidr` from the column or
+/// the comparison: the two types share this binary layout, and declaring one where the other
+/// is expected would need a cast the encoder cannot see.
+#[derive(Debug, Clone, Copy)]
+struct NetworkValue {
+    address: core::net::IpAddr,
+    prefix: u8,
+    cidr: bool,
+}
+
+impl NetworkValue {
+    fn inet(value: &Inet) -> Self {
+        Self::parse(value.as_str(), false)
+    }
+
+    fn cidr(value: &Cidr) -> Self {
+        Self::parse(value.as_str(), true)
+    }
+
+    /// Split the canonical spelling back into its address and prefix.
+    ///
+    /// The wrappers only hold text they built themselves, so the address always parses; the
+    /// unspecified fallback is there to keep a hand-built value from panicking.
+    fn parse(text: &str, cidr: bool) -> Self {
+        let (address, prefix) = text
+            .split_once('/')
+            .map_or((text, None), |(address, prefix)| {
+                (address, prefix.parse().ok())
+            });
+        let address = address
+            .parse()
+            .unwrap_or(core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED));
+        let prefix = prefix.unwrap_or(if address.is_ipv4() { 32 } else { 128 });
+        Self {
+            address,
+            prefix,
+            cidr,
+        }
+    }
+}
+
+impl sqlx::Type<SqlxPostgres> for NetworkValue {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for NetworkValue {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        write_network(self, buffer);
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        // Four header bytes plus at most sixteen address bytes.
+        20
+    }
+}
+
+/// Write the five fields of PostgreSQL's network binary format.
+fn write_network(value: &NetworkValue, out: &mut Vec<u8>) {
+    // `network_send` writes the family (`PGSQL_AF_INET` is 2 and `PGSQL_AF_INET6` is 3),
+    // the netmask, whether the value is a `cidr`, the address length, then the address.
+    let (family, bytes): (u8, &[u8]) = match &value.address {
+        core::net::IpAddr::V4(address) => (2, &address.octets()),
+        core::net::IpAddr::V6(address) => (3, &address.octets()),
+    };
+    out.extend_from_slice(&[
+        family,
+        value.prefix,
+        u8::from(value.cidr),
+        bytes.len() as u8,
+    ]);
+    out.extend_from_slice(bytes);
+}
+
+/// A bit string encoded into PostgreSQL's `BIT`/`VARBIT` binary format.
+///
+/// The parameter is sent untyped: `BIT(n)` and `BIT VARYING(n)` share this layout and differ
+/// only in the length they accept, so the column the value is written to decides which one it
+/// is.
+#[derive(Debug, Clone, Copy)]
+struct BitValue<'a>(&'a BitString);
+
+impl sqlx::Type<SqlxPostgres> for BitValue<'_> {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for BitValue<'_> {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let length = i32::try_from(self.0.len()).map_err(|_| {
+            <Sqlx as Driver>::error(Error::encode("bit", "the bit string is too long"))
+        })?;
+        buffer.extend_from_slice(&length.to_be_bytes());
+        buffer.extend_from_slice(&self.0.to_bytes());
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        4 + self.0.len().div_ceil(8)
     }
 }
 
@@ -586,6 +786,11 @@ fn encoded_size(value: &Value) -> usize {
         Value::Json(v) => LENGTH_PREFIX + 1 + v.len(),
         // Header plus at most one two-byte digit per four characters of decimal text.
         Value::Decimal(v) => LENGTH_PREFIX + 8 + v.len().div_ceil(4) * 2,
+        Value::Interval(_) => LENGTH_PREFIX + 16,
+        // Four header bytes and at most sixteen address bytes.
+        Value::Inet(_) | Value::Cidr(_) => LENGTH_PREFIX + 20,
+        // The int32 bit length plus the packed bits.
+        Value::Bit(v) => LENGTH_PREFIX + 4 + v.len().div_ceil(8),
         // The array header plus a four-byte length and a payload per element; the element
         // sizes are estimated from the values themselves.
         Value::Array { values, .. } => {
@@ -614,6 +819,9 @@ fn element_size(value: &Value) -> usize {
         Value::Date(_) => 4,
         Value::Time(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 8,
         Value::Json(v) => 1 + v.len(),
+        Value::Interval(_) => 16,
+        Value::Inet(_) | Value::Cidr(_) => 20,
+        Value::Bit(v) => 4 + v.len().div_ceil(8),
         // An array of an array is not supported by the encoder, so it adds nothing.
         _ => 0,
     }
@@ -654,6 +862,10 @@ pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Time(v) => add(&mut arguments, *v)?,
             Value::Timestamp(v) => add(&mut arguments, *v)?,
             Value::TimestampTz(v) => add(&mut arguments, *v)?,
+            Value::Interval(v) => add(&mut arguments, IntervalValue(*v))?,
+            Value::Inet(v) => add(&mut arguments, NetworkValue::inet(v))?,
+            Value::Cidr(v) => add(&mut arguments, NetworkValue::cidr(v))?,
+            Value::Bit(v) => add(&mut arguments, BitValue(v))?,
             Value::Json(v) => {
                 // The document is already JSON text. Validating it in place and binding the
                 // borrowed `RawValue` lets sqlx copy those bytes into its buffer, instead of
@@ -807,7 +1019,15 @@ where
 {
     let index = *offset;
     *offset += 1;
-    row.try_get(index)
+    let value = row.try_get_raw(index)?;
+    // A domain's declared type is the domain, so the checked path refuses it even though its
+    // wire format is the base type's. The base type is what the Rust type was written for, so
+    // reading unchecked is exactly right.
+    if is_domain(&value) {
+        row.try_get_unchecked(index)
+    } else {
+        row.try_get(index)
+    }
 }
 
 fn decode_integer<T>(row: &PgRow, offset: &mut usize) -> Result<T, sqlx::Error>
@@ -1087,8 +1307,179 @@ impl Decode<Sqlx> for f32 {
 
 impl Decode<Sqlx> for serde_json::Value {
     fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let value = row.try_get_raw(index)?;
+        // `sqlx`'s JSON wrapper types are checked against `json`/`jsonb`, so a domain over
+        // either has to be read from its base type's bytes directly.
+        if is_domain(&value) {
+            *offset += 1;
+            let jsonb = type_is(&value, 3802);
+            let text = match value.format() {
+                PgValueFormat::Text => value
+                    .as_str()
+                    .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))?
+                    .to_owned(),
+                PgValueFormat::Binary => {
+                    let bytes = value.as_bytes().map_err(|err| {
+                        <Sqlx as Driver>::error(Error::decode(index, err.to_string()))
+                    })?;
+                    let bytes = if jsonb {
+                        match bytes.split_first() {
+                            Some((1, rest)) => rest,
+                            _ => {
+                                return Err(<Sqlx as Driver>::error(Error::decode(
+                                    index,
+                                    "malformed JSONB value",
+                                )));
+                            }
+                        }
+                    } else {
+                        bytes
+                    };
+                    core::str::from_utf8(bytes)
+                        .map_err(|_| {
+                            <Sqlx as Driver>::error(Error::decode(
+                                index,
+                                "the JSON value is not valid UTF-8",
+                            ))
+                        })?
+                        .to_owned()
+                }
+            };
+            return serde_json::from_str(&text).map_err(|err| {
+                <Sqlx as Driver>::error(Error::decode(index, format!("invalid JSON: {err}")))
+            });
+        }
         let value: sqlx::types::Json<serde_json::Value> = decode_via_sqlx(row, offset)?;
         Ok(value.0)
+    }
+}
+
+/// Decode a `INTERVAL` from PostgreSQL's binary format: microseconds, days, months.
+fn decode_interval_binary(bytes: &[u8]) -> Result<SqlInterval, &'static str> {
+    let bytes: [u8; 16] = bytes.try_into().map_err(|_| "malformed INTERVAL value")?;
+    let microseconds = i64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    let days = i32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let months = i32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    Ok(SqlInterval::new(months, days, microseconds))
+}
+
+impl Decode<Sqlx> for SqlInterval {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        match value.format() {
+            PgValueFormat::Text => value
+                .as_str()
+                .map_err(|err| malformed(&err.to_string()))?
+                .parse()
+                .map_err(|err: besu_core::ParseValueError| malformed(&err.to_string())),
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                decode_interval_binary(bytes).map_err(malformed)
+            }
+        }
+    }
+}
+
+/// Decode a `INET` or `CIDR` from PostgreSQL's binary network format into canonical text.
+fn decode_network_binary(bytes: &[u8]) -> Result<String, &'static str> {
+    let header = bytes.get(..4).ok_or("malformed network value")?;
+    let family = header[0];
+    let prefix = header[1];
+    let address = bytes.get(4..).ok_or("malformed network value")?;
+    let address = match (family, address) {
+        (2, [a, b, c, d]) => core::net::IpAddr::V4(core::net::Ipv4Addr::new(*a, *b, *c, *d)),
+        (3, bytes) => {
+            let bytes: [u8; 16] = bytes.try_into().map_err(|_| "malformed network value")?;
+            core::net::IpAddr::V6(core::net::Ipv6Addr::from(bytes))
+        }
+        _ => return Err("malformed network value"),
+    };
+    Ok(format!("{address}/{prefix}"))
+}
+
+impl Decode<Sqlx> for Inet {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        let text = match value.format() {
+            PgValueFormat::Text => value
+                .as_str()
+                .map_err(|err| malformed(&err.to_string()))?
+                .to_owned(),
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                let text = decode_network_binary(bytes).map_err(malformed)?;
+                // The unpacked spelling always carries a prefix; `Inet` canonicalises it the
+                // way the server prints it, dropping `/32` and `/128`.
+                text
+            }
+        };
+        Self::new(&text).map_err(|err| malformed(&err.to_string()))
+    }
+}
+
+impl Decode<Sqlx> for Cidr {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        let text = match value.format() {
+            PgValueFormat::Text => value
+                .as_str()
+                .map_err(|err| malformed(&err.to_string()))?
+                .to_owned(),
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                decode_network_binary(bytes).map_err(malformed)?
+            }
+        };
+        Self::new(&text).map_err(|err| malformed(&err.to_string()))
+    }
+}
+
+impl Decode<Sqlx> for BitString {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        match value.format() {
+            PgValueFormat::Text => {
+                let text = value.as_str().map_err(|err| malformed(&err.to_string()))?;
+                Self::new(text).map_err(|err| malformed(&err.to_string()))
+            }
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                let header = bytes
+                    .get(..4)
+                    .ok_or_else(|| malformed("malformed BIT value"))?;
+                let length = i32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+                let length =
+                    usize::try_from(length).map_err(|_| malformed("the bit length is negative"))?;
+                Self::from_bytes(&bytes[4..], length).map_err(|err| malformed(&err.to_string()))
+            }
+        }
     }
 }
 
@@ -1540,6 +1931,85 @@ impl ArrayElement for serde_json::Value {
     }
 }
 
+impl ArrayElement for SqlInterval {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != INTERVAL_OID {
+            return Err("this element is not an INTERVAL");
+        }
+        decode_interval_binary(bytes)
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        text.trim()
+            .parse()
+            .map_err(|_| "an array element is not an interval")
+    }
+}
+
+/// Read one network element, which is the same five fields as the scalar format.
+fn array_network(bytes: &[u8]) -> Result<(core::net::IpAddr, u8), &'static str> {
+    let header = bytes.get(..4).ok_or("malformed network element")?;
+    let prefix = header[1];
+    match (header[0], &bytes[4..]) {
+        (2, [a, b, c, d]) => Ok((
+            core::net::IpAddr::V4(core::net::Ipv4Addr::new(*a, *b, *c, *d)),
+            prefix,
+        )),
+        (3, bytes) => {
+            let bytes: [u8; 16] = bytes.try_into().map_err(|_| "malformed network element")?;
+            Ok((
+                core::net::IpAddr::V6(core::net::Ipv6Addr::from(bytes)),
+                prefix,
+            ))
+        }
+        _ => Err("malformed network element"),
+    }
+}
+
+impl ArrayElement for Inet {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != INET_OID {
+            return Err("this element is not an INET");
+        }
+        let (address, prefix) = array_network(bytes)?;
+        Self::new(&format!("{address}/{prefix}")).map_err(|_| "an array element is not an address")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        Self::new(text.trim()).map_err(|_| "an array element is not an address")
+    }
+}
+
+impl ArrayElement for Cidr {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != CIDR_OID {
+            return Err("this element is not a CIDR");
+        }
+        let (address, prefix) = array_network(bytes)?;
+        Self::new(&format!("{address}/{prefix}")).map_err(|_| "an array element is not a network")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        Self::new(text.trim()).map_err(|_| "an array element is not a network")
+    }
+}
+
+impl ArrayElement for BitString {
+    fn decode_element(element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        if element != BIT_OID && element != VARBIT_OID {
+            return Err("this element is not a bit string");
+        }
+        let header = bytes.get(..4).ok_or("malformed bit element")?;
+        let length = i32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let length = usize::try_from(length).map_err(|_| "the bit length is negative")?;
+        Self::from_bytes(&bytes[4..], length).map_err(|_| "an array element is not a bit string")
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        Self::new(text.trim()).map_err(|_| "an array element is not a bit string")
+    }
+}
+
 macro_rules! impl_decode_array {
     ($($ty:ty),* $(,)?) => {
         $(
@@ -1571,6 +2041,10 @@ impl_decode_array!(
     chrono::DateTime<chrono::Utc>,
     serde_json::Value,
     u128,
+    SqlInterval,
+    Inet,
+    Cidr,
+    BitString,
 );
 
 /// Parse PostgreSQL's text array literal: `{a,"b,c",NULL}`.
