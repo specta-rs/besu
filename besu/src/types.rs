@@ -139,6 +139,35 @@ impl<S: SqlType> TypeWitness<S> for S {}
 
 impl<T, S: SqlType, N: Nullability> TypeWitness<S> for Column<T, S, N> {}
 
+/// A value that carries a column's SQL type and nullability without naming the type.
+///
+/// [`TypeWitness`] is parameterised by the SQL type, so it can only be used where that type
+/// is already known. A list of output columns has no single type parameter — the columns may
+/// be an `INT8` and a `TEXT` — so each entry supplies its own through this trait. It is
+/// implemented for the same two things a [`TypeWitness`] is: the marker itself and a column of
+/// the type.
+///
+/// ```ignore
+/// .cte_named("totals", (("author_id", posts.author_id), ("total", Int8)))
+/// ```
+pub trait ColumnWitness {
+    /// The canonical type of a column of this type.
+    const TYPE: besu_core::TypeDef;
+
+    /// Whether a column of this type accepts `NULL`.
+    const NULLABLE: bool;
+}
+
+impl<S: SqlType> ColumnWitness for S {
+    const TYPE: besu_core::TypeDef = S::DEF;
+    const NULLABLE: bool = false;
+}
+
+impl<T, S: SqlType, N: Nullability> ColumnWitness for Column<T, S, N> {
+    const TYPE: besu_core::TypeDef = S::DEF;
+    const NULLABLE: bool = N::NULLABLE;
+}
+
 /// A Rust enum whose variants are the labels of a SQL enum.
 ///
 /// `#[derive(SqlEnum)]` implements this, [`SqlType`], `From<Self> for Value`,

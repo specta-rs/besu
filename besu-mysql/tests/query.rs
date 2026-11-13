@@ -1612,6 +1612,50 @@ async fn common_table_expressions_run() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "A");
 
+    // A projection that is not a whole table names its columns at the call site.
+    let counts = db
+        .select(users)
+        .pick((users.age, count_all()))
+        .group_by(users.age)
+        .cte_named("counts", (("age", users.age), ("total", besu::Int8)));
+    let age = counts.column_named("age", users.age);
+    let total = counts.column_named("total", besu::Int8);
+    let rows: Vec<(i32, i64)> = db
+        .from(&counts)
+        .pick((age.clone(), total.clone()))
+        .filter(total.gte(1_i64))
+        .order_by(age.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(10, 1), (20, 1), (30, 1)]);
+
+    // A compound is a statement: it nests in `EXISTS` and can be counted as a whole.
+    let rows: Vec<User> = db
+        .select(users)
+        .filter(exists(
+            db.select(users)
+                .pick(users.id)
+                .filter(users.age.gte(18))
+                .union(db.select(users).pick(users.id).filter(users.age.lt(18))),
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+
+    let total: i64 = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gte(18))
+        .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+        .count()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(total, 3);
+
     db.insert(nodes)
         .value(nodes.insert(1, "root".to_string()))
         .await

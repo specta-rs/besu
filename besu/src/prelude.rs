@@ -8,7 +8,8 @@
 //! traits that make method syntax work.
 
 pub use crate::types::{
-    Column, NonNull, Nullability, Nullable, SqlEnum, SqlType, TypeWitness, UnknownLabel,
+    Column, ColumnWitness, NonNull, Nullability, Nullable, SqlEnum, SqlType, TypeWitness,
+    UnknownLabel,
 };
 pub use besu_core::{TypeDef, Value};
 
@@ -42,8 +43,8 @@ pub use crate::expr::{
 };
 pub use crate::macros::Fragment;
 pub use crate::query::{
-    Alias, Cte, Delete, Derived, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update,
-    alias, alias_as, derived,
+    Alias, Cte, CteColumns, Delete, Derived, DynamicSelect, Insert, IntoQueryBody, JoinKind,
+    OnConflict, Select, SetOp, SetQuery, Update, alias, alias_as, derived,
 };
 pub use crate::relation::{HasMany, WithRelation, has_many};
 pub use crate::seed::{TableSeed, seed};

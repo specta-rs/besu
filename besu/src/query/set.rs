@@ -17,9 +17,9 @@ use besu_core::{Decode, Dialect, DialectOf, Driver, Error, ErrorOf, Executor, Sq
 
 use crate::expr::{IntoOrder, OrderClause};
 use crate::query::{
-    Cte, CteRoot, Select, SelectQuery, WithClause, render_limit, render_order, select::decode_rows,
+    Cte, CteColumns, CteRoot, IntoQueryBody, QueryBody, Select, SelectQuery, WithClause,
+    render_limit, render_order, select::decode_rows,
 };
-use crate::table::Table;
 
 /// Which set operator joins two `SELECT`s.
 ///
@@ -90,8 +90,9 @@ pub struct SetQuery<'a, E: Executor, M, R> {
 ///
 /// It is separate so that [`SetQuery::to_sql`] can render without consuming the builder:
 /// rendering moves the bound values into the statement, so a borrow has to clone this first.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SetParts {
+pub struct SetParts {
     branches: Vec<SelectQuery>,
     /// One operator between each pair of branches, so one fewer than `branches`.
     operators: Vec<SetOp>,
@@ -164,8 +165,24 @@ impl SetParts {
         }
     }
 
+    /// The `WITH` clause these branches carry, taken out so the enclosing statement can
+    /// define it instead.
+    pub(crate) fn take_with(&mut self) -> Option<WithClause> {
+        self.with.take()
+    }
+
+    /// The first branch, whose projection names the compound's output columns.
+    pub(crate) fn first_branch(&self) -> &SelectQuery {
+        &self.branches[0]
+    }
+
+    /// The number of columns every branch must select.
+    pub(crate) fn projection_len(&self) -> usize {
+        self.branches[0].projection_len()
+    }
+
     /// Render the compound query.
-    fn render_into<D: Dialect>(&mut self, out: &mut Sql<D>) {
+    pub(crate) fn render_into<D: Dialect>(&mut self, out: &mut Sql<D>) {
         // Taken out of `self` so that the branches can be borrowed mutably while the
         // definition's name is still in hand.
         let root = self.root.take();
@@ -187,10 +204,7 @@ impl SetParts {
                         out.push_raw(", ");
                     }
                     first = false;
-                    out.push_ident(entry.name);
-                    out.push_raw(" AS (");
-                    entry.body.render_branches(out);
-                    out.push_raw(")");
+                    crate::query::render_cte_entry(out, entry);
                 }
             }
             if let Some(root) = &root {
@@ -198,6 +212,7 @@ impl SetParts {
                     out.push_raw(", ");
                 }
                 out.push_ident(root.name);
+                crate::query::render_cte_columns(out, &root.columns, root.named_columns);
                 out.push_raw(" AS (");
                 self.render_branches(out);
                 out.push_raw(")");
@@ -271,7 +286,7 @@ impl SetParts {
         }
     }
 
-    fn capacity_hint(&self) -> usize {
+    pub(crate) fn capacity_hint(&self) -> usize {
         // Each branch budgets for its own clauses; this covers the operators, the spacing
         // and the compound's `ORDER BY` / `LIMIT`.
         let mut bytes = 32;
@@ -401,7 +416,7 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
     ///
     /// A statement that reads from the expression already carries its definition; calling
     /// this is harmless then, because an entry is kept only once per name.
-    pub fn with_cte<T: Table>(mut self, cte: &Cte<T>) -> Self {
+    pub fn with_cte<C: 'static>(mut self, cte: &Cte<C>) -> Self {
         self.query.push_with(cte.entries());
         self
     }
@@ -500,6 +515,61 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
         self
     }
 
+    /// Name this compound as a common table expression with a chosen column list.
+    ///
+    /// A compound is a valid `WITH` body, and the caller supplies the names of the output
+    /// columns because the compiler cannot see a projection that is built from values:
+    ///
+    /// ```ignore
+    /// let everyone = db
+    ///     .select(users)
+    ///     .pick(users.id)
+    ///     .union(db.select(posts).pick(posts.author_id))
+    ///     .cte_named("everyone", (("id", users.id),));
+    /// ```
+    ///
+    /// The same rules as [`Select::cte_named`] apply: the list must describe the compound's
+    /// first branch, and a mismatch is recorded as an error on the statement that uses the
+    /// expression. Use [`Cte::column_named`] to read a column back.
+    pub fn cte_named<C: CteColumns>(self, name: &'static str, columns: C) -> Cte<R>
+    where
+        R: 'static,
+    {
+        let mut query = self.query;
+        let prerequisites = query.take_with();
+        let columns = columns.into_columns();
+        let error = crate::query::validate_cte(name, &columns, query.projection_len());
+        Cte::new(
+            name,
+            QueryBody::Set(query),
+            columns.into(),
+            true,
+            prerequisites,
+        )
+        .with_error(error)
+    }
+
+    /// Count the rows this statement produces.
+    ///
+    /// The compound is wrapped in a derived table so its filters, joins, grouping, ordering
+    /// and pagination all still apply:
+    ///
+    /// ```sql
+    /// SELECT COUNT(*) FROM (
+    ///     SELECT ... UNION SELECT ... LIMIT 10
+    /// ) AS "besu_count"
+    /// ```
+    ///
+    /// It returns one `i64`, the same type [`count_all`](crate::count_all) produces.
+    pub fn count(self) -> Select<'a, E, (), i64> {
+        let Self {
+            exec,
+            query,
+            phantom: _,
+        } = self;
+        crate::query::select::count_query(exec, QueryBody::Set(query))
+    }
+
     /// Render the exact SQL this query will run, without running it.
     ///
     /// Like [`Select::to_sql`], a capability the dialect lacks is recorded as
@@ -563,5 +633,13 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.all())
+    }
+}
+
+impl<'a, E: Executor, M, R> IntoQueryBody for SetQuery<'a, E, M, R> {
+    type Row = R;
+
+    fn into_query_body(self) -> QueryBody {
+        QueryBody::Set(self.query)
     }
 }

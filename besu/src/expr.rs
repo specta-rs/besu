@@ -2251,7 +2251,13 @@ impl<T, S: SqlType> Expr<T, S> {
         }
     }
 
-    pub(crate) fn into_kind(self) -> ExprKind {
+    /// Erase the type-state, leaving the expression the query builder renders.
+    ///
+    /// This is the escape hatch for the places the typed builder is in the way, chiefly
+    /// [`DynamicSelect`](crate::DynamicSelect). Every other method should prefer the typed
+    /// form: `into_kind` gives up the row-set and SQL-type checks, so the database is the
+    /// only thing left to catch a mistake.
+    pub fn into_kind(self) -> ExprKind {
         self.kind
     }
 
@@ -3245,23 +3251,23 @@ where
 
 /// A `SELECT` nested inside another statement.
 ///
-/// This is the erased form of a [`Select`](crate::Select): the row set and row type are not
-/// part of it, because the statement that contains it never decodes the subquery's rows. It
-/// is rendered by the enclosing statement's dialect and shares that statement's parameter
-/// numbering.
+/// This is the erased form of a [`Select`](crate::Select) or a
+/// [`SetQuery`](crate::SetQuery): the row set and row type are not part of it, because the
+/// statement that contains it never decodes the subquery's rows. It is rendered by the
+/// enclosing statement's dialect and shares that statement's parameter numbering.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Subquery {
-    pub(crate) query: crate::query::SelectQuery,
+    pub(crate) query: crate::query::QueryBody,
 }
 
-/// A finished `SELECT` that can be nested inside another statement.
+/// A finished query that can be nested inside another statement.
 ///
-/// Implemented for [`Select`](crate::Select), which is what makes
-/// `exists(db.select(posts).filter(..))` read like the SQL it produces. The executor is
-/// dropped when the query is nested: the subquery is rendered by the statement that contains
-/// it, so it shares that statement's dialect and its parameters continue that statement's
-/// numbering.
+/// Implemented for [`Select`](crate::Select) and [`SetQuery`](crate::SetQuery), which is what
+/// makes `exists(db.select(posts).filter(..))` read like the SQL it produces, and lets a
+/// compound query stand wherever a `SELECT` does. The executor is dropped when the query is
+/// nested: the subquery is rendered by the statement that contains it, so it shares that
+/// statement's dialect and its parameters continue that statement's numbering.
 ///
 /// The row set of a nested query is not constrained against the enclosing query's, because
 /// the compiler cannot express "the tables this subquery borrows from the outer query are
@@ -3284,7 +3290,19 @@ impl<'a, E: Executor, M, R> IntoSubquery for crate::query::Select<'a, E, M, R> {
     type Row = R;
 
     fn into_subquery(self) -> Subquery {
-        Subquery { query: self.query }
+        Subquery {
+            query: crate::query::IntoQueryBody::into_query_body(self),
+        }
+    }
+}
+
+impl<'a, E: Executor, M, R> IntoSubquery for crate::query::SetQuery<'a, E, M, R> {
+    type Row = R;
+
+    fn into_subquery(self) -> Subquery {
+        Subquery {
+            query: crate::query::IntoQueryBody::into_query_body(self),
+        }
     }
 }
 

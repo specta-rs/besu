@@ -1,7 +1,8 @@
 //! Derived tables: a subquery in `FROM`.
 //!
-//! A [`Derived`] is a finished `SELECT` that an outer statement reads as if it were a table.
-//! The expression is written out where it is used, so it never runs on its own:
+//! A [`Derived`] is a finished `SELECT` — or a compound query — that an outer statement reads
+//! as if it were a table. The expression is written out where it is used, so it never runs on
+//! its own:
 //!
 //! ```ignore
 //! let totals = derived(db.select(posts).pick(posts.author_id), "totals");
@@ -32,11 +33,9 @@
 
 use core::marker::PhantomData;
 
-use besu_core::Executor;
-
 use crate::condition::Contains;
 use crate::expr::{Expr, ExprKind};
-use crate::query::{DerivedSource, From, Select, SelectQuery};
+use crate::query::{DerivedSource, From, IntoQueryBody, QueryBody};
 use crate::table::{Table, TableRef};
 use crate::types::{Column, Nullability, SqlType, TypeWitness};
 
@@ -51,7 +50,7 @@ pub struct Derived<R> {
     /// `None` means the projection is an expression, which has no portable name.
     columns: alloc::vec::Vec<Option<&'static str>>,
     /// The subquery itself.
-    body: alloc::boxed::Box<SelectQuery>,
+    body: alloc::boxed::Box<QueryBody>,
     phantom: PhantomData<fn() -> R>,
 }
 
@@ -75,7 +74,7 @@ impl<R> core::fmt::Debug for Derived<R> {
     }
 }
 
-/// Name `select` and read it as a table from the enclosing statement.
+/// Name `query` and read it as a table from the enclosing statement.
 ///
 /// ```ignore
 /// let counts = derived(
@@ -92,6 +91,25 @@ impl<R> core::fmt::Debug for Derived<R> {
 /// ) AS "counts"
 /// ```
 ///
+/// A [`SetQuery`](crate::SetQuery) is accepted as well, because a compound is a statement like
+/// any other; it is written inside the parentheses with its branches, operators and its own
+/// `ORDER BY` / `LIMIT`:
+///
+/// ```ignore
+/// let everyone = derived(
+///     db.select(users).pick(users.id)
+///         .union(db.select(posts).pick(posts.author_id)),
+///     "everyone",
+/// );
+/// ```
+///
+/// ```sql
+/// SELECT ... FROM (
+///     SELECT "users"."id" FROM "users"
+///     UNION SELECT "posts"."author_id" FROM "posts"
+/// ) AS "everyone"
+/// ```
+///
 /// The expression is rendered into the enclosing statement, so its parameters continue that
 /// statement's numbering, and its dialect is the enclosing statement's. That also means the
 /// name must be unique within the statement: the builder does not rename colliding aliases,
@@ -105,43 +123,14 @@ impl<R> core::fmt::Debug for Derived<R> {
 /// column. A projection made only of plain columns is decodable as a whole row; one that
 /// includes expressions has no portable column names, so it needs an explicit `pick` on the
 /// outer query.
-pub fn derived<'a, E: Executor, M, R>(
-    select: Select<'a, E, M, R>,
-    alias: &'static str,
-) -> Derived<R> {
-    let query = select.query;
-    let columns = projection_names(&query);
+pub fn derived<Q: IntoQueryBody>(query: Q, alias: &'static str) -> Derived<Q::Row> {
+    let body = query.into_query_body();
+    let columns = body.projection_names();
     Derived {
         alias,
         columns,
-        body: alloc::boxed::Box::new(query),
+        body: alloc::boxed::Box::new(body),
         phantom: PhantomData,
-    }
-}
-
-/// The names a query's projection produces, in order.
-///
-/// A plain column keeps its name. An expression records `None`, because the name a database
-/// invents for `COUNT(*)` differs between the three: PostgreSQL calls it `count`, while
-/// SQLite and MySQL call it `count(*)`.
-fn projection_names(query: &SelectQuery) -> alloc::vec::Vec<Option<&'static str>> {
-    match &query.projection {
-        Some(projection) => projection.iter().map(column_name).collect(),
-        None => {
-            let mut names = query.from.column_names();
-            for join in &query.joins {
-                names.extend(join.source.column_names());
-            }
-            names
-        }
-    }
-}
-
-/// The name of a projected expression, when it has one of its own.
-fn column_name(expr: &ExprKind) -> Option<&'static str> {
-    match expr {
-        ExprKind::Column { column, .. } | ExprKind::UnprefixedColumn { column, .. } => Some(column),
-        _ => None,
     }
 }
 

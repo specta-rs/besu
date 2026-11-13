@@ -19,6 +19,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+use besu::types::Int8;
 use besu::{Dialect, Driver, Error, TypeDef, Value, dry, prelude::*};
 use besu_core::{Placeholder, UpsertStyle};
 
@@ -758,6 +759,265 @@ fn a_derived_expression_needs_an_explicit_pick() {
     let sql = db.select(&named).to_sql().unwrap();
     let error = sql.error().expect("the unnamed column must be rejected");
     assert!(error.to_string().contains("no single name"), "{error:?}");
+}
+
+/// A compound query is a statement, so every place that accepts a `SELECT` accepts it:
+/// `EXISTS`, `IN`, a scalar value and a derived table. The parentheses belong to the form,
+/// so the compound's branches and operators are written directly inside them.
+#[test]
+fn a_set_operation_is_a_subquery() {
+    let db = dry::<TestDialect>();
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(exists(
+            db.select(users)
+                .pick(users.id)
+                .filter(users.age.gt(20))
+                .union(db.select(users).pick(users.id).filter(users.age.lt(10))),
+        ))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE EXISTS (SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2))"#
+    );
+    assert_eq!(sql.args(), [Value::Int(20), Value::Int(10)]);
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(
+            users.id.in_query(
+                db.select(users)
+                    .pick(users.id)
+                    .filter(users.age.gt(20))
+                    .union(db.select(users).pick(users.id).filter(users.age.lt(10))),
+            ),
+        )
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id" FROM "users" WHERE ("users"."id" IN (SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2)))"#
+    );
+    assert_eq!(sql.args(), [Value::Int(20), Value::Int(10)]);
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    // A scalar subquery needs one row and one column; the compound's own `LIMIT` applies to
+    // the whole result, so it is written after the last branch and its parameter follows.
+    let sql = db
+        .select(users)
+        .pick(scalar(
+            db.select(users)
+                .pick(users.id)
+                .filter(users.age.gt(20))
+                .union(db.select(users).pick(users.id).filter(users.age.lt(10)))
+                .limit(1),
+            users.id,
+        ))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT (SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2) LIMIT $3) FROM "users""#
+    );
+    assert_eq!(sql.args(), [Value::Int(20), Value::Int(10), Value::Int(1)]);
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    // A derived table reads the compound through its alias, and the default projection is the
+    // compound's first branch, which is where SQL takes a compound's output names from.
+    let everyone = derived(
+        db.select(users)
+            .pick(users.id)
+            .filter(users.age.gt(20))
+            .union(db.select(users).pick(users.id).filter(users.age.lt(10))),
+        "everyone",
+    );
+    let id = everyone.column(users.id);
+
+    let sql = db.select(&everyone).to_sql().unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "everyone"."id" FROM (SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2)) AS "everyone""#
+    );
+    assert_eq!(sql.args(), [Value::Int(20), Value::Int(10)]);
+
+    let sql = db
+        .select(&everyone)
+        .pick(id.clone())
+        .filter(id.gt(0_i64))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "everyone"."id" FROM (SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2)) AS "everyone" WHERE ("everyone"."id" > $3)"#
+    );
+    assert_eq!(sql.args(), [Value::Int(20), Value::Int(10), Value::Int(0)]);
+}
+
+/// A projected expression is named at the call site, and the handle reads its columns back by
+/// that name with a type witness.
+#[test]
+fn a_projected_common_table_expression_is_named_at_the_call_site() {
+    let db = dry::<TestDialect>();
+
+    let totals = db
+        .select(posts)
+        .pick((posts.author_id, count_all()))
+        .cte_named("totals", (("author_id", posts.author_id), ("total", Int8)));
+    let author = totals.column_named("author_id", posts.author_id);
+    let total = totals.column_named("total", Int8);
+
+    let sql = db
+        .from(&totals)
+        .pick((author.clone(), total.clone()))
+        .filter(total.gt(1_i64))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"WITH "totals" ("author_id", "total") AS (SELECT "posts"."author_id", COUNT(*) FROM "posts") SELECT "totals"."author_id", "totals"."total" FROM "totals" WHERE ("totals"."total" > $1)"#
+    );
+    assert_eq!(sql.args(), [Value::Int(1)]);
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    // The column list has to describe the projection. A mismatch is recorded on the statement
+    // that uses the handle, because that is where the `WITH` clause is rendered.
+    let bad = db
+        .select(posts)
+        .pick((posts.author_id, count_all()))
+        .cte_named("bad", (("author_id", posts.author_id),));
+    let sql = db
+        .from(&bad)
+        .pick(bad.column_named("author_id", posts.author_id))
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("the column count must be checked");
+    assert!(
+        error.to_string().contains("given 1 column name(s)"),
+        "{error}"
+    );
+
+    // And the names have to be identifiers, because they are the names a `SELECT` reads.
+    let bad_name = db
+        .select(posts)
+        .pick(posts.author_id)
+        .cte_named("not a name", (("author_id", posts.author_id),));
+    let sql = db
+        .from(&bad_name)
+        .pick(bad_name.column_named("author_id", posts.author_id))
+        .to_sql()
+        .unwrap();
+    let error = sql.error().expect("the name must be an identifier");
+    assert!(error.to_string().contains("plain identifier"), "{error}");
+
+    // The same constructor exists on a compound, which is a valid `WITH` body.
+    let everyone = db
+        .select(users)
+        .pick(users.id)
+        .union(db.select(posts).pick(posts.author_id))
+        .cte_named("everyone", (("id", users.id),));
+    let sql = db
+        .from(&everyone)
+        .pick(everyone.column_named("id", users.id))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"WITH "everyone" ("id") AS (SELECT "users"."id" FROM "users" UNION SELECT "posts"."author_id" FROM "posts") SELECT "everyone"."id" FROM "everyone""#
+    );
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    // A projected expression can be the anchor of a recursive definition, and its explicit
+    // column list is written into the `WITH RECURSIVE` entry.
+    let numbers = db
+        .select(users)
+        .pick(users.id)
+        .cte_named("numbers", (("id", users.id),));
+    let sql = numbers
+        .clone()
+        .union_all(db.select(users).pick(users.id))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"WITH RECURSIVE "numbers" ("id") AS (SELECT "users"."id" FROM "users" UNION ALL SELECT "users"."id" FROM "users") SELECT "numbers"."id" FROM "numbers""#
+    );
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+}
+
+/// The dynamic handle takes erased clauses, so a query can be finished where the typed
+/// builder's row-set parameter is in the way.
+#[test]
+fn a_dynamic_select_takes_erased_clauses() {
+    let db = dry::<TestDialect>();
+
+    // The expression is built while its row set is still known, then erased for the handle.
+    let filter: Expr<(UserTable,), besu::types::Bool> = users.age.gte(18);
+    let order: OrderClause = users.name.asc().into_order();
+
+    let sql = db
+        .select(users)
+        .dynamic()
+        .filter(filter.into_kind())
+        .order_by(order)
+        .limit(5)
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio" FROM "users" WHERE ("users"."age" >= $1) ORDER BY "users"."name" ASC LIMIT $2"#
+    );
+    assert_eq!(sql.args(), [Value::Int(18), Value::Int(5)]);
+
+    // The row type survives, so the result still decodes into the shape `pick` chose, and a
+    // dynamic projection can replace the columns without changing it.
+    let sql = db
+        .select(users)
+        .pick(users.name)
+        .dynamic()
+        .pick(count_all::<()>().into_kind())
+        .to_sql()
+        .unwrap();
+    assert_eq!(sql.sql(), r#"SELECT COUNT(*) FROM "users""#);
+}
+
+/// `count` wraps the statement in a derived table, so the filters, joins, ordering and
+/// pagination of the original still apply.
+#[test]
+fn count_wraps_a_select_and_a_compound() {
+    let db = dry::<TestDialect>();
+
+    let sql = db
+        .select(users)
+        .filter(users.age.gte(18))
+        .limit(10)
+        .count()
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT COUNT(*) FROM (SELECT "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio" FROM "users" WHERE ("users"."age" >= $1) LIMIT $2) AS "besu_count""#
+    );
+    assert_eq!(sql.args(), [Value::Int(18), Value::Int(10)]);
+
+    let sql = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gt(20))
+        .union(db.select(users).pick(users.id).filter(users.age.lt(10)))
+        .limit(5)
+        .count()
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT COUNT(*) FROM (SELECT "users"."id" FROM "users" WHERE ("users"."age" > $1) UNION SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2) LIMIT $3) AS "besu_count""#
+    );
+    assert_eq!(sql.args(), [Value::Int(20), Value::Int(10), Value::Int(5)]);
 }
 
 /// An alias renames a table inside the statement, which is the only way to read one table

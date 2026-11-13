@@ -143,9 +143,12 @@ pub use macros::__private;
 pub use macros::Fragment;
 #[cfg(feature = "migrate")]
 pub use migrate::{PushResult, SchemaDriver, SchemaError};
+#[doc(hidden)]
+pub use query::QueryBody;
 pub use query::{
-    Alias, Cte, Delete, DeleteReturning, Derived, Insert, InsertReturning, JoinKind, OnConflict,
-    Select, SetOp, SetQuery, Update, UpdateReturning, alias, alias_as, derived,
+    Alias, Cte, CteColumns, Delete, DeleteReturning, Derived, DynamicSelect, Insert,
+    InsertReturning, IntoQueryBody, JoinKind, OnConflict, Select, SetOp, SetQuery, Update,
+    UpdateReturning, alias, alias_as, derived,
 };
 pub use relation::{HasMany, WithRelation, has_many};
 pub use seed::{Seed, SeedError, SeedReport, TableSeed, seed};

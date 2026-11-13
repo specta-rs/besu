@@ -97,10 +97,10 @@ impl<Dr: Driver> Database<Dr> {
     ///
     /// See [`Select::cte`] for how the expression is built, and [`Cte`](crate::Cte) for how
     /// its columns are reached.
-    pub fn from<T: Table>(
+    pub fn from<R: 'static>(
         &self,
-        cte: &crate::query::Cte<T>,
-    ) -> Select<'_, &Self, (crate::query::Cte<T>,), T::Model> {
+        cte: &crate::query::Cte<R>,
+    ) -> Select<'_, &Self, (crate::query::Cte<R>,), R> {
         crate::query::cte::select_from(self, cte)
     }
 
@@ -237,10 +237,10 @@ impl<'a, Dr: TransactionDriver> Transaction<'a, Dr> {
     /// Start a `SELECT` from a common table expression inside the transaction.
     ///
     /// See [`Database::from`] for what the expression does.
-    pub fn from<T: Table>(
+    pub fn from<R: 'static>(
         &mut self,
-        cte: &crate::query::Cte<T>,
-    ) -> Select<'_, &mut Self, (crate::query::Cte<T>,), T::Model> {
+        cte: &crate::query::Cte<R>,
+    ) -> Select<'_, &mut Self, (crate::query::Cte<R>,), R> {
         crate::query::cte::select_from(self, cte)
     }
 

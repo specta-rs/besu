@@ -1,8 +1,9 @@
 # Common table expressions
 
 A common table expression names a query so the rest of the statement can read it as if it
-were a table. `Select::cte(name)` produces the handle, and the statement that uses it renders
-the `WITH` clause itself.
+were a table. `Select::cte(name)` produces the handle for a whole-row query, and
+`Select::cte_named(name, columns)` — or `SetQuery::cte_named` for a compound — produces one
+for any projection. The statement that uses it renders the `WITH` clause itself.
 
 ```rust
 let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
@@ -48,6 +49,71 @@ there is a database error rather than a compile error. For the same reason a sta
 reference two expressions over two different tables but not two over the same one — the row
 set would not say which is meant, exactly as it cannot for two joins of one table.
 
+## Projected expressions
+
+A projection that is not a whole table — an aggregate, a join, a subset of columns — has
+columns the schema does not name. `cte_named` takes the output names and a type witness for
+each, and the handle reads them back by name:
+
+```rust
+let totals = db
+    .select(posts)
+    .pick((posts.author_id, count_all()))
+    .cte_named(
+        "totals",
+        (("author_id", posts.author_id), ("total", Int8)),
+    );
+
+let author = totals.column_named("author_id", posts.author_id);
+let total = totals.column_named("total", Int8);
+
+let rows: Vec<(i64, i64)> = db
+    .from(&totals)
+    .pick((author.clone(), total.clone()))
+    .filter(total.gt(0_i64))
+    .all()
+    .await?;
+```
+
+```sql
+WITH "totals" ("author_id", "total") AS (
+    SELECT "posts"."author_id", COUNT(*) FROM "posts"
+)
+SELECT "totals"."author_id", "totals"."total"
+FROM "totals" WHERE ("totals"."total" > $1)
+```
+
+A witness is either the type marker itself (`Int8`) or a column of the intended type
+(`posts.author_id`), exactly as [`scalar`](../advanced/subqueries.md) accepts. The pairs can be
+a tuple — which is how differently typed columns fit in one list — or a homogeneous array or
+`Vec`.
+
+The columns are written into the definition as an explicit `("author_id", "total")` list,
+because `COUNT(*)` has a different name on every dialect. That is also why the names are
+checked: they must be plain identifiers, and there must be one for each projected column. A
+mismatch is recorded on the statement that uses the handle, the same way a dialect capability
+is, rather than sent to a server.
+
+A compound query is a valid `WITH` body and gets the same constructor. Its output columns take
+their names from the first branch:
+
+```rust
+let everyone = db
+    .select(users)
+    .pick(users.id)
+    .union(db.select(posts).pick(posts.author_id))
+    .cte_named("everyone", (("id", users.id),));
+
+let ids: Vec<i64> = db
+    .from(&everyone)
+    .pick(everyone.column_named("id", users.id))
+    .all()
+    .await?;
+```
+
+The handle's row type is the projection's Rust type, so `Cte<User>` for a whole-row query and
+`Cte<i64>` or `Cte<(i64, i64)>` for a projected one.
+
 ## Joining one
 
 ```rust
@@ -66,7 +132,8 @@ let rows: Vec<(String, i64)> = db
 
 `inner_join_cte` and `left_join_cte` are the join forms; a left join widens the row type to
 `Option<T>` exactly as it does for a table. Joining attaches the definition to the statement,
-so the `WITH` clause appears without a separate call.
+so the `WITH` clause appears without a separate call. A projected expression joins the same
+way, with `column_named` for its columns.
 
 ## Using one in a subquery
 
@@ -131,14 +198,18 @@ branch to produce the same columns.
 `clone()` is needed only because one handle is used twice in one statement; the handle is a
 value, not a borrow.
 
+A projected expression can recurse too. Its explicit column list becomes part of the
+recursive `WITH` entry, so the recursive term can read the names it declared.
+
 ## What is checked
 
-- A query that names an expression has to be a whole-row `SELECT` over one table. That is
-  what lets the handle know its columns, and therefore what makes `cte.column(..)` typed. A
-  projected query needs a different shape of handle, which does not exist yet.
+- `cte_named` requires one name per projected column, and the names must be plain
+  identifiers. A mismatch or a bad name is recorded on the statement that uses the handle.
 - Every branch of a recursive definition must select the same number of columns; the builder
   checks before sending.
 - A reference to an expression that is not in the row set does not compile.
+- `column_named` checks the Rust type against the witness. The name itself is a value, so the
+  database checks that the definition produces it.
 
 ## Gotchas
 
@@ -149,6 +220,9 @@ value, not a borrow.
   prefix.
 - **An expression's name is scoped to its statement.** Two statements that both use
   `"adults"` each define their own; there is nothing shared to get out of step.
+- **Read a projected expression with `from`, not `select`.** `db.from(&cte)` attaches the
+  definition; a common table expression is not a `TableRef`, because its `WITH` clause has to
+  precede the statement.
 - **The recursion limit is the database's.** SQLite, PostgreSQL and MySQL each have their own
   behaviour for a runaway recursive term; Besu adds no guard. MySQL stops at
   `cte_max_recursion_depth` (1000 by default).

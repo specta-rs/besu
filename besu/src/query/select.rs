@@ -4,11 +4,16 @@ use core::{
     pin::Pin,
 };
 
+use alloc::borrow::Cow;
+
 use crate::types::Bool;
 use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
 
 use crate::expr::{Expr, IntoCondition, IntoOrder};
-use crate::query::{Cte, JoinClause, JoinKind, SelectQuery, SetOp, SetQuery, set::SetParts};
+use crate::query::{
+    Cte, CteColumns, DerivedSource, DynamicSelect, From, IntoQueryBody, JoinClause, JoinKind,
+    QueryBody, SelectQuery, SetOp, SetQuery, validate_cte,
+};
 use crate::selection::Selection;
 use crate::table::{Table, TableRef};
 
@@ -50,7 +55,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     ///     .all()
     ///     .await?;
     /// ```
-    pub fn with_cte<T: Table>(mut self, cte: &Cte<T>) -> Self {
+    pub fn with_cte<C: 'static>(mut self, cte: &Cte<C>) -> Self {
         self.query.push_with(cte.entries());
         self
     }
@@ -347,18 +352,123 @@ impl<'a, E: Executor, T: Table> Select<'a, E, (T,), T::Model> {
     /// SELECT "adults"."id", ... FROM "adults" WHERE ("adults"."age" < $2)
     /// ```
     ///
-    /// Only a whole-row `SELECT` over one table can be named this way. That is what lets the
-    /// handle know its columns — they are the source table's — and therefore what lets
+    /// This form is for a whole-row `SELECT` over one table. That is what lets the handle know
+    /// its columns — they are the source table's — and therefore what lets
     /// [`Cte::column`](crate::Cte::column) type-check against the schema. A query that
-    /// projects a subset needs a different shape of handle, which does not exist yet.
+    /// projects a subset, an aggregate or a join uses [`Select::cte_named`] instead, which
+    /// takes the output names and a type witness for each.
     ///
     /// The name is used verbatim inside double quotes, so it may be any identifier, but it
     /// is written into the SQL rather than bound; passing a value from another source would
     /// be an injection.
-    pub fn cte(self, name: &'static str) -> Cte<T> {
+    pub fn cte(self, name: &'static str) -> Cte<T::Model> {
         let mut query = self.query;
         let prerequisites = query.with.take();
-        Cte::new(name, SetParts::new(query), prerequisites)
+        Cte::new(
+            name,
+            QueryBody::Select(query),
+            Cow::Borrowed(T::DEF.columns),
+            false,
+            prerequisites,
+        )
+    }
+}
+
+impl<'a, E: Executor, M, R: 'static> Select<'a, E, M, R> {
+    /// Name this query as a common table expression with a chosen column list.
+    ///
+    /// Unlike [`Select::cte`], this works for any projection: an aggregate, a join, a subset
+    /// of columns. The compiler cannot see the projection's names when they are built from
+    /// values, so the caller supplies them, together with a type witness for each:
+    ///
+    /// ```ignore
+    /// let totals = db
+    ///     .select(posts)
+    ///     .pick((posts.author_id, count_all()))
+    ///     .cte_named(
+    ///         "totals",
+    ///         (("author_id", posts.author_id), ("total", Int8)),
+    ///     );
+    ///
+    /// let author = totals.column_named("author_id", posts.author_id);
+    /// let total = totals.column_named("total", Int8);
+    /// ```
+    ///
+    /// A witness is either the type marker itself (`Int8`) or a column of the intended type
+    /// (`posts.author_id`), exactly as [`scalar`](crate::expr::scalar) accepts. The pairs can
+    /// be a tuple — which is how differently typed columns fit in one list — or a homogeneous
+    /// array or `Vec`.
+    ///
+    /// The list must describe the projection exactly; a mismatch is recorded on the statement
+    /// that uses the expression, the same way a dialect capability is. The names must be
+    /// plain identifiers, because they are the names a `SELECT` from the expression reads.
+    ///
+    /// A compound query gets the same constructor:
+    /// [`SetQuery::cte_named`](crate::SetQuery::cte_named).
+    pub fn cte_named<C: CteColumns>(self, name: &'static str, columns: C) -> Cte<R> {
+        let mut body = QueryBody::Select(self.query);
+        let prerequisites = body.take_with();
+        let columns = columns.into_columns();
+        let error = validate_cte(name, &columns, body.projection_len());
+        Cte::new(name, body, columns.into(), true, prerequisites).with_error(error)
+    }
+
+    /// Escape the row-set type-state and finish the query with erased clauses.
+    ///
+    /// See [`DynamicSelect`] for when this is the right tool. The row type `R` is kept, so
+    /// the result still decodes into the shape `pick` chose.
+    ///
+    /// ```ignore
+    /// // The expression is built while its row set is known, then erased for the handle.
+    /// let adults: Expr<(UserTable,), Bool> = users.age.gte(18);
+    ///
+    /// let query = db
+    ///     .select(users)
+    ///     .dynamic()
+    ///     .filter(adults.into_kind())
+    ///     .order_by(users.name.asc());
+    /// ```
+    pub fn dynamic(self) -> DynamicSelect<'a, E, R> {
+        DynamicSelect::new(self.exec, self.query)
+    }
+
+    /// Count the rows this query produces.
+    ///
+    /// The query is wrapped in a derived table so its filters, joins, grouping, ordering and
+    /// pagination all still apply:
+    ///
+    /// ```sql
+    /// SELECT COUNT(*) FROM (
+    ///     SELECT ... FROM "users" WHERE ("users"."age" >= $1) LIMIT $2
+    /// ) AS "besu_count"
+    /// ```
+    ///
+    /// It returns one `i64`, the same type [`count_all`](crate::count_all) produces. A
+    /// compound gets the same helper: [`SetQuery::count`](crate::SetQuery::count).
+    pub fn count(self) -> Select<'a, E, (), i64> {
+        let Select {
+            exec,
+            query,
+            phantom: _,
+        } = self;
+        count_query(exec, QueryBody::Select(query))
+    }
+}
+
+/// Build the `SELECT COUNT(*) FROM (<body>) AS "besu_count"` statement.
+pub(crate) fn count_query<'a, E: Executor>(exec: E, body: QueryBody) -> Select<'a, E, (), i64> {
+    let mut query = SelectQuery::from_source(From::Derived(DerivedSource {
+        alias: "besu_count",
+        // The projection is `COUNT(*)`, so the outer statement never reads the derived
+        // table's columns and their names are not needed.
+        columns: alloc::vec::Vec::new(),
+        body: alloc::boxed::Box::new(body),
+    }));
+    query.projection = Some(alloc::vec![crate::expr::count_all::<()>().into_kind()]);
+    Select {
+        exec,
+        query,
+        phantom: PhantomData,
     }
 }
 
@@ -463,11 +573,11 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// db.select(nodes)
     ///     .inner_join_cte(&tree, nodes.parent_id.eq(tree.column(nodes.id)))
     /// ```
-    pub fn inner_join_cte<T: Table>(
+    pub fn inner_join_cte<C: 'static>(
         mut self,
-        cte: &Cte<T>,
-        on: Expr<(M, Cte<T>), Bool>,
-    ) -> Select<'a, E, (M, Cte<T>), (R, T::Model)> {
+        cte: &Cte<C>,
+        on: Expr<(M, Cte<C>), Bool>,
+    ) -> Select<'a, E, (M, Cte<C>), (R, C)> {
         self.query.push_with(cte.entries());
         self.query.joins.push(JoinClause {
             kind: JoinKind::Inner,
@@ -484,11 +594,11 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     /// A `LEFT JOIN` against a common table expression.
     ///
     /// The joined row becomes `Option<T>`, exactly as a left join against a table does.
-    pub fn left_join_cte<T: Table>(
+    pub fn left_join_cte<C: 'static>(
         mut self,
-        cte: &Cte<T>,
-        on: Expr<(M, Option<Cte<T>>), Bool>,
-    ) -> Select<'a, E, (M, Option<Cte<T>>), (R, Option<T::Model>)> {
+        cte: &Cte<C>,
+        on: Expr<(M, Option<Cte<C>>), Bool>,
+    ) -> Select<'a, E, (M, Option<Cte<C>>), (R, Option<C>)> {
         self.query.push_with(cte.entries());
         self.query.joins.push(JoinClause {
             kind: JoinKind::Left,
@@ -556,5 +666,13 @@ where
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.all())
+    }
+}
+
+impl<'a, E: Executor, M, R> IntoQueryBody for Select<'a, E, M, R> {
+    type Row = R;
+
+    fn into_query_body(self) -> QueryBody {
+        QueryBody::Select(self.query)
     }
 }

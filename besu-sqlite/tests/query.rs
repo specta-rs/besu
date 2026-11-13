@@ -7,6 +7,7 @@
 
 use besu::Driver;
 use besu::prelude::*;
+use besu::types::{Bool, Int8};
 use besu_sqlite::Sqlx;
 
 #[derive(Table, Debug, Clone, PartialEq)]
@@ -1136,6 +1137,230 @@ async fn set_operation_and_subquery_sql() {
         sql.sql(),
         r#"SELECT "users"."id" FROM "users" WHERE ("users"."id" IN (SELECT "posts"."author_id" FROM "posts"))"#
     );
+}
+
+/// A compound query is a statement, so SQLite accepts it in `EXISTS`, `IN`, a scalar position
+/// and a derived table. Each of these runs the same compound, whose branches keep their own
+/// filters and whose `LIMIT` belongs to the result.
+#[tokio::test]
+async fn a_set_operation_is_a_subquery() {
+    let db = setup().await;
+    for (name, age) in [("Alice", 30), ("Bob", 17), ("Carol", 25)] {
+        db.insert(users)
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
+            .await
+            .unwrap();
+    }
+
+    // `EXISTS` over a compound: the compound selects every user, so every outer row matches.
+    let everyone: Vec<User> = db
+        .select(users)
+        .filter(exists(
+            db.select(users)
+                .pick(users.id)
+                .filter(users.age.gte(18))
+                .union(db.select(users).pick(users.id).filter(users.age.lt(18))),
+        ))
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&everyone), ["Alice", "Bob", "Carol"]);
+
+    // `IN` over the same compound. The branches are `age >= 18` and `age < 18`, so together
+    // they cover every row exactly once.
+    let ids: Vec<User> = db
+        .select(users)
+        .filter(
+            users.id.in_query(
+                db.select(users)
+                    .pick(users.id)
+                    .filter(users.age.gte(18))
+                    .union(db.select(users).pick(users.id).filter(users.age.lt(18))),
+            ),
+        )
+        .order_by(users.name.asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&ids), ["Alice", "Bob", "Carol"]);
+
+    // A scalar position needs one row and one column; the compound's `LIMIT` is applied to
+    // the whole result.
+    let min_adult: i64 = db
+        .select(users)
+        .pick(scalar(
+            db.select(users)
+                .pick(users.id)
+                .filter(users.age.gte(18))
+                .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+                .order_by(users.id.asc())
+                .limit(1),
+            users.id,
+        ))
+        .filter(users.name.eq("Carol"))
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(min_adult, 1, "Alice was inserted first");
+
+    // A derived table reads the compound through its alias, and the default projection is
+    // the first branch's projection.
+    let everyone = derived(
+        db.select(users)
+            .pick(users.id)
+            .filter(users.age.gte(18))
+            .union(db.select(users).pick(users.id).filter(users.age.lt(18))),
+        "everyone",
+    );
+    let mut ids: Vec<i64> = db.select(&everyone).all().await.unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3]);
+
+    // The alias is a table, so the outer query can aggregate it.
+    let id = everyone.column(users.id);
+    let count: i64 = db
+        .select(&everyone)
+        .pick(count_all())
+        .filter(id.gt(1_i64))
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+/// A projected expression is named at the call site, and its columns are read back by name
+/// with a type witness. A compound gets the same constructor.
+#[tokio::test]
+async fn a_projected_common_table_expression_is_read_by_name() {
+    let db = setup().await;
+    db.insert(users)
+        .value(users.insert("a@example.com", "Alice", 30))
+        .await
+        .unwrap();
+    db.insert(users)
+        .value(users.insert("b@example.com", "Bob", 17))
+        .await
+        .unwrap();
+    let alice = db
+        .select(users)
+        .filter(users.name.eq("Alice"))
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    db.insert(posts)
+        .values([
+            posts.insert("Hello", alice.id),
+            posts.insert("World", alice.id),
+        ])
+        .await
+        .unwrap();
+
+    let totals = db
+        .select(posts)
+        .pick((posts.author_id, count_all()))
+        .cte_named("totals", (("author_id", posts.author_id), ("total", Int8)));
+    let author = totals.column_named("author_id", posts.author_id);
+    let total = totals.column_named("total", Int8);
+
+    let rows: Vec<(i64, i64)> = db
+        .from(&totals)
+        .pick((author.clone(), total.clone()))
+        .filter(total.gt(0_i64))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(alice.id, 2)]);
+
+    // A compound is a valid `WITH` body, and its first branch names the output columns.
+    let everyone = db
+        .select(users)
+        .pick(users.id)
+        .union(db.select(posts).pick(posts.author_id))
+        .cte_named("everyone", (("id", users.id),));
+    let mut ids: Vec<i64> = db
+        .from(&everyone)
+        .pick(everyone.column_named("id", users.id))
+        .all()
+        .await
+        .unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2]);
+
+    // The whole-row form still works and still reads columns from the schema.
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    let rows: Vec<User> = db
+        .from(&adults)
+        .filter(adults.column(users.age).lt(65))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&rows), ["Alice"]);
+}
+
+/// The dynamic handle takes erased clauses, so a query can be assembled where the row-set
+/// type-state is in the way. `count` wraps either shape in a derived table.
+#[tokio::test]
+async fn a_dynamic_query_and_count_run() {
+    let db = setup().await;
+    for (name, age) in [("Alice", 30), ("Bob", 17), ("Carol", 25)] {
+        db.insert(users)
+            .value(users.insert(format!("{name}@example.com"), name.to_string(), age))
+            .await
+            .unwrap();
+    }
+
+    let filter: Expr<(UserTable,), Bool> = users.age.gte(18);
+    let order: OrderClause = users.name.asc().into_order();
+    let rows: Vec<User> = db
+        .select(users)
+        .dynamic()
+        .filter(filter.into_kind())
+        .order_by(order)
+        .limit(1)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(names(&rows), ["Alice"]);
+
+    let adults: i64 = db
+        .select(users)
+        .filter(users.age.gte(18))
+        .count()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(adults, 2);
+
+    let total: i64 = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gte(18))
+        .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+        .count()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(total, 3);
+
+    // `LIMIT` is part of the statement being counted, so it caps the count.
+    let capped: i64 = db
+        .select(users)
+        .pick(users.id)
+        .filter(users.age.gte(18))
+        .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+        .limit(2)
+        .count()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capped, 2);
 }
 
 /// An upsert can read the row it was trying to insert, and can leave the stored row alone

@@ -1,7 +1,7 @@
 # Subqueries
 
-A subquery is a `SELECT` nested inside another statement. Besu supports all four places SQL
-puts one:
+A subquery is a `SELECT` — or a `UNION` / `INTERSECT` / `EXCEPT` compound — nested inside
+another statement. Besu supports all four places SQL puts one:
 
 | Form | Written with |
 | --- | --- |
@@ -163,6 +163,35 @@ Aliases are not renamed automatically: two derived tables with the same name in 
 are an error the database reports, because silently changing one would change what a column
 reference meant.
 
+## Set operations are subqueries too
+
+Every form above accepts a compound query, because a compound is a statement. `EXISTS (..)`,
+`IN (..)` and a scalar position write the branches and operators inside the parentheses the
+form already needs:
+
+```rust
+let adults = db.select(users).pick(users.id).filter(users.age.gte(18));
+let minors = db.select(users).pick(users.id).filter(users.age.lt(18));
+
+let rows: Vec<User> = db
+    .select(users)
+    .filter(users.id.in_query(adults.union(minors)))
+    .all()
+    .await?;
+```
+
+A derived table writes the compound inside `FROM` and reads it through the alias; its output
+names come from the first branch, as they do in SQL:
+
+```rust
+let everyone = derived(adults.union(minors), "everyone");
+let ids: Vec<i64> = db.select(&everyone).all().await?;
+```
+
+The compound's own `ORDER BY` and `LIMIT` belong to the whole result, so they are written
+after the last branch, inside the parentheses — a scalar position can therefore use a
+compound with `limit(1)`. See [set operations](set-operations.md).
+
 ## `IN` and nullability
 
 `in_query` checks that the subquery selects exactly one column, and that its Rust type matches
@@ -209,8 +238,6 @@ separately, so a PostgreSQL driver suffix is appended once, to the whole stateme
   would suggest it cannot be. Use an aggregate, or `coalesce`.
 - A derived table's expression columns have dialect-specific names. Reach them with
   `column_named` and an explicit `pick` rather than relying on one database's convention.
-- A set operation is not accepted as a subquery yet; convert it to one with `sql!` if you need
-  it.
 - A named subquery is a [common table expression](ctes.md): `Select::cte` names one, and
   `db.from(&cte)` reads it back. `derived` is the other shape: a name that exists only inside
   one `FROM` clause.

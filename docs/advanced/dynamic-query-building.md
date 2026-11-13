@@ -110,16 +110,72 @@ tracing::debug!(sql = sql.sql(), "running");
 let rows: Vec<User> = query.await?;
 ```
 
-## The limit
+## The dynamic escape hatch
 
-There is no `$dynamic` mutation handle. Builder methods take `self`, so "mutating" a query is
-really rebinding it; you cannot keep one `&mut` query and change its shape through it. In
-exchange the compiler checks every combination, and a query that was built stays valid.
+The typed builder is the default: it proves that every column comes from a table the query
+selects from and that comparisons line up on both sides. Sometimes the shape of a query is
+chosen at runtime in a way the type-state cannot follow — a list of conditions built in a
+loop, a filter handed in by another function, a clause that is present only sometimes.
+`Select::dynamic` hands back a `DynamicSelect`: the row type `R` is kept, so the result still
+decodes into the shape `pick` chose, but the row-set parameter is erased from the clauses.
+
+```rust
+use besu::{ExprKind, OrderClause};
+
+let filter: Expr<(UserTable,), Bool> = users.age.gte(18);
+let order: OrderClause = users.name.asc().into_order();
+
+let rows: Vec<User> = db
+    .select(users)
+    .dynamic()
+    .filter(filter.into_kind())
+    .order_by(order)
+    .limit(50)
+    .all()
+    .await?;
+```
+
+`DynamicSelect` takes an already-erased `ExprKind` for `filter`, `having`, `group_by` and
+`pick`, and an `OrderClause` for `order_by`. `Expr::into_kind` and `Expr::into_order` are the
+way to erase a typed expression; build the expression while its row set is still known, then
+hand the erased value to the handle.
+
+```rust
+let mut query = db.select(users).dynamic();
+for condition in conditions {
+    query = query.filter(condition.into_kind());   // each condition: Expr<(UserTable,), Bool>
+}
+let rows: Vec<User> = query.all().await?;
+```
+
+Everything the builder would have checked is the database's problem from here: a column from
+a table that is not in `FROM`, a comparison between incompatible types, and a projection whose
+columns do not match `R` all reach the server. The handle is an escape hatch, not the happy
+path. `into_select()` hands the query back to the typed builder once the dynamic part is done;
+its row-set parameter starts empty, so a later `filter` needs `correlate` to name anything.
+
+## Counting a query
+
+`Select::count` and `SetQuery::count` return `SELECT COUNT(*) FROM (<statement>) AS
+"besu_count"`, so the filters, joins, grouping and pagination of the statement still apply:
+
+```rust
+let total: i64 = db
+    .select(users)
+    .filter(users.age.gte(18))
+    .limit(100)
+    .count()
+    .first()
+    .await?
+    .expect("COUNT always returns a row");
+```
+
+## When the row shape itself is dynamic
 
 The row type is fixed once it is chosen. `Select<'a, E, M, R>` carries `R`, and `pick` changes
 it, so a function that sometimes returns users and sometimes returns counts cannot return one
-type. A genuinely heterogeneous query — where the columns are not known at the call site —
-has to be raw SQL.
+type. `DynamicSelect` keeps `R`, so it does not help there. A genuinely heterogeneous query —
+where the columns are not known at the call site — has to be raw SQL.
 
 ```rust
 use besu::Fragment;
@@ -146,6 +202,7 @@ outside the typed builder; see [Raw SQL](../queries/sql.md).
 | Branches of an `if` with different row types | Compile error at the variable's type |
 | A helper that names the wrong executor | Compile error: `Executor` is not implemented |
 | A column from a table that is not in the query | Compile error through `Contains` |
+| A clause on a `DynamicSelect` that names the wrong table or type | Database error: the row set is erased |
 | A `Fragment` whose placeholders and arguments disagree | Runtime, while rendering |
 | A raw query whose columns do not match the tuple | Runtime decode error |
 
@@ -159,3 +216,5 @@ outside the typed builder; see [Raw SQL](../queries/sql.md).
   expression, not two `filter` calls.
 - **A helper that returns `Select` freezes the table set.** `(UserTable,)` will not accept a
   joined query; give the helper the exact row-set type it needs, or take a closure.
+- **`dynamic` gives up the compile-time check.** `DynamicSelect` keeps the row type but not
+  the row set, so use it for the dynamic part and `into_select` afterwards where you can.

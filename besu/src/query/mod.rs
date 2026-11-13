@@ -4,21 +4,25 @@ pub(crate) mod alias;
 pub(crate) mod cte;
 pub(crate) mod delete;
 pub(crate) mod derived;
+pub(crate) mod dynamic;
 pub(crate) mod insert;
 pub(crate) mod select;
 pub(crate) mod set;
 pub(crate) mod update;
 
 pub use alias::{Alias, alias, alias_as};
-pub use cte::Cte;
+pub use cte::{Cte, CteColumns};
 pub use delete::{Delete, DeleteReturning};
 pub use derived::{Derived, derived};
+pub use dynamic::DynamicSelect;
 pub use insert::{Insert, InsertReturning, OnConflict};
 pub use select::Select;
 pub use set::{SetOp, SetQuery};
 pub use update::{Update, UpdateReturning};
 
-use alloc::vec::Vec;
+pub(crate) use cte::validate_cte;
+
+use alloc::{borrow::Cow, vec::Vec};
 
 use besu_core::{ColumnDef, Dialect, Sql, TableDef};
 
@@ -67,7 +71,12 @@ pub struct CteSource {
     /// The name written in the `WITH` clause.
     pub name: &'static str,
     /// The columns the expression produces, in order.
-    pub columns: &'static [ColumnDef],
+    ///
+    /// A whole-row expression over a declared table borrows the table's static column list;
+    /// a projected expression owns the list it was given.
+    pub columns: Cow<'static, [ColumnDef]>,
+    /// A construction error, such as a column list that does not match the projection.
+    pub error: Option<besu_core::Error>,
 }
 
 /// A derived table used as a `SELECT`'s source.
@@ -86,7 +95,108 @@ pub struct DerivedSource {
     /// The column names the subquery produces, in order.
     pub columns: Vec<Option<&'static str>>,
     /// The subquery itself.
-    pub body: Box<SelectQuery>,
+    pub body: Box<QueryBody>,
+}
+
+/// The body of a statement that can be nested inside another one.
+///
+/// A `SELECT` and a compound query render differently — the compound has branches, operators
+/// and its own `ORDER BY` / `LIMIT` — but both are valid wherever SQL accepts a subquery and
+/// both must share the enclosing statement's parameter numbering. This enum is the one place
+/// that distinction is recorded, so subqueries, derived tables and common table expressions
+/// all accept either shape without being written twice.
+///
+/// It is an implementation detail; use [`IntoQueryBody`] to hand a query to
+/// [`derived`](crate::derived) and [`IntoSubquery`](crate::IntoSubquery) for the expression
+/// forms.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryBody {
+    /// One `SELECT`, with its own filters, joins, grouping and projection.
+    Select(SelectQuery),
+    /// Two or more `SELECT`s joined by `UNION`, `INTERSECT` or `EXCEPT`.
+    Set(crate::query::set::SetParts),
+}
+
+/// A finished query that can be written where SQL accepts a statement.
+///
+/// Implemented for [`Select`](crate::Select) and [`SetQuery`](crate::SetQuery), which is what
+/// lets [`derived`](crate::derived) take either one. The executor is dropped when the query is
+/// nested: it is rendered by the statement that contains it, so it shares that statement's
+/// dialect and its parameters continue that statement's numbering.
+pub trait IntoQueryBody {
+    /// The row type the query produces.
+    type Row;
+
+    /// Take the finished query.
+    #[doc(hidden)]
+    fn into_query_body(self) -> QueryBody;
+}
+
+impl QueryBody {
+    /// The number of SQL columns the body's projection produces.
+    pub(crate) fn projection_len(&self) -> usize {
+        match self {
+            Self::Select(query) => query.projection_len(),
+            Self::Set(parts) => parts.projection_len(),
+        }
+    }
+
+    /// The names the body's projection produces, in order.
+    pub(crate) fn projection_names(&self) -> Vec<Option<&'static str>> {
+        match self {
+            Self::Select(query) => projection_names(query),
+            // A compound's output columns take their names from the first branch, on every
+            // dialect.
+            Self::Set(parts) => projection_names(parts.first_branch()),
+        }
+    }
+
+    /// Render the body as a statement.
+    ///
+    /// The caller writes the surrounding parentheses (`EXISTS (`, `IN (`, `FROM (`), because
+    /// what is inside them is exactly the statement this produces.
+    pub(crate) fn render_into<D: Dialect>(&mut self, out: &mut Sql<D>) {
+        match self {
+            Self::Select(query) => query.render_into(out),
+            Self::Set(parts) => parts.render_into(out),
+        }
+    }
+
+    /// The `WITH` clause the body carries, taken out so it can be defined by the enclosing
+    /// statement instead.
+    pub(crate) fn take_with(&mut self) -> Option<WithClause> {
+        match self {
+            Self::Select(query) => query.with.take(),
+            Self::Set(parts) => parts.take_with(),
+        }
+    }
+}
+
+/// The names a `SELECT`'s projection produces, in order.
+///
+/// A plain column keeps its name. An expression records `None`, because the name a database
+/// invents for `COUNT(*)` differs between the three: PostgreSQL calls it `count`, while
+/// SQLite and MySQL call it `count(*)`.
+pub(crate) fn projection_names(query: &SelectQuery) -> Vec<Option<&'static str>> {
+    match &query.projection {
+        Some(projection) => projection.iter().map(column_name).collect(),
+        None => {
+            let mut names = query.from.column_names();
+            for join in &query.joins {
+                names.extend(join.source.column_names());
+            }
+            names
+        }
+    }
+}
+
+/// The name of a projected expression, when it has one of its own.
+fn column_name(expr: &ExprKind) -> Option<&'static str> {
+    match expr {
+        ExprKind::Column { column, .. } | ExprKind::UnprefixedColumn { column, .. } => Some(column),
+        _ => None,
+    }
 }
 
 impl From {
@@ -143,7 +253,7 @@ impl From {
                 }
             }
             Self::Cte(source) => {
-                for column in source.columns {
+                for column in source.columns.iter() {
                     push_comma(out, first);
                     out.push_ident(source.name);
                     out.push_raw(".");
@@ -189,7 +299,12 @@ impl From {
             }
             // A CTE is a name in the statement, not a table in the database, so it is never
             // schema-qualified and never given the tenant prefix.
-            Self::Cte(source) => out.push_ident(source.name),
+            Self::Cte(source) => {
+                if let Some(error) = source.error.clone() {
+                    out.set_error(error);
+                }
+                out.push_ident(source.name);
+            }
             // The parentheses are part of the source: `FROM (SELECT ...) AS "t"`. The body
             // is rendered into the same statement, so its parameters continue the outer
             // statement's numbering and any error it records is the outer statement's.
@@ -267,8 +382,12 @@ impl WithClause {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CteEntry {
     pub(crate) name: &'static str,
-    pub(crate) columns: &'static [ColumnDef],
-    pub(crate) body: crate::query::set::SetParts,
+    pub(crate) columns: Cow<'static, [ColumnDef]>,
+    /// Whether the `WITH` definition spells the output column names explicitly.
+    pub(crate) named_columns: bool,
+    pub(crate) body: QueryBody,
+    /// A construction error, such as a column list that does not match the projection.
+    pub(crate) error: Option<besu_core::Error>,
 }
 
 /// The expression a compound query is the definition of.
@@ -279,7 +398,42 @@ pub(crate) struct CteEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CteRoot {
     pub(crate) name: &'static str,
-    pub(crate) columns: &'static [ColumnDef],
+    pub(crate) columns: Cow<'static, [ColumnDef]>,
+    /// Whether the `WITH` definition spells the output column names explicitly.
+    pub(crate) named_columns: bool,
+}
+
+/// Write one entry of a `WITH` clause: its name, its definition and the parentheses.
+pub(crate) fn render_cte_entry<D: Dialect>(out: &mut Sql<D>, entry: &mut CteEntry) {
+    if let Some(error) = entry.error.clone() {
+        out.set_error(error);
+    }
+    out.push_ident(entry.name);
+    render_cte_columns(out, &entry.columns, entry.named_columns);
+    out.push_raw(" AS (");
+    entry.body.render_into(out);
+    out.push_raw(")");
+}
+
+/// Write an explicit `("a", "b")` column list, when the definition needs one.
+///
+/// A whole-row expression over a table gets its output names from the table, so the list is
+/// left out and the SQL stays as short as it always was. A projected expression carries names
+/// the SQL has no other way to learn — `COUNT(*)` has a different name on every dialect — so
+/// the list is written, which makes the handle's names the ones a `SELECT` from the expression
+/// reads.
+pub(crate) fn render_cte_columns<D: Dialect>(out: &mut Sql<D>, columns: &[ColumnDef], named: bool) {
+    if !named {
+        return;
+    }
+    out.push_raw(" (");
+    for (i, column) in columns.iter().enumerate() {
+        if i != 0 {
+            out.push_raw(", ");
+        }
+        out.push_ident(column.name);
+    }
+    out.push_raw(")");
 }
 
 /// Write a `WITH` clause and the separator that follows it.
@@ -299,10 +453,7 @@ pub(crate) fn render_with<D: Dialect>(out: &mut Sql<D>, with: &mut Option<WithCl
         if i != 0 {
             out.push_raw(", ");
         }
-        out.push_ident(entry.name);
-        out.push_raw(" AS (");
-        entry.body.render_branches(out);
-        out.push_raw(")");
+        render_cte_entry(out, entry);
     }
     out.push_raw(" ");
 }

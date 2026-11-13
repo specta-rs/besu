@@ -54,14 +54,91 @@ The two `ALL` forms are capability constants, so SQLite records
 `Error::unsupported` rather than emitting SQL it will reject. `INTERSECT` and `EXCEPT`
 themselves are available everywhere; MySQL gained them in 8.0.31.
 
+## A set query anywhere a `SELECT` is
+
+The compound is a statement, so it nests like one. `exists`, `in_query`, `scalar` and
+`derived` all accept it:
+
+```rust
+let adults = db.select(users).pick(users.id).filter(users.age.gte(18));
+let minors = db.select(users).pick(users.id).filter(users.age.lt(18));
+
+// Users whose id is produced by the compound.
+let rows: Vec<User> = db
+    .select(users)
+    .filter(users.id.in_query(adults.union(minors)))
+    .all()
+    .await?;
+```
+
+```sql
+SELECT ... FROM "users" WHERE ("users"."id" IN (
+    SELECT "users"."id" FROM "users" WHERE ("users"."age" >= $1)
+    UNION
+    SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2)
+))
+```
+
+The parentheses belong to `IN` (or `EXISTS`, or a scalar position), so the compound's branches
+and operators are written directly inside them. A derived table writes `FROM (...)` and the
+compound's own `ORDER BY` / `LIMIT` apply to the whole result:
+
+```rust
+let everyone = derived(adults.union(minors), "everyone");
+let ids: Vec<i64> = db.select(&everyone).all().await?;
+```
+
+## Counting a compound
+
+`count()` wraps the statement in a derived table and counts its rows, so the compound's
+branches, filters and pagination all still apply:
+
+```rust
+let total: i64 = db
+    .select(users)
+    .pick(users.id)
+    .filter(users.age.gte(18))
+    .union(db.select(users).pick(users.id).filter(users.age.lt(18)))
+    .limit(100)
+    .count()
+    .first()
+    .await?
+    .expect("COUNT always returns a row");
+```
+
+```sql
+SELECT COUNT(*) FROM (
+    SELECT "users"."id" FROM "users" WHERE ("users"."age" >= $1)
+    UNION
+    SELECT "users"."id" FROM "users" WHERE ("users"."age" < $2)
+    LIMIT $3
+) AS "besu_count"
+```
+
+`Select::count` is the same helper on a plain query.
+
 ## A set query as a common table expression
 
 `Cte::union_all` builds a `WITH RECURSIVE` clause out of an anchor and a recursive term, with
 the statement reading the name back out; see [common table expressions](ctes.md).
 
-`SetQuery` itself has no `cte` method yet. A named expression's columns are the source table's,
-which a compound does not carry, so there is no handle to type against. A compound can still
-be read from a common table expression, and a recursive definition is exactly that.
+`SetQuery::cte_named` names a compound and supplies its output column list, because the
+compiler cannot see the names of a projection built from values:
+
+```rust
+let everyone = adults
+    .union(minors)
+    .cte_named("everyone", (("id", users.id),));
+
+let ids: Vec<i64> = db
+    .from(&everyone)
+    .pick(everyone.column_named("id", users.id))
+    .all()
+    .await?;
+```
+
+The definition renders as `WITH "everyone" ("id") AS (SELECT ... UNION SELECT ...)`, which is
+the portable way to name a compound's columns on all three dialects.
 
 ## Rules the builder enforces
 
