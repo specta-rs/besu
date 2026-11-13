@@ -1,6 +1,7 @@
 # besu-postgres
 
-The PostgreSQL dialect, sqlx driver, DDL generation and introspection for Besu.
+The PostgreSQL dialect, sqlx and `tokio-postgres` drivers, DDL generation and introspection
+for Besu.
 
 Part of [Besu](https://github.com/specta-rs/besu), a typesafe, async, database-agnostic SQL
 query builder for Rust. The query you write is the SQL that runs.

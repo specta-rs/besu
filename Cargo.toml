@@ -45,6 +45,12 @@ sqlx = { version = "0.8", default-features = false }
 # can be compiled into one binary. A newer rusqlite links a different `sqlite3`, and Cargo
 # refuses two packages with the same `links` key in one graph.
 rusqlite = { version = "0.32", default-features = false }
+# The native PostgreSQL driver. `tokio-postgres` supplies the protocol and the types;
+# `deadpool-postgres` supplies the pool. Neither is on the path when the `native` feature is
+# off, so the default build is unchanged.
+tokio-postgres = { version = "0.7", default-features = true }
+deadpool-postgres = { version = "0.14", default-features = false }
+bytes = "1"
 futures-core = "0.3"
 futures-channel = "0.3"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

@@ -8,7 +8,7 @@ use besu_schema::{
     Table, Unique, View, normalise_expression, normalise_generated_expression,
 };
 
-use crate::Sqlx;
+use crate::Postgres;
 
 /// Read the database's schema from PostgreSQL's own catalogue.
 ///
@@ -28,7 +28,14 @@ use crate::Sqlx;
 ///
 /// Views are read into [`Schema::views`] and standalone sequences into
 /// [`Schema::sequences`], so `besu pull` records what is really there.
-pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
+pub async fn introspect<Dr>(db: &besu::Database<Dr>) -> Result<Schema, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let current = current_schema(db).await?;
 
     let names = db
@@ -102,7 +109,14 @@ fn qualified(schema: &str, name: &str, current: Option<&str>) -> String {
 }
 
 /// The schema unqualified names resolve to, or `None` when `search_path` is empty.
-async fn current_schema(db: &besu::Database<Sqlx>) -> Result<Option<String>, sqlx::Error> {
+async fn current_schema<Dr>(db: &besu::Database<Dr>) -> Result<Option<String>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     Ok(db
         .execute(besu::sql!("SELECT current_schema()"))
         .all::<Option<String>>()
@@ -118,10 +132,17 @@ async fn current_schema(db: &besu::Database<Sqlx>) -> Result<Option<String>, sql
 /// collected by `enumsortorder`. An enum outside the default schema is named
 /// `schema.type`, the same way a table elsewhere is qualified, so two schemas can each
 /// define a `mood` without being confused for each other.
-async fn introspect_enums(
-    db: &besu::Database<Sqlx>,
+async fn introspect_enums<Dr>(
+    db: &besu::Database<Dr>,
     current: Option<&str>,
-) -> Result<Vec<Enum>, sqlx::Error> {
+) -> Result<Vec<Enum>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.typname, e.enumlabel \
@@ -156,10 +177,17 @@ async fn introspect_enums(
 /// same parser a column does, so the two descriptions are the same [`TypeDef`]. A domain
 /// built on another domain is read with the inner domain's name as its base, which is a
 /// [`TypeDef::Custom`]; the wire format is still the innermost base's, so values decode.
-async fn introspect_domains(
-    db: &besu::Database<Sqlx>,
+async fn introspect_domains<Dr>(
+    db: &besu::Database<Dr>,
     current: Option<&str>,
-) -> Result<Vec<Domain>, sqlx::Error> {
+) -> Result<Vec<Domain>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.typname, bt.typtype::text, bn.nspname, bt.typname, \
@@ -199,10 +227,17 @@ async fn introspect_domains(
 /// plain one; `information_schema.views` lists only the plain ones. `pg_get_viewdef` is the
 /// body, and a view whose definition cannot be read (the owner may have revoked it) is
 /// skipped rather than reported with an empty body.
-async fn introspect_views(
-    db: &besu::Database<Sqlx>,
+async fn introspect_views<Dr>(
+    db: &besu::Database<Dr>,
     current: Option<&str>,
-) -> Result<Vec<View>, sqlx::Error> {
+) -> Result<Vec<View>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, c.relname, c.relkind = 'm', pg_get_viewdef(c.oid) \
@@ -243,10 +278,17 @@ async fn introspect_views(
 ///
 /// `pg_sequences` reports a column as `NULL` when the connected role cannot inspect the
 /// sequence, so such a row is skipped rather than guessed at.
-async fn introspect_sequences(
-    db: &besu::Database<Sqlx>,
+async fn introspect_sequences<Dr>(
+    db: &besu::Database<Dr>,
     current: Option<&str>,
-) -> Result<Vec<Sequence>, sqlx::Error> {
+) -> Result<Vec<Sequence>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT s.schemaname, s.sequencename, s.data_type::text, s.start_value, \
@@ -306,11 +348,18 @@ async fn introspect_sequences(
         .collect())
 }
 
-async fn introspect_columns(
-    db: &besu::Database<Sqlx>,
+async fn introspect_columns<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT table_schema, table_name, column_name, is_nullable, column_default, \
@@ -374,11 +423,18 @@ async fn introspect_columns(
 /// catalogue columns beside it say whether the type is a domain, an enum or an array. Nothing
 /// here strips a leading underscore: an array is recognised by `typelem` and `typlen`, and
 /// its element is read through the same catalogue fields.
-async fn introspect_column_types(
-    db: &besu::Database<Sqlx>,
+async fn introspect_column_types<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     #[allow(clippy::type_complexity)]
     let rows = db
         .execute(besu::sql!(
@@ -703,11 +759,18 @@ fn decimal_parts(modifier: &str) -> Option<(u8, u8)> {
 /// This is a query of its own because the column row already has twelve fields and the
 /// driver decodes tuples up to twelve; `information_schema.columns.is_generated` is the
 /// catalogue's own marker, so a plain column is never mistaken for one.
-async fn introspect_generated_columns(
-    db: &besu::Database<Sqlx>,
+async fn introspect_generated_columns<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT table_schema, table_name, column_name, generation_expression \
@@ -760,11 +823,18 @@ async fn introspect_generated_columns(
 /// not modelled at all, so it is skipped rather than folded into a `Unique` that is not
 /// there. PostgreSQL 17 also lists `NOT NULL` as a `CHECK` here, but without a
 /// `key_column_usage` row, which is why the inner join drops it.
-async fn introspect_constraints(
-    db: &besu::Database<Sqlx>,
+async fn introspect_constraints<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type, \
@@ -849,11 +919,18 @@ async fn introspect_constraints(
 /// stores the expression with extra parentheses (`CHECK (value > 0)` comes back as
 /// `(value > 0)`), which [`normalise_expression`] folds away so the declared spelling
 /// converges.
-async fn introspect_checks(
-    db: &besu::Database<Sqlx>,
+async fn introspect_checks<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.relname, con.conname, pg_get_expr(con.conbin, con.conrelid) \
@@ -888,11 +965,18 @@ async fn introspect_checks(
     Ok(())
 }
 
-async fn introspect_indexes(
-    db: &besu::Database<Sqlx>,
+async fn introspect_indexes<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.relname, i.relname, ix.indisunique, am.amname, \
@@ -1039,11 +1123,18 @@ fn parse_access_method(method: &str) -> Option<IndexKind> {
     }
 }
 
-async fn introspect_foreign_keys(
-    db: &besu::Database<Sqlx>,
+async fn introspect_foreign_keys<Dr>(
+    db: &besu::Database<Dr>,
     tables: &mut BTreeMap<String, Table>,
     current: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = Postgres>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+    bool: besu_core::Decode<Dr>,
+    i16: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT n.nspname, t.relname, con.conname, rn.nspname, rt.relname, \

@@ -20,12 +20,17 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["sqlx", "runtime-tokio"]
 sqlx = ["dep:sqlx"]
 runtime-tokio = ["sqlx/runtime-tokio"]
+# The `tokio-postgres`-backed driver. Additive: it does not replace the sqlx driver, which
+# stays the default until the native one has proven itself. It uses `tokio_postgres::NoTls`
+# and a `deadpool-postgres` pool; TLS is a separate API decision, not a hidden dependency.
+native = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:bytes"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
 besu = { workspace = true, features = ["derive", "migrate"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
@@ -38,6 +43,9 @@ besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu = { workspace = true, features = ["derive", "migrate"] }
 sqlx = { workspace = true, optional = true, features = ["postgres", "chrono", "uuid", "json", "bigdecimal"] }
+tokio-postgres = { workspace = true, optional = true, features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+deadpool-postgres = { workspace = true, optional = true, features = ["rt_tokio_1"] }
+bytes = { workspace = true, optional = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }

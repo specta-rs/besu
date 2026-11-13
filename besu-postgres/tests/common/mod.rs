@@ -1,4 +1,4 @@
-#![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
+#![allow(missing_docs, clippy::unwrap_used, clippy::panic, dead_code)]
 
 //! Shared scaffolding for the integration tests.
 //!
@@ -8,6 +8,8 @@
 //! is released when the returned database is dropped, even if the test panics.
 
 use besu::prelude::*;
+#[cfg(feature = "native")]
+use besu_postgres::Native;
 use besu_postgres::Sqlx;
 
 /// The server the tests run against.
@@ -30,6 +32,32 @@ pub async fn database() -> besu::Database<Sqlx> {
     db
 }
 
+/// Connect through the native `tokio-postgres` driver and wait for the suite-wide lock.
+///
+/// The lock lives on its own pool: a connection that a test detaches — dropping an
+/// uncommitted transaction does exactly that — must not be the one holding the lock, or the
+/// lock would be released while the test is still running. The returned tuple is the working
+/// database and the lock-holding one, which the caller keeps alive.
+#[cfg(feature = "native")]
+pub async fn native_database() -> (besu::Database<Native>, besu::Database<Native>) {
+    let lock = besu::Database::new(
+        Native::new(URL)
+            .await
+            .expect("the test server must be reachable"),
+    );
+    lock.execute(sql!("SELECT pg_advisory_lock(4207)"))
+        .await
+        .expect("the suite lock must be available");
+
+    let db = besu::Database::new(
+        Native::new(URL)
+            .await
+            .expect("the test server must be reachable"),
+    );
+
+    (db, lock)
+}
+
 /// Remove every table, sequence and non-`public` schema, so each test starts from an empty
 /// database.
 ///
@@ -37,7 +65,14 @@ pub async fn database() -> besu::Database<Sqlx> {
 /// previous test — or an interrupted run of it — left behind would show up as drift and
 /// turn the next `push` destructive. The advisory lock guarantees nobody else is using the
 /// database at this point.
-pub async fn reset(db: &besu::Database<Sqlx>) {
+///
+/// This is generic over the driver so the sqlx and native suites share one reset.
+pub async fn reset<Dr>(db: &besu::Database<Dr>)
+where
+    Dr: besu::Driver<Dialect = besu_postgres::Postgres>,
+    String: besu::Decode<Dr>,
+    bool: besu::Decode<Dr>,
+{
     let tables: Vec<(String, String)> = db
         .execute(sql!(
             "SELECT t.schemaname, t.tablename FROM pg_tables t \
@@ -53,6 +88,42 @@ pub async fn reset(db: &besu::Database<Sqlx>) {
         .all()
         .await
         .expect("the table list must be readable");
+
+    // A view does not depend on a table unless it selects from one, so dropping tables does
+    // not remove a view over a constant or over a system catalogue. Drop views first, so a
+    // leftover from an interrupted test cannot make the next introspection look destructive.
+    let views: Vec<(String, String, bool)> = db
+        .execute(sql!(
+            "SELECT n.nspname, c.relname, c.relkind = 'm' FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('v', 'm') \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid \
+                     AND d.deptype = 'e' \
+               )"
+        ))
+        .all()
+        .await
+        .expect("the view list must be readable");
+
+    for (schema, view, materialised) in views {
+        let keyword = if materialised {
+            "MATERIALIZED VIEW"
+        } else {
+            "VIEW"
+        };
+        let statement = format!(
+            "DROP {keyword} IF EXISTS {}.{} CASCADE",
+            quote_ident(&schema),
+            quote_ident(&view)
+        );
+        db.execute(besu::Fragment::new(statement))
+            .await
+            .expect("a leftover view must be droppable");
+    }
 
     for (schema, table) in tables {
         // Identifiers cannot be bound as parameters, so they are quoted by hand.

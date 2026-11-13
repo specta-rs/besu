@@ -5,9 +5,15 @@ which knows how to run it. Keeping them apart is what lets Besu render a complet
 with no database attached — the tests and the CLI depend on that.
 
 `besu-sqlite` is the smallest complete driver; `besu-postgres` and `besu-mysql` follow the
-same shape. Read one of them alongside this page. `besu-sqlite` also carries a second
-implementation of the same dialect — a synchronous `rusqlite` driver behind the additive
-`native` feature — which is the worked example for the connection-thread design below.
+same shape. Read one of them alongside this page. Two crates carry a second implementation of
+the same dialect:
+
+- `besu-sqlite` has a synchronous `rusqlite` driver behind the additive `native` feature,
+  which is the worked example for the connection-thread design below.
+- `besu-postgres` has a `tokio-postgres` driver behind its own `native` feature: a real
+  pool, real streaming and a type mapping that follows the server's inferred parameter
+  types. It shares the dialect, the DDL and one introspection implementation with the sqlx
+  driver.
 
 ## The traits
 
@@ -357,6 +363,67 @@ across an `await` would block every other statement. A synchronous driver's `que
 therefore collects the rows and returns a stream over them. The `RowStream` contract is still
 met: the rows are owned, and the lifetime only ties the stream to the `Sql` the caller passed.
 
+### A second asynchronous driver: inferred parameter types
+
+`besu-postgres`'s `native` feature is the opposite case: `tokio-postgres` is async, so there
+is no thread and no channel, only a `deadpool-postgres` pool. Two things are worth knowing
+before writing one.
+
+**The server infers a parameter type per placeholder.** sqlx declares a SQL type for every
+bound value (`i64` is always `INT8`, a `String` always `TEXT`), sends those OIDs when it
+prepares the statement, and relies on PostgreSQL's assignment casts to fit them to the
+column. `tokio-postgres` has no such API in ordinary use: the SQL text declares nothing, so
+`INSERT INTO t (small) VALUES ($1)` infers `INT2` for `$1`, and an encoder that always wrote
+eight bytes for `Value::Int` would send `INT2` four bytes too long. The driver therefore
+resolves a domain to its base type and writes the value in the inferred type:
+
+```rust
+impl ToSql for Param<'_> {
+    fn to_sql(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+        encode(self.0, ty, out)?;          // INT2 / INT4 / INT8 / NUMERIC / ...
+        Ok(if self.0.is_null() { IsNull::Yes } else { IsNull::No })
+    }
+
+    // The value decides compatibility, and `accepts` cannot see it.
+    fn accepts(_: &Type) -> bool { true }
+}
+```
+
+`Value::Null`, an enum label, an array, a range, a geometry and a vector are all written in
+the form the inferred type expects, so no parameter is declared `TEXT` where an enum column
+is expected. The trade is that a statement whose placeholder has no inferable type — a bare
+`SELECT $1` — needs an explicit cast, exactly as it does for sqlx's untyped `NULL`.
+
+**A pooled connection has to outlive a stream.** `tokio_postgres::RowStream` owns its rows
+and borrows nothing, but the connection that is sending them must not go back to the pool
+mid-stream. The driver's stream therefore owns both:
+
+```rust
+struct NativeRowStream {
+    rows: Pin<Box<tokio_postgres::RowStream>>,
+    _client: Option<Object>,   // checked out until the stream is dropped
+}
+```
+
+Inside a transaction the client is borrowed rather than owned, and `_client` is `None`: the
+returned stream's lifetime already keeps the transaction alive, which keeps the connection
+checked out.
+
+**A transaction is raw `BEGIN`.** `tokio_postgres::Transaction` borrows the client, and a
+driver's `Transaction<'a>` is tied to `&'a self`, so a self-referential handle is not possible
+without unsafe code. The native driver checks a connection out of the pool, runs `BEGIN`,
+`COMMIT` and `ROLLBACK` itself, and detaches the connection on a drop without commit. That
+closes the socket, which makes the server roll back; it also means the next borrower never
+sees an open transaction. Nested `tx.transaction(..)` calls are `SAVEPOINT` statements sent
+through the same connection, so they need nothing from the driver.
+
+**Decoding reads raw bytes.** `tokio_postgres`'s `FromSql` checks the declared SQL type, but
+Besu's `Decode` is about the Rust type — a `NUMERIC` must decode into an exact `String`, and a
+domain into its base type. A tiny `FromSql` wrapper that accepts every type and returns the
+payload lets the driver reuse the same binary parsers the sqlx driver tests. `Option<Raw>`
+distinguishes `NULL`, because `Row` has no public null check.
+
+
 ## `SchemaDriver` and `Ddl`
 
 Migrations and the CLI need two more things: a way to read the live schema, and a way to
@@ -393,6 +460,13 @@ where
 so one implementation reads `sqlite_master` and the pragmas for both the sqlx and native
 drivers, and the error type is whichever the driver chose. Every `besu-sqlite` driver that
 implements `SchemaDriver` delegates to it; a second copy would be a second thing to drift.
+
+`besu-postgres/src/introspect.rs` is generic the same way, over
+`Dr: besu::Driver<Dialect = Postgres>` with `String`, `i64`, `bool` and `i16` decodable, so
+`Sqlx` and `Native` read the catalogue through one implementation and return `Dr::Error`.
+`execute_statements` is where the two drivers differ: the native one takes a single pooled
+connection for the whole list, so a `push` is not spread across the pool even though it is
+not wrapped in a transaction.
 
 `Ddl` has working defaults for everything except `name`, `quote`, `type_name` and
 `column_sql`:
@@ -480,8 +554,9 @@ Both SQLite drivers override it because the table rebuild toggles `PRAGMA foreig
 *per-connection* setting. Through the sqlx pool the `DROP TABLE` would land on a connection
 that still enforces foreign keys and cascade into child rows, so all statements have to reach
 one connection; the native driver sends the whole list as one request for the same reason, and
-to keep anything else from interleaving with a rebuild. Override it when your statements only
-make sense together.
+to keep anything else from interleaving with a rebuild. The native PostgreSQL driver overrides
+it too, to run the whole list on one pooled connection: `push` is not atomic, but it should
+still be one session. Override it when your statements only make sense together.
 
 ## Choosing a driver at runtime
 
@@ -642,7 +717,8 @@ so an empty result set has none; a server that knows its columns can fill
 2. **Round-trip the schema.** Create a database, `push` the declared tables, then assert that
    a second `push` is empty and that `introspect` reports the columns, indexes and foreign
    keys you expect. `besu-sqlite/tests/query.rs` does exactly this in
-   `schema_push_converges`.
+   `schema_push_converges`, and `besu-postgres/tests/native.rs` does it for a driver that
+   shares its introspection with another.
 3. **Decode every supported type.** The `Decode` impls are where a driver is most likely to
    be subtly wrong: an unsigned integer that wraps, a timestamp that loses its timezone, a
    `NULL` that becomes a zero.

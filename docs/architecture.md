@@ -73,12 +73,24 @@ let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
 No pool, no connection string, no server — and the SQL is the real SQL, not an approximation
 produced by a second implementation.
 
-A dialect can have more than one driver, and `besu-sqlite` does. `Sqlx` is the default and
-wraps a sqlx pool; `Native`, behind the additive `native` feature, is `rusqlite` on a
-dedicated connection thread. They share the dialect, the DDL and one generic introspection
-implementation, so a query renders identically and decodes the same values on either. The
-`native` feature does not become the default by accident: when both features are on,
-`besu_sqlite::Database` is still the sqlx driver, and `NativeDatabase` names the other.
+A dialect can have more than one driver, and two do. `besu-sqlite` has `Sqlx` (the default)
+and `Native`, behind the additive `native` feature, which is `rusqlite` on a dedicated
+connection thread. `besu-postgres` has the same split: `Sqlx` is the default, and `Native`
+behind its own `native` feature is `tokio-postgres` over a `deadpool-postgres` pool. In both
+crates the drivers share the dialect, the DDL and one generic introspection implementation,
+so a query renders identically and decodes the same values on either. The `native` feature
+never becomes the default by accident: when both features are on, `Database` is still the
+sqlx driver, and `NativeDatabase` names the other.
+
+The PostgreSQL pair also shows where a driver's work actually is. sqlx declares a SQL type
+for every parameter and lets the server cast it; `tokio-postgres` sends no parameter types,
+so the server infers one per placeholder and the native encoder writes the value in that
+inferred type — two, four or eight bytes for an integer depending on whether the column is
+`SMALLINT`, `INTEGER` or `BIGINT`, and the binary `NUMERIC` format otherwise. Decoding goes
+through raw bytes for the same reason: a `NUMERIC` has no built-in Rust type, and the exact
+decimal text is the value Besu models. TLS is deliberately absent from the native driver:
+`NoTls` is what it uses, and adding a connector is an API change rather than a dependency
+change, so it is left for its own decision.
 
 ### `Executor` versus `Driver`
 
