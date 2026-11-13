@@ -21,6 +21,10 @@ workspace = true
 
 [dependencies]
 besu = { workspace = true, features = ["derive", "migrate"] }
+# `AnyDatabase` returns `sqlx::Error` from its public API, so this crate deliberately stays on
+# the sqlx driver. The drivers' default is native; `sqlx` is opt-in here, and `runtime-tokio`
+# is what gives sqlx its tokio runtime. Enabling `sqlx` alone keeps `Database` on the sqlx
+# driver even in a build where something else also enabled `native`.
 besu-sqlite = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 besu-postgres = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 besu-mysql = { workspace = true, features = ["sqlx", "runtime-tokio"] }

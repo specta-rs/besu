@@ -10,12 +10,14 @@
 use besu::prelude::*;
 #[cfg(feature = "native")]
 use besu_postgres::Native;
+#[cfg(feature = "sqlx")]
 use besu_postgres::Sqlx;
 
 /// The server the tests run against.
 pub const URL: &str = "postgres://besu:besu@localhost:55432/besu";
 
 /// Connect to the test server and wait until this test owns the suite-wide lock.
+#[cfg(feature = "sqlx")]
 pub async fn database() -> besu::Database<Sqlx> {
     let db = besu::Database::new(
         Sqlx::new(URL)

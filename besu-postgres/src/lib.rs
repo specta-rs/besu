@@ -2,21 +2,11 @@
 //!
 //! The dialect and the DDL are always available. Execution comes in two flavours:
 //!
-//! - [`Sqlx`], behind the default `sqlx` feature, is a `sqlx::PgPool`. It remains the
-//!   default driver.
-//! - [`Native`], behind the additive `native` feature, is `tokio-postgres` over a
+//! - `Native`, behind the default `native` feature, is `tokio-postgres` over a
 //!   `deadpool-postgres` pool. It has no sqlx in its path and encodes parameters in the
 //!   binary format of whatever type the server infers.
-//!
-//! ```no_run
-//! use besu::prelude::*;
-//! use besu_postgres::{Database, Sqlx};
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = Database::new(Sqlx::new("postgres://user:password@localhost/app").await?);
-//! # Ok(())
-//! # }
-//! ```
+//! - `Sqlx`, behind the optional `sqlx` feature, is a `sqlx::PgPool`. Choose it for TLS or
+//!   an existing `sqlx::PgPool`; while the feature is on, `Database` names this driver.
 //!
 //! ```no_run
 //! # #[cfg(feature = "native")]
@@ -28,6 +18,19 @@
 //! let db: NativeDatabase = Native::new("postgres://user:password@localhost/app")
 //!     .await?
 //!     .database();
+//! # Ok(())
+//! # }
+//! # }
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "sqlx")]
+//! # {
+//! use besu::prelude::*;
+//! use besu_postgres::{Database, Sqlx};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = Database::new(Sqlx::new("postgres://user:password@localhost/app").await?);
 //! # Ok(())
 //! # }
 //! # }
@@ -53,7 +56,7 @@
 //!
 //! # TLS
 //!
-//! The native driver uses [`tokio_postgres::NoTls`]. Exposing TLS means a feature that pulls
+//! The native driver uses `tokio_postgres::NoTls`. Exposing TLS means a feature that pulls
 //! in `rustls` or `native-tls`, a connector argument on the constructors, and a `sslmode`
 //! story; those are API decisions rather than implementation details, so they are left to a
 //! later change. A URL that requires TLS fails to connect instead of silently going
@@ -90,15 +93,17 @@ pub use sqlx::arguments as encode_arguments;
 
 /// A [`besu::Database`] backed by PostgreSQL's sqlx driver.
 ///
-/// This is the default whenever the `sqlx` feature is on, including when `native` is also
-/// enabled. Use [`NativeDatabase`] to name the native driver explicitly.
+/// This is `Database` whenever the `sqlx` feature is on, including when `native` is also
+/// enabled. The default build has only `native`, so there `Database` names the native driver;
+/// use `NativeDatabase` to name it explicitly in every build.
 #[cfg(feature = "sqlx")]
 pub type Database = besu::Database<Sqlx>;
 
 /// A [`besu::Database`] backed by PostgreSQL's native driver.
 ///
-/// This is `Database` only when `native` is enabled without `sqlx`; with both features on,
-/// `Database` is the sqlx driver and this alias is the way to name the native one.
+/// This is `Database` whenever the `sqlx` feature is off, which is the default build. With
+/// both features on, `Database` is the sqlx driver and this alias is the way to name the
+/// native one.
 #[cfg(all(feature = "native", not(feature = "sqlx")))]
 pub type Database = besu::Database<Native>;
 

@@ -73,16 +73,16 @@ let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
 No pool, no connection string, no server — and the SQL is the real SQL, not an approximation
 produced by a second implementation.
 
-A dialect can have more than one driver, and three do. `besu-sqlite` has `Sqlx` (the default)
-and `Native`, behind the additive `native` feature, which is `rusqlite` on a dedicated
-connection thread. `besu-postgres` has the same split: `Sqlx` is the default, and `Native`
-behind its own `native` feature is `tokio-postgres` over a `deadpool-postgres` pool.
-`besu-mysql` completes the set: `Sqlx` is the default, and `Native` behind its own `native`
-feature is `mysql_async` over its pool, using MySQL's binary protocol. In all three crates the
-drivers share the dialect, the DDL and one generic introspection implementation, so a query
-renders identically and decodes the same values on either. The `native` feature never becomes
-the default by accident: when both features are on, `Database` is still the sqlx driver, and
-`NativeDatabase` names the other.
+A dialect can have more than one driver, and three do. `besu-sqlite` has `Native`, the
+default, which is `rusqlite` on a dedicated connection thread, and `Sqlx` behind the optional
+`sqlx` feature. `besu-postgres` has the same split: `Native` is the default and is
+`tokio-postgres` over a `deadpool-postgres` pool, while `Sqlx` is opt-in. `besu-mysql`
+completes the set: `Native` is the default and is `mysql_async` over its pool, using MySQL's
+binary protocol, with `Sqlx` behind the same optional feature. In all three crates the drivers
+share the dialect, the DDL and one generic introspection implementation, so a query renders
+identically and decodes the same values on either. `Database` follows the feature set: it
+names the native driver in the default build and the sqlx driver whenever `sqlx` is enabled,
+and `NativeDatabase` names the native driver in every build.
 
 The PostgreSQL pair also shows where a driver's work actually is. sqlx declares a SQL type
 for every parameter and lets the server cast it; `tokio-postgres` sends no parameter types,
@@ -279,8 +279,8 @@ what keeps a commit from applying to a transaction that has already been replace
 
 The trade is explicit: one connection means no pool, so statements are serialised and a cursor
 cannot be held open across an `await`. `query_stream` collects its rows and streams them from
-memory. That is a real limitation, not a hidden one, and the sqlx driver remains the default
-for code that wants a pool.
+memory. That is a real limitation, not a hidden one, and it is why the `sqlx` feature is still
+there for code that wants a pool.
 
 ## Compiling for wasm32
 
@@ -301,7 +301,8 @@ There are two ways to turn that SQL into rows:
 [dependencies]
 # The builder, the derive and the SQL: all of it is at home in a browser.
 besu = { version = "0.1", default-features = false, features = ["derive"] }
-# The dialect and DDL only. The default features are `sqlx` and `runtime-tokio`.
+# The dialect and DDL only: `default-features = false` keeps the native and sqlx
+# drivers (and their runtimes) out of the browser build.
 besu-postgres = { version = "0.1", default-features = false }
 # The bridge driver: `fetch` on wasm, the wire format, and the server helper.
 besu-bridge = "0.1"
@@ -322,9 +323,9 @@ The endpoint runs the request against any driver and returns rows:
 ```rust
 use besu_bridge::{BridgeSource, Request, Response, handle_request};
 
-async fn query(sqlx: &besu_postgres::Sqlx, body: String) -> Response {
+async fn query(db: &besu_postgres::Native, body: String) -> Response {
     match serde_json::from_str::<Request>(&body) {
-        Ok(request) => handle_request(sqlx, &PostgresRows, request).await,
+        Ok(request) => handle_request(db, &PostgresRows, request).await,
         Err(err) => Response::error(format!("not a bridge request: {err}")),
     }
 }

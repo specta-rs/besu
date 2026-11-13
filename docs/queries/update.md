@@ -31,7 +31,7 @@ db.update(users).set(users.name, "Alicia").await?;
 ```
 
 ```text
-error[E0277]: `Update<'_, &Database<Sqlx>, UserTable>` is not a future
+error[E0277]: `Update<'_, &Database<Native>, UserTable>` is not a future
 ```
 
 There are exactly two ways to flip the flag:

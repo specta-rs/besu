@@ -4,6 +4,7 @@
 //!
 //! The failing cases are `compile_fail` doc tests in `besu-sqlite/src/lib.rs`; these are the
 //! cases that must keep working.
+#![cfg(feature = "sqlx")]
 
 use besu::prelude::*;
 use besu_sqlite::Sqlx;

@@ -1,4 +1,5 @@
 //! JSON path access renders correctly per dialect and reads real documents.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

@@ -6,7 +6,7 @@ statement it writes for that table.
 
 ```rust
 use besu::prelude::*;
-use besu_postgres::Sqlx;
+use besu_postgres::Native;
 
 mod scoped {
     use besu::prelude::*;
@@ -34,7 +34,7 @@ The two declarations have to live in different modules, because the handle ident
 from the table name.
 
 ```rust
-let schema = besu::Database::<Sqlx>::schema([users.def(), scoped::users.def()]);
+let schema = besu::Database::<Native>::schema([users.def(), scoped::users.def()]);
 
 let default = schema.find(None, "users").expect("the unqualified table");
 let scoped = schema.find(Some("app"), "users").expect("the scoped table");

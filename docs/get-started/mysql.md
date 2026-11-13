@@ -13,8 +13,9 @@ besu-mysql = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-`besu` enables `derive` and `migrate` by default. `besu-mysql` enables `sqlx` and
-`runtime-tokio`.
+`besu` enables `derive` and `migrate` by default. `besu-mysql` enables the native
+`mysql_async` driver by default; the `sqlx` feature adds a `sqlx::MySqlPool` driver if you want
+TLS or an existing pool.
 
 The database has to exist before you connect. Besu creates tables and constraints, but no
 `CREATE DATABASE`.
@@ -44,16 +45,16 @@ The derive emits the row type, a `users` handle, a `UserInsert` struct and a
 ## Connect
 
 ```rust
-use besu_mysql::Sqlx;
+use besu_mysql::Native;
 
 let url = std::env::var("DATABASE_URL")
     .unwrap_or_else(|_| "mysql://root:besu@localhost:3306/besu".to_string());
-let db = besu::Database::new(Sqlx::new(&url).await?);
+let db = Native::new(&url).await?.database();
 ```
 
-`Sqlx::new` pins the session to `utf8mb4` and to `+00:00`, because timestamps are encoded as
-UTC and a non-UTF-8 connection would mangle text. `Sqlx::connect` leaves the URL exactly as
-written. See [connecting to MySQL](../connect/mysql.md) for the trade-off and pool
+`Native::new` pins the session to `utf8mb4` and to `+00:00`, because timestamps are encoded as
+UTC and a non-UTF-8 connection would mangle text. `Native::connect` leaves the URL exactly as
+written. See [connecting to MySQL](../connect/mysql.md) for the trade-offs and pool
 configuration.
 
 ## Create the table

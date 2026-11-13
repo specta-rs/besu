@@ -10,18 +10,18 @@ Each `Database` wraps one driver, and a driver wraps one pool. Two connection st
 two independent pools.
 
 ```rust
-let primary = besu::Database::new(besu_postgres::Sqlx::connect(&primary_url).await?);
-let replica = besu::Database::new(besu_postgres::Sqlx::connect(&replica_url).await?);
+let primary = besu::Database::new(besu_postgres::Native::connect(&primary_url).await?);
+let replica = besu::Database::new(besu_postgres::Native::connect(&replica_url).await?);
 ```
 
-`Sqlx` is the same type for both, so every helper written against
-`&Database<besu_postgres::Sqlx>` accepts either.
+`Native` is the same type for both, so every helper written against
+`&Database<besu_postgres::Native>` accepts either.
 
 ```rust
 async fn find_user(
-    db: &besu::Database<besu_postgres::Sqlx>,
+    db: &besu::Database<besu_postgres::Native>,
     id: i64,
-) -> Result<Option<User>, sqlx::Error> {
+) -> Result<Option<User>, besu_postgres::NativeError> {
     db.select(users).filter(users.id.eq(id)).first().await
 }
 
@@ -68,7 +68,7 @@ primary
         tx.insert(users).value(users.insert(..)).await?;
         // Read through `tx`, never through `replica`.
         let count = tx.select(users).pick(count_all()).await?;
-        Ok::<_, sqlx::Error>(count)
+        Ok::<_, besu_postgres::NativeError>(count)
     })
     .await?;
 ```
@@ -80,7 +80,7 @@ primary
 - **No lag tracking.** Besu cannot tell you how far behind a replica is, and does not wait for
   it.
 - **No load balancing.** Two calls to the replica use one pool; how its connections are
-  distributed is sqlx's business.
+  distributed is the driver's business.
 - **No read-only enforcement.** A `Database` over a replica will happily accept an insert; the
   server must be configured to refuse it.
 

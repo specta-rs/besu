@@ -285,7 +285,7 @@ impl Native {
     ///
     /// One connection is opened before returning, so an unreachable server is an error from
     /// the constructor rather than from the first query. The pool holds at most ten
-    /// connections, the same default as [`crate::Sqlx`].
+    /// connections, the same default as `Sqlx`.
     pub async fn connect(url: &str) -> Result<Self, NativeError> {
         let config: tokio_postgres::Config = url.parse()?;
         let manager = Manager::from_config(

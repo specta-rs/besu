@@ -13,8 +13,9 @@ besu-postgres = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-`besu` enables `derive` and `migrate` by default. `besu-postgres` enables `sqlx` and
-`runtime-tokio`; the DDL and the dialect work without either.
+`besu` enables `derive` and `migrate` by default. `besu-postgres` enables the native
+`tokio-postgres` driver by default; the DDL and the dialect work without a driver, and the
+`sqlx` feature adds a `sqlx::PgPool` driver if you want TLS or an existing pool.
 
 The database has to exist before you connect. Besu creates tables, indexes and constraints,
 but it never runs `CREATE DATABASE` or `CREATE SCHEMA`.
@@ -44,16 +45,17 @@ The derive emits the row type, a `users` handle, a `UserInsert` struct and a
 ## Connect
 
 ```rust
-use besu_postgres::Sqlx;
+use besu_postgres::Native;
 
 let url = std::env::var("DATABASE_URL")
     .unwrap_or_else(|_| "postgres://besu:besu@localhost:5432/besu".to_string());
-let db = besu::Database::new(Sqlx::connect(&url).await?);
+let db = Native::connect(&url).await?.database();
 ```
 
-`Sqlx::new` is an alias for `Sqlx::connect`, for symmetry with the other drivers. Both accept
-a libpq-style URL, so TLS and application-name settings travel in the query string. See
-[connecting to PostgreSQL](../connect/postgresql.md) for pool configuration.
+`Native::new` is an alias for `Native::connect`, for symmetry with the other drivers. Both
+accept a libpq-style URL. The native driver connects with `NoTls`; enable the optional `sqlx`
+feature if you need TLS. See [connecting to PostgreSQL](../connect/postgresql.md) for pool
+configuration.
 
 ## Create the table
 
@@ -122,9 +124,11 @@ LIMIT $2
 ```
 
 The trailing comment is part of the statement the driver sends. It records the shape of the
-bound parameters, because PostgreSQL fixes a parameter's type at prepare time and sqlx caches
-prepared statements by SQL text alone. Two statements with the same text and different
-parameter types would otherwise share a cache entry with the wrong types.
+bound parameters, because PostgreSQL fixes a parameter's type at prepare time: sqlx caches
+prepared statements by SQL text alone, and the native driver sends no parameter types at all
+and lets the server infer one per placeholder. Two statements with the same text and different
+parameter types would otherwise share an entry with the wrong types on sqlx, or be inferred
+with the wrong types on the native driver.
 
 ## Check the SQL without a database
 

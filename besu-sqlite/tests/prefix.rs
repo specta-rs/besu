@@ -1,4 +1,5 @@
 //! Table prefixes, for deployments that share one physical database between tenants.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

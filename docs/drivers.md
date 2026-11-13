@@ -8,15 +8,15 @@ with no database attached — the tests and the CLI depend on that.
 same shape. Read one of them alongside this page. Two crates carry a second implementation of
 the same dialect:
 
-- `besu-sqlite` has a synchronous `rusqlite` driver behind the additive `native` feature,
-  which is the worked example for the connection-thread design below.
-- `besu-postgres` has a `tokio-postgres` driver behind its own `native` feature: a real
-  pool, real streaming and a type mapping that follows the server's inferred parameter
-  types. It shares the dialect, the DDL and one introspection implementation with the sqlx
-  driver.
-- `besu-mysql` has a `mysql_async` driver behind its own `native` feature: a pool, a
-  per-connection prepared-statement cache, MySQL's binary protocol, and one generic
-  introspection shared with the sqlx driver.
+- `besu-sqlite` has a synchronous `rusqlite` driver, the default `Native`, which is the worked
+  example for the connection-thread design below. `Sqlx` is opt-in behind the `sqlx` feature.
+- `besu-postgres` has a `tokio-postgres` driver, the default `Native`: a real pool, real
+  streaming and a type mapping that follows the server's inferred parameter types. It shares
+  the dialect, the DDL and one introspection implementation with the sqlx driver, which is
+  behind the optional `sqlx` feature.
+- `besu-mysql` has a `mysql_async` driver, the default `Native`: a pool, a per-connection
+  prepared-statement cache, MySQL's binary protocol, and one generic introspection shared with
+  the sqlx driver, which is behind the optional `sqlx` feature.
 
 ## The traits
 
@@ -321,7 +321,7 @@ transaction, or on nothing at all (`DryDriver`).
 
 Not every database library is async. `rusqlite` is synchronous, and handing each statement to
 `spawn_blocking` pays a pool hand-off per statement. The alternative, and the one
-`besu-sqlite`'s `native` feature uses, is a thread per driver that owns the connection and
+`besu-sqlite`'s native driver uses, is a thread per driver that owns the connection and
 executes requests in order:
 
 ```rust
@@ -368,7 +368,7 @@ met: the rows are owned, and the lifetime only ties the stream to the `Sql` the 
 
 ### A second asynchronous driver: inferred parameter types
 
-`besu-postgres`'s `native` feature is the opposite case: `tokio-postgres` is async, so there
+`besu-postgres`'s native driver is the opposite case: `tokio-postgres` is async, so there
 is no thread and no channel, only a `deadpool-postgres` pool. Two things are worth knowing
 before writing one.
 
@@ -428,7 +428,7 @@ distinguishes `NULL`, because `Row` has no public null check.
 
 ### A third asynchronous driver: MySQL's binary protocol
 
-`besu-mysql`'s `native` feature is `mysql_async` over its own pool. MySQL sits between the
+`besu-mysql`'s native driver is `mysql_async` over its own pool. MySQL sits between the
 other two: unlike PostgreSQL it declares no parameter types at the SQL level, and unlike
 SQLite it speaks a binary protocol. `mysql_async` decodes that protocol into
 `mysql_async::Value`, so most of the driver is a match on the variant rather than a byte

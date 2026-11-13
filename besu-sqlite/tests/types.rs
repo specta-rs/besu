@@ -1,4 +1,5 @@
 //! Round-trip every supported column type through SQLite.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::too_many_arguments)]
 #![allow(clippy::unwrap_used, clippy::panic)]
 

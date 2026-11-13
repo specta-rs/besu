@@ -3,6 +3,7 @@
 //! Schema fidelity: native types, enum types, composite `UNIQUE` constraints,
 //! schema-qualified tables, check constraints, views and the index shapes the IR cannot
 //! express, all exercised against a real PostgreSQL server.
+#![cfg(feature = "sqlx")]
 
 mod common;
 

@@ -103,12 +103,12 @@ and renders `TIME(3)` again. `TIME(6)` and `DATETIME(6)` fold onto the plain `Ti
 `Timestamp` the derive declares, so a second push is a no-op.
 
 There is no timezone-aware column: the offset is dropped, and the driver relies on the session
-being pinned to UTC. `Sqlx::new` does that; `Sqlx::connect` does not.
+being pinned to UTC. `Native::new` does that; `Native::connect` does not.
 
 Introspection reports a `DATETIME` as `Timestamp`. Both `Timestamp` and `TimestampTz` render
 `DATETIME(6)`, and type normalisation folds the two, so a `DateTime<Utc>` column converges:
 `push` is a no-op the second time. The offset is still not stored — it is the session's job,
-and `Sqlx::new` pins the session to UTC.
+and `Native::new` pins the session to UTC.
 
 ## JSON
 

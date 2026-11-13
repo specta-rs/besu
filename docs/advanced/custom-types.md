@@ -99,7 +99,9 @@ impl From<InetAddr> for besu::Value {
 `SqlType::Rust` requires `Into<Value>`, which the `From` implementation supplies. The bound is
 on the marker, so a type that cannot be bound as a parameter cannot be a column type.
 
-Decoding is per driver because a row is the driver's own type. This is the PostgreSQL one:
+Decoding is per driver because a row is the driver's own type. This is the PostgreSQL one,
+for the optional sqlx driver; with the default native driver the row type is
+`besu_postgres::NativeRow` and the error is `besu_postgres::NativeError`.
 
 ```rust
 impl besu::Decode<besu_postgres::Sqlx> for InetAddr {

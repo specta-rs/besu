@@ -4,6 +4,7 @@
 //! [`besu_core::Sql`] into `sqlx` arguments. The `query` group runs against a real server and
 //! is registered only when `BESU_POSTGRES_BENCH_URL` is set, so a checkout without a database
 //! can still run `cargo bench -p besu-postgres`.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use std::hint::black_box;

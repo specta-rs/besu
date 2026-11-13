@@ -1,4 +1,5 @@
 //! A declared rename is one statement, and the column keeps its data.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 #![allow(unused_imports)]
 

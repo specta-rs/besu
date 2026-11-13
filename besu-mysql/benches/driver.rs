@@ -8,6 +8,7 @@
 //! runs against that database, dropping and recreating its own two tables. Leave it unset and
 //! the group is skipped, so `cargo bench -p besu-mysql` works on a machine with nothing set
 //! up.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use std::hint::black_box;

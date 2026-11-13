@@ -3,7 +3,7 @@
 //! Run it with `cargo run -p example-postgres`.
 
 use besu::prelude::*;
-use besu_postgres::Sqlx;
+use besu_postgres::Native;
 
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "users")]
@@ -37,7 +37,8 @@ pub struct Post {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://besu:besu@localhost:55432/besu".to_string());
-    let db = besu::Database::new(Sqlx::connect(&url).await?);
+    // The native driver is the default.
+    let db = Native::connect(&url).await?.database();
 
     // Create both tables, or apply whatever has changed since the last run.
     //

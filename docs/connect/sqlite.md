@@ -4,113 +4,40 @@
 
 | Driver | Feature | Connection | Default |
 | --- | --- | --- | --- |
-| `Sqlx` | `sqlx` (on by default) | a `sqlx::SqlitePool` | yes |
-| `Native` | `native` | one `rusqlite::Connection` on its own thread | no |
+| `Native` | `native` (on by default) | one `rusqlite::Connection` on its own thread | yes |
+| `Sqlx` | `sqlx` (optional) | a `sqlx::SqlitePool` | no |
 
 The dialect, the DDL and introspection are shared. The choice is only about how a statement
-reaches the database, so the same typed query runs on either. `native` is additive: enabling it
-does not change what `Database` or `Sqlx` mean.
+reaches the database, so the same typed query runs on either. The native driver is the default,
+so `Database` names it. Adding the optional `sqlx` feature makes `Database` name `Sqlx`
+instead; `NativeDatabase` always names the native driver. Pick `Sqlx` when you want a pool.
 
-## A file, with sqlx
-
-```rust
-use besu_sqlite::Sqlx;
-
-let db = besu::Database::new(Sqlx::new("app.db").await?);
-```
-
-`Sqlx::new` takes any `AsRef<Path>`, creates the file if it does not exist, enables foreign
-keys and switches the journal to WAL. The path is a path, not a URL: `"app.db"`, not
-`"sqlite://app.db"`.
-
-## A connection string, with sqlx
-
-```rust
-let db = besu::Database::new(Sqlx::connect("sqlite://app.db").await?);
-```
-
-`Sqlx::connect` parses a URL, then applies `create_if_missing(true)` and `foreign_keys(true)`
-on top of whatever the URL said. It does not change the journal mode, so WAL is only on when
-you asked for it in the URL or used `Sqlx::new`.
-
-## In memory, with sqlx
-
-```rust
-let db = besu::Database::new(Sqlx::memory().await?);
-```
-
-`Sqlx::memory()` opens `:memory:` and is the right choice for tests. Because `:memory:` lives
-for exactly one connection, the driver pins the pool to a single connection and disables the
-idle timeout and maximum lifetime; a pool of several connections would give each statement its
-own empty database.
-
-## Your own pool
-
-`from_pool` takes an already-built `SqlitePool`, which is the only way to configure timeouts
-and connection limits. This needs `sqlx` as a direct dependency:
-
-```toml
-[dependencies]
-sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
-```
-
-```rust
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-let pool = SqlitePoolOptions::new()
-    .max_connections(4)
-    .acquire_timeout(std::time::Duration::from_secs(5))
-    .connect_with(
-        SqliteConnectOptions::new()
-            .filename("app.db")
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
-    )
-    .await?;
-
-let db = besu::Database::new(besu_sqlite::Sqlx::from_pool(pool));
-```
-
-Besu's own options are not merged into this pool: WAL is not enabled unless you set it here,
-exactly as with `Sqlx::connect`. sqlx already enables foreign keys on every connection it
-opens, so the pragma above is documentation as much as configuration.
-
-## The pool underneath
-
-```rust
-let pool = db.driver().pool();
-```
-
-`pool()` is there for anything Besu does not cover — closing the pool at shutdown, or handing
-a connection to a library that wants one. `db.driver()` is the `Sqlx`, so `pool()` is one
-method call away.
-
-## The native driver
-
-Enable the feature; it does not replace the sqlx driver.
-
-```toml
-[dependencies]
-besu-sqlite = { version = "0.1", features = ["native"] }
-```
+## A file, with the native driver
 
 ```rust
 use besu_sqlite::Native;
 
 let db = Native::open("app.db")?.database();
+```
+
+`Native::open` takes any `AsRef<Path>`, creates the file if it does not exist, enables foreign
+keys, sets a five-second busy timeout and switches the journal to WAL. The path is a path, not
+a URL: `"app.db"`, not `"sqlite://app.db"`.
+
+## In memory, with the native driver
+
+```rust
 let db: besu_sqlite::NativeDatabase = Native::in_memory()?.database();
 ```
 
-There are three constructors and they are synchronous, because opening a file is synchronous:
+`Native::in_memory()` opens `:memory:`. One connection means one database, so every clone of
+the driver sees the same tables; this is the driver to use in tests. Two calls are still two
+unrelated databases.
 
-- `Native::open(path)` (or its alias `Native::new(path)`) creates the file if it does not
-  exist, enables foreign keys, sets a five-second busy timeout and switches a file database to
-  WAL.
-- `Native::in_memory()` opens `:memory:`. One connection means one database, so every clone of
-  the driver sees the same tables; this is the driver to use in tests.
-- `Native::from_connection(connection)` takes a `rusqlite::Connection` you configured
-  yourself. It is moved to the driver's thread and cannot be used afterwards.
+## Your own connection
+
+`Native::from_connection(connection)` takes a `rusqlite::Connection` you configured yourself.
+It is moved to the driver's thread and cannot be used afterwards.
 
 `Native::database()` is a convenience for `besu::Database::new(Native::open(path)?)`.
 
@@ -147,6 +74,95 @@ the same as on sqlx.
   `PRAGMA foreign_keys`, which is per-connection state; the native driver runs every schema
   statement on its one connection, in order. A failure part-way still leaves the earlier
   statements applied, exactly as with sqlx. Only migrations run in a transaction.
+
+## The sqlx driver (optional)
+
+Enable the feature when you want a pool or an existing `sqlx::SqlitePool`; it does not remove
+the native driver.
+
+```toml
+[dependencies]
+besu-sqlite = { version = "0.1", features = ["sqlx"] }
+```
+
+sqlx needs a runtime, so `runtime-tokio` stays a default feature. If you set
+`default-features = false` to leave the native driver out, enable both:
+`features = ["sqlx", "runtime-tokio"]`.
+
+### A file
+
+```rust
+use besu_sqlite::Sqlx;
+
+let db = besu::Database::new(Sqlx::new("app.db").await?);
+```
+
+`Sqlx::new` takes any `AsRef<Path>`, creates the file if it does not exist, enables foreign
+keys and switches the journal to WAL. The path is a path, not a URL: `"app.db"`, not
+`"sqlite://app.db"`.
+
+### A connection string
+
+```rust
+let db = besu::Database::new(Sqlx::connect("sqlite://app.db").await?);
+```
+
+`Sqlx::connect` parses a URL, then applies `create_if_missing(true)` and `foreign_keys(true)`
+on top of whatever the URL said. It does not change the journal mode, so WAL is only on when
+you asked for it in the URL or used `Sqlx::new`.
+
+### In memory
+
+```rust
+let db = besu::Database::new(Sqlx::memory().await?);
+```
+
+`Sqlx::memory()` opens `:memory:` and is the right choice for tests that want the sqlx driver.
+Because `:memory:` lives for exactly one connection, the driver pins the pool to a single
+connection and disables the idle timeout and maximum lifetime; a pool of several connections
+would give each statement its own empty database.
+
+### Your own pool
+
+`from_pool` takes an already-built `SqlitePool`, which is the only way to configure timeouts
+and connection limits. This needs `sqlx` as a direct dependency:
+
+```toml
+[dependencies]
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+```
+
+```rust
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+let pool = SqlitePoolOptions::new()
+    .max_connections(4)
+    .acquire_timeout(std::time::Duration::from_secs(5))
+    .connect_with(
+        SqliteConnectOptions::new()
+            .filename("app.db")
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+    )
+    .await?;
+
+let db = besu::Database::new(besu_sqlite::Sqlx::from_pool(pool));
+```
+
+Besu's own options are not merged into this pool: WAL is not enabled unless you set it here,
+exactly as with `Sqlx::connect`. sqlx already enables foreign keys on every connection it
+opens, so the pragma above is documentation as much as configuration.
+
+### The pool underneath
+
+```rust
+let pool = db.driver().pool();
+```
+
+`pool()` is there for anything Besu does not cover — closing the pool at shutdown, or handing
+a connection to a library that wants one. `db.driver()` is the `Sqlx`, so `pool()` is one
+method call away.
 
 ## Transactions (either driver)
 
@@ -196,7 +212,7 @@ with no file, no pool and no runtime. Executing one returns an error that says t
   journal), and `Native::from_connection` leaves it as you configured it.
 - `push` executes each statement separately, so a failure part-way leaves the earlier
   statements applied. Only migration files run inside a transaction.
-- The `native` feature compiles SQLite from source (rusqlite's `bundled` feature), so the
-  first build is slower and the binary does not depend on a system SQLite. It is also why
-  rusqlite is pinned to the release that shares `libsqlite3-sys` 0.30 with sqlx 0.8: the two
-  drivers can be enabled together in one build.
+- The native driver compiles SQLite from source (rusqlite's `bundled` feature), so the first
+  build is slower and the binary does not depend on a system SQLite. It is also why rusqlite
+  is pinned to the release that shares `libsqlite3-sys` 0.30 with sqlx 0.8: the two drivers can
+  be enabled together in one build.

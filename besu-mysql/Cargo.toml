@@ -17,13 +17,18 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["sqlx", "runtime-tokio"]
-sqlx = ["dep:sqlx", "dep:num-traits"]
-runtime-tokio = ["sqlx?/runtime-tokio"]
-# The `mysql_async`-backed driver. Additive: it does not replace the sqlx driver, which
-# stays the default until the native one has proven itself. It uses `mysql_async` without a
-# TLS feature (`minimal-rust`), so TLS is an explicit opt-in rather than a hidden dependency.
+# The `mysql_async`-backed driver is the default. It uses `mysql_async` without a TLS feature
+# (`minimal-rust`), so TLS is an explicit opt-in rather than a hidden dependency.
+default = ["native", "runtime-tokio"]
 native = ["dep:mysql_async", "dep:futures-channel", "dep:tokio"]
+# The sqlx driver is an optional compatibility path. It is the one to choose when you want a
+# pool with TLS, or an existing `sqlx::MySqlPool`; when it is enabled, `Database` names it.
+sqlx = ["dep:sqlx", "dep:num-traits"]
+# This only affects the optional sqlx driver. `sqlx?` keeps it from turning sqlx on, so the
+# default build stays native-only. It is a default feature so that `--features sqlx` works
+# without also naming a runtime; with `default-features = false`, enable both `sqlx` and
+# `runtime-tokio` (sqlx panics at runtime without one).
+runtime-tokio = ["sqlx?/runtime-tokio"]
 
 [lints]
 workspace = true
@@ -37,6 +42,8 @@ besu = { workspace = true, features = ["derive", "migrate"] }
 [[bench]]
 name = "driver"
 harness = false
+# The benchmark measures the sqlx encoding path, so it only exists when sqlx does.
+required-features = ["sqlx"]
 
 [dependencies]
 besu-core = { workspace = true }

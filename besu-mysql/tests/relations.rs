@@ -1,6 +1,7 @@
 //! Eager loading against a real MySQL server, mirroring `besu-sqlite/tests/relations.rs`.
 //!
 //! Every test gets its own database, like the rest of this crate's suite.
+#![cfg(feature = "sqlx")]
 #![allow(
     missing_docs,
     clippy::unwrap_used,

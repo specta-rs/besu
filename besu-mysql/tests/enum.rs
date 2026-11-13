@@ -1,6 +1,7 @@
 //! An enum declared from Rust on MySQL: the labels are inline in the column, a value
 //! round-trips, introspection reads the same labels back, and a changed label set is one
 //! `ALTER COLUMN` rather than a rewritten table.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

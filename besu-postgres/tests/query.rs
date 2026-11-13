@@ -6,6 +6,7 @@
 )]
 
 //! Exercise the query layer end to end against a real PostgreSQL server.
+#![cfg(feature = "sqlx")]
 
 mod common;
 

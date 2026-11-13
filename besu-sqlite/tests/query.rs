@@ -4,7 +4,7 @@
     clippy::panic,
     clippy::too_many_arguments
 )]
-
+#![cfg(feature = "sqlx")]
 use besu::Driver;
 use besu::prelude::*;
 use besu::types::{Bool, Int8};

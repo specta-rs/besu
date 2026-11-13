@@ -1,6 +1,7 @@
 //! SQLite has no interval, address or bit-string type, so each is stored as its canonical
 //! text. This pins the fallback down: the declaration renders `TEXT`, a value round-trips,
 //! and the column converges against what `PRAGMA table_info` reports.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

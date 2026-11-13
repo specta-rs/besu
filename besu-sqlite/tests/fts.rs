@@ -3,6 +3,7 @@
 //! SQLite's `MATCH` is a property of the table rather than a function, so the table has to be
 //! an FTS5 one. The schema layer cannot declare a virtual table, so this creates it with raw
 //! SQL and queries it through an ordinary table handle.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

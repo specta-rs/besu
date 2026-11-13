@@ -8,17 +8,18 @@ dialect is a type, chosen at compile time; the driver is a value holding a pool.
 
 ```rust
 use besu::prelude::*;
-use besu_sqlite::Sqlx;
+use besu_sqlite::Native;
 
-let db = besu::Database::new(Sqlx::new("app.db").await?);
+let db = Native::open("app.db")?.database();
 
 let adults: Vec<User> = db.select(users).filter(users.age.gte(18)).await?;
 ```
 
-`Sqlx` is the driver: it knows how to connect, bind a `Value` and decode a row. `SQLite` is
+`Native` is the driver: it knows how to connect, bind a `Value` and decode a row. `SQLite` is
 the dialect: it knows how to spell `?`, `AUTOINCREMENT` and `BOOLEAN`, and it can render a
 query with no connection at all. `besu_sqlite::Database` is a type alias for
-`besu::Database<Sqlx>` if you prefer the short name.
+`besu::Database<Native>` if you prefer the short name. That is the default; `Sqlx`, behind the
+optional `sqlx` feature, is the same shape over a `sqlx::SqlitePool`.
 
 Nothing in the query code is dialect-specific, so the same function body works against every
 backend when it is generic over the driver:
@@ -40,7 +41,7 @@ The dialect comes back as soon as you name a driver, which is why one binary can
 | Crate | What it gives you |
 | --- | --- |
 | [`besu`](../../besu) | The builders, the expression DSL, `sql!`, and `#[derive(Table)]` |
-| [`besu-sqlite`](../../besu-sqlite) · [`besu-postgres`](../../besu-postgres) · [`besu-mysql`](../../besu-mysql) | A dialect, a sqlx driver, DDL generation and introspection |
+| [`besu-sqlite`](../../besu-sqlite) · [`besu-postgres`](../../besu-postgres) · [`besu-mysql`](../../besu-mysql) | A dialect, a native driver, DDL generation and introspection; `sqlx` is an optional feature |
 | [`besu-core`](../../besu-core) | `Dialect`, `Driver`, `Sql`, `Value`, `Decode`; no builder and no database |
 | [`besu-schema`](../../besu-schema) | The schema IR, the differ, the DDL trait and the migrator |
 | [`besu-any`](../../besu-any) | `AnyDatabase`: one enum over all three backends |
@@ -51,14 +52,17 @@ is on by default.
 
 ## Drivers
 
-Each driver crate has the same entry points, with per-database differences:
+Each driver crate has the same entry points, with per-database differences. The native driver
+is the default; enable the `sqlx` feature to build the sqlx driver instead or as well.
 
 | | SQLite | PostgreSQL | MySQL |
 | --- | --- | --- | --- |
-| File or URL | `Sqlx::new("app.db")` | `Sqlx::new(url)` | `Sqlx::new(url)` |
-| Connection string | `Sqlx::connect(url)` | `Sqlx::connect(url)` | `Sqlx::connect(url)` |
-| In memory | `Sqlx::memory()` | — | — |
-| Existing pool | `Sqlx::from_pool(pool)` | `Sqlx::from_pool(pool)` | `Sqlx::from_pool(pool)` |
+| Default driver | `Native` | `Native` | `Native` |
+| File or URL | `Native::open("app.db")` | `Native::new(url)` | `Native::new(url)` |
+| Connection string | — | `Native::connect(url)` | `Native::connect(url)` |
+| In memory | `Native::in_memory()` | — | — |
+| Existing connection | `Native::from_connection(conn)` | `Native::from_pool(pool)` | `Native::from_pool(pool)` |
+| Optional sqlx driver | `Sqlx` | `Sqlx` | `Sqlx` |
 
 `new` is not always a synonym for `connect`. On SQLite it takes a path and turns on foreign
 keys and WAL; on MySQL it pins the session to `utf8mb4` and UTC; on PostgreSQL it is an alias.
@@ -130,15 +134,16 @@ tx.commit().await?;
 schema `push` diffs, so one physical database can hold several tenants' tables:
 
 ```rust
-let db = besu::Database::prefixed(Sqlx::new("app.db").await?, "tenant_42_");
+let db = besu::Database::prefixed(Native::open("app.db")?, "tenant_42_");
 ```
 
 Hand-written migration SQL is not rewritten; write the prefix into it yourself.
 
 ## Gotchas
 
-- `Database::new` does not connect. Each `Sqlx::…` constructor has already opened a pool by
-  the time it returns, so a failed connection is a constructor error, not a query error.
+- `Database::new` does not connect. Every driver constructor has already opened its connection
+  (or pool) by the time it returns, so a failed connection is a constructor error, not a query
+  error.
 - `Database` is not `Clone`: a builder borrows it, so a second handle comes from
   `driver().clone()`, which shares the same pool.
 - The capability constants on `Dialect` (`SUPPORTS_RETURNING`, `SUPPORTS_ILIKE`,

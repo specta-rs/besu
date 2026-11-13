@@ -3,6 +3,7 @@
 //! MySQL has no `RETURNING`, so a batch that wants to read what it just wrote does it with a
 //! plain `INSERT` followed by a `SELECT` in the same transaction — which is exactly the shape
 //! this file pins down.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

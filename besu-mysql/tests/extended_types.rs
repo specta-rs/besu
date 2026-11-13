@@ -1,4 +1,5 @@
 //! MySQL's own type system: the inline `SET` and the fixed-width `BIT`.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

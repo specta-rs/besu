@@ -6,6 +6,7 @@
 )]
 
 //! Eager loading against a real PostgreSQL server, mirroring `besu-sqlite/tests/relations.rs`.
+#![cfg(feature = "sqlx")]
 
 mod common;
 

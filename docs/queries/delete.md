@@ -30,7 +30,7 @@ db.delete(users).await?;
 ```
 
 ```text
-error[E0277]: `Delete<'_, &Database<Sqlx>, UserTable>` is not a future
+error[E0277]: `Delete<'_, &Database<Native>, UserTable>` is not a future
 ```
 
 The two ways to make it runnable:

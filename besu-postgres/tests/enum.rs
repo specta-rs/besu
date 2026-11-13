@@ -1,6 +1,7 @@
 //! A PostgreSQL enum declared from Rust: the labels become a named type, the column names
 //! it, introspection reports it as a `Custom` type, and a changed label set is an
 //! `ALTER TYPE ... ADD VALUE`.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 mod common;

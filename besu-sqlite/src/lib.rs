@@ -2,31 +2,35 @@
 //!
 //! The dialect and the DDL are always available. Execution comes in two flavours:
 //!
-//! - [`Sqlx`], behind the default `sqlx` feature, is a `sqlx::SqlitePool`. It remains the
-//!   default driver.
-//! - `Native`, behind the additive `native` feature, is `rusqlite` on a dedicated
+//! - `Native`, behind the default `native` feature, is `rusqlite` on a dedicated
 //!   connection thread. It has no sqlx in its path, a single connection instead of a pool,
 //!   and `:memory:` works because that connection is the only one.
-//!
-//! ```no_run
-//! use besu::prelude::*;
-//! use besu_sqlite::{Database, Sqlx};
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = Database::new(Sqlx::new("app.db").await?);
-//! # Ok(())
-//! # }
-//! ```
+//! - `Sqlx`, behind the optional `sqlx` feature, is a `sqlx::SqlitePool`. Choose it when
+//!   you want a pool or an existing `sqlx::SqlitePool`; while the feature is on, `Database`
+//!   names this driver.
 //!
 //! ```no_run
 //! # #[cfg(feature = "native")]
 //! # {
 //! use besu::prelude::*;
-//! use besu_sqlite::{NativeDatabase, Native};
+//! use besu_sqlite::{Native, NativeDatabase};
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // The constructors are synchronous: the connection is opened and moved to its thread.
 //! let db: NativeDatabase = Native::open("app.db")?.database();
+//! # Ok(())
+//! # }
+//! # }
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "sqlx")]
+//! # {
+//! use besu::prelude::*;
+//! use besu_sqlite::{Database, Sqlx};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = Database::new(Sqlx::new("app.db").await?);
 //! # Ok(())
 //! # }
 //! # }
@@ -132,15 +136,17 @@ pub use sqlx::arguments_for_bench;
 
 /// A [`besu::Database`] backed by SQLite's sqlx driver.
 ///
-/// This is the default whenever the `sqlx` feature is on, including when `native` is also
-/// enabled. Use `NativeDatabase` to name the native driver explicitly.
+/// This is `Database` whenever the `sqlx` feature is on, including when `native` is also
+/// enabled. The default build has only `native`, so there `Database` names the native driver;
+/// use `NativeDatabase` to name it explicitly in every build.
 #[cfg(feature = "sqlx")]
 pub type Database = besu::Database<Sqlx>;
 
 /// A [`besu::Database`] backed by SQLite's native driver.
 ///
-/// This is `Database` only when `native` is enabled without `sqlx`; with both features on,
-/// `Database` is the sqlx driver and this alias is the way to name the native one.
+/// This is `Database` whenever the `sqlx` feature is off, which is the default build. With
+/// both features on, `Database` is the sqlx driver and this alias is the way to name the
+/// native one.
 #[cfg(all(feature = "native", not(feature = "sqlx")))]
 pub type Database = besu::Database<Native>;
 

@@ -43,8 +43,8 @@ tx.commit().await?;
 // `tx` is gone; the compiler will not let you touch it.
 ```
 
-Dropping a `Transaction` without committing rolls back. The underlying sqlx transaction does
-that on drop and Besu does not change it. It is a safety net, not a substitute for saying what
+Dropping a `Transaction` without committing rolls back. The driver's transaction does that on
+drop and Besu does not change it. It is a safety net, not a substitute for saying what
 you mean: an explicit `rollback` reports its error, a drop cannot.
 
 ## The `transaction()` helper
@@ -73,12 +73,13 @@ back and returns the original error; a failure of the rollback itself is discard
 the error you asked about is the useful one.
 
 The error type is the driver's, so `?` works whenever the surrounding function returns that
-type (or boxes it). Where inference needs help, name it:
+type (or boxes it). The snippets below name `besu_sqlite::NativeError`; substitute the error
+of the driver you use. Where inference needs help, name it:
 
 ```rust
 db.transaction(async |tx| {
     tx.insert(users).value(users.insert(..)).await?;
-    Ok::<(), sqlx::Error>(())
+    Ok::<(), besu_sqlite::NativeError>(())
 })
 .await?;
 ```
@@ -127,11 +128,13 @@ db.transaction(async |tx| {
     let _ = tx
         .transaction(async |tx| {
             tx.insert(audit).value(audit.insert(..)).await?;
-            Err::<(), _>(sqlx::Error::Protocol("audit unavailable".into()))
+            Err::<(), _>(besu_sqlite::NativeError::Core(besu::Error::Unsupported(
+        "audit unavailable".into(),
+    )))
         })
         .await;
 
-    Ok::<(), sqlx::Error>(())
+    Ok::<(), besu_sqlite::NativeError>(())
 })
 .await?;
 ```
@@ -143,7 +146,7 @@ when several nest.
 // inside a transaction
 tx.savepoint("import_batch", async |tx| {
     tx.insert(imports).values(..).await?;
-    Ok::<(), sqlx::Error>(())
+    Ok::<(), besu_sqlite::NativeError>(())
 })
 .await?;
 ```
@@ -179,8 +182,8 @@ already gives the release point a scope. A `Drop` guard could not release it any
 ## Gotchas
 
 - **Do not use `db` for work that belongs to `tx`.** On a pool, `db` checks out a different
-  connection and cannot see uncommitted data. On SQLite in-memory, `Sqlx::memory()` pins the
-  pool to one connection, so the two may accidentally work — do not rely on it.
+  connection and cannot see uncommitted data. On SQLite in-memory, the native driver has
+  exactly one connection, so the two may accidentally work — do not rely on it.
 - **`commit` can fail.** A deferred constraint or a lost connection surfaces there, after
   every statement succeeded. Handle the error from `commit`, not only the ones inside the
   transaction.

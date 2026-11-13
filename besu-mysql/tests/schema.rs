@@ -1,5 +1,6 @@
 //! Schema fidelity on MySQL: functional and composite indexes round-trip, access methods
 //! round-trip, generated columns converge, and views are created, replaced and dropped.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::TypeDef;

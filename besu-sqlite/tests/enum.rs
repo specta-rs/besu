@@ -1,5 +1,6 @@
 //! An enum declared from Rust on SQLite: there is no enum type, so the label is stored in a
 //! `TEXT` column and round-trips through the model.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

@@ -2,49 +2,16 @@
 
 `besu_postgres` ships two drivers for the same dialect:
 
-- `Sqlx` wraps a sqlx `PgPool`. It is behind the default `sqlx` feature and stays the
-  default when `native` is also enabled.
-- `Native` wraps a `deadpool-postgres` pool of `tokio-postgres` connections. It is behind
-  the additive `native` feature and has no sqlx in its path.
+- `Native` wraps a `deadpool-postgres` pool of `tokio-postgres` connections. It is the default
+  and has no sqlx in its path.
+- `Sqlx` wraps a sqlx `PgPool`. It is behind the optional `sqlx` feature and is the driver to
+  choose for TLS or an existing `sqlx::PgPool`. While that feature is on, `Database` names it;
+  `NativeDatabase` always names the native driver.
 
 A URL is all either one needs. Everything below applies to both unless a section says
 otherwise.
 
 ## A URL
-
-```rust
-use besu_postgres::Sqlx;
-
-let db = besu::Database::new(
-    Sqlx::connect("postgres://besu:besu@localhost:5432/besu").await?,
-);
-```
-
-`Sqlx::new` is an alias for `Sqlx::connect`, so either name works. The URL carries TLS mode
-and the application name in its query string, which is how sqlx expects them:
-
-```rust
-let db = besu::Database::new(
-    Sqlx::connect("postgres://besu:besu@db.internal/app?sslmode=require").await?,
-);
-```
-
-Reading it from the environment is the usual shape, and it keeps the password out of the
-binary:
-
-```rust
-let url = std::env::var("DATABASE_URL")?;
-let db = besu::Database::new(Sqlx::connect(&url).await?);
-```
-
-## The native driver
-
-Enable the feature and use the same URL:
-
-```toml
-[dependencies]
-besu-postgres = { version = "0.1", features = ["native"] }
-```
 
 ```rust
 use besu_postgres::Native;
@@ -57,6 +24,14 @@ let db = besu::Database::new(
 `Native::new` is the alias, and `Native::database()` is shorthand for wrapping the driver in
 a `besu::Database`. The constructor opens one connection before returning, so a typo in the
 URL fails there rather than at the first query.
+
+Reading it from the environment is the usual shape, and it keeps the password out of the
+binary:
+
+```rust
+let url = std::env::var("DATABASE_URL")?;
+let db = besu::Database::new(Native::connect(&url).await?);
+```
 
 The pool holds at most ten connections and is shared by every clone of the driver.
 `Native::pool()` hands back the `deadpool_postgres::Pool`, and `Native::from_pool` wraps one
@@ -80,12 +55,43 @@ let pool = Pool::builder(manager)
 let db = besu::Database::new(Native::from_pool(pool));
 ```
 
-Unlike the sqlx driver, the native one does not expose TLS yet: it uses
-`tokio_postgres::NoTls`. A URL that requires TLS fails to connect rather than silently
-falling back to plaintext. TLS is a real API decision — a feature, a connector argument and
-an `sslmode` story — and is deliberately left for a later change.
+The native driver does not expose TLS: it uses `tokio_postgres::NoTls`. A URL that requires
+TLS fails to connect rather than silently falling back to plaintext. TLS is a real API
+decision — a feature, a connector argument and an `sslmode` story — and is deliberately left
+for a later change. The optional sqlx driver is the way to get it today.
 
-## Your own pool
+## The sqlx driver (optional)
+
+Enable the feature when you want TLS or an existing `sqlx::PgPool`; it does not remove the
+native driver.
+
+```toml
+[dependencies]
+besu-postgres = { version = "0.1", features = ["sqlx"] }
+```
+
+sqlx needs a runtime, so `runtime-tokio` stays a default feature. If you set
+`default-features = false` to leave the native driver out, enable both:
+`features = ["sqlx", "runtime-tokio"]`.
+
+```rust
+use besu_postgres::Sqlx;
+
+let db = besu::Database::new(
+    Sqlx::connect("postgres://besu:besu@localhost:5432/besu").await?,
+);
+```
+
+`Sqlx::new` is an alias for `Sqlx::connect`, so either name works. The URL carries TLS mode
+and the application name in its query string, which is how sqlx expects them:
+
+```rust
+let db = besu::Database::new(
+    Sqlx::connect("postgres://besu:besu@db.internal/app?sslmode=require").await?,
+);
+```
+
+### Your own pool
 
 `Sqlx::from_pool` is the sqlx escape hatch. It is the only way to change the sqlx connection
 limit, the acquire timeout or the idle timeout, and it needs `sqlx` as a direct dependency:
@@ -107,7 +113,7 @@ let pool = PgPoolOptions::new()
 let db = besu::Database::new(besu_postgres::Sqlx::from_pool(pool));
 ```
 
-## The pool underneath
+## The pool underneath (either driver)
 
 ```rust
 let pool = db.driver().pool();
@@ -174,8 +180,7 @@ parameter-shape suffix, with no server and no runtime.
   several pools, each with ten connections.
 - The native driver has no TLS. A connection string that asks for `sslmode=require` is
   rejected by the server rather than downgraded, but there is no way to complete the
-  handshake until a TLS feature exists.
+  handshake until a TLS feature exists. Use the optional sqlx driver if you need it now.
 - Streaming on the native driver keeps a pooled connection checked out until the stream (and
   every row in it) is dropped. A leaked stream is a leaked connection; the `Rows` type from
   `Database::stream` makes the end of the stream explicit.
-

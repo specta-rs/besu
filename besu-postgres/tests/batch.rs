@@ -3,6 +3,7 @@
 //! The batch used to hold writes only. These tests pin the read half down where it matters:
 //! a `SELECT` element runs inside the same transaction as the writes before it, decodes into
 //! the tuple, and commits or rolls back with them.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 mod common;

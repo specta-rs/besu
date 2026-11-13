@@ -1,5 +1,6 @@
 //! Schema fidelity on SQLite: the objects the IR cannot express are skipped by
 //! introspection, and a declared schema that matches the database converges.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

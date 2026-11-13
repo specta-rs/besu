@@ -3,6 +3,7 @@
 //! The point of these tests is the guarantees, not the ergonomics: the same seed produces the
 //! same rows, a unique column does not collide, and a foreign key always points at a row that
 //! was actually inserted.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use std::collections::HashSet;

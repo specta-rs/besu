@@ -1,6 +1,7 @@
 //! SQLite has no range, spatial or vector type. A range and a vector are stored in `TEXT`,
 //! a spatial value in a `BLOB`, and the declaration folds onto that storage so `push`
 //! converges. This pins the fallback down.
+#![cfg(feature = "sqlx")]
 #![allow(
     missing_docs,
     clippy::panic,

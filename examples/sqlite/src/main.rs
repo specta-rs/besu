@@ -3,7 +3,7 @@
 //! Run it with `cargo run -p example-sqlite`.
 
 use besu::prelude::*;
-use besu_sqlite::Sqlx;
+use besu_sqlite::Native;
 
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "users")]
@@ -35,7 +35,9 @@ pub struct Post {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = besu::Database::new(Sqlx::memory().await?);
+    // The native driver is the default. `:memory:` is one database here because the driver
+    // owns exactly one connection.
+    let db = Native::in_memory()?.database();
 
     // Create both tables, or apply whatever has changed since the last run.
     //

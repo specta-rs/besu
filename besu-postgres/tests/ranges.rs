@@ -1,5 +1,6 @@
 //! PostgreSQL's six built-in range types: the binary format, the text form, arrays of
 //! ranges, introspection and `push` convergence.
+#![cfg(feature = "sqlx")]
 #![allow(
     missing_docs,
     clippy::panic,

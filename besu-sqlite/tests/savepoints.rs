@@ -1,4 +1,5 @@
 //! Nested transactions, which every supported database spells as savepoints.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

@@ -1,4 +1,5 @@
 //! MySQL's spatial types, and its text storage for ranges and vectors.
+#![cfg(feature = "sqlx")]
 #![allow(
     missing_docs,
     clippy::panic,

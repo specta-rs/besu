@@ -6,6 +6,7 @@
 )]
 
 //! Eager loading against SQLite: one batched second statement per relation.
+#![cfg(feature = "sqlx")]
 
 use besu::prelude::*;
 use besu_sqlite::Sqlx;

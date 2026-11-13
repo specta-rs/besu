@@ -2,24 +2,11 @@
 //!
 //! The dialect and the DDL are always available. Execution comes in two flavours:
 //!
-//! - `Sqlx`, behind the default `sqlx` feature, is a `sqlx::MySqlPool`. It remains the
-//!   default driver.
-//! - `Native`, behind the additive `native` feature, is a `mysql_async::Pool`. It has no
-//!   sqlx in its path, decodes the server's own binary values and keeps a statement cache per
+//! - `Native`, behind the default `native` feature, is a `mysql_async::Pool`. It has no sqlx
+//!   in its path, decodes the server's own binary values and keeps a statement cache per
 //!   connection.
-//!
-//! ```no_run
-//! # #[cfg(feature = "sqlx")]
-//! # {
-//! use besu::prelude::*;
-//! use besu_mysql::{Database, Sqlx};
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = Database::new(Sqlx::new("mysql://root:password@localhost/app").await?);
-//! # Ok(())
-//! # }
-//! # }
-//! ```
+//! - `Sqlx`, behind the optional `sqlx` feature, is a `sqlx::MySqlPool`. Choose it for TLS or
+//!   an existing `sqlx::MySqlPool`; while the feature is on, `Database` names this driver.
 //!
 //! ```no_run
 //! # #[cfg(feature = "native")]
@@ -31,6 +18,19 @@
 //! let db: NativeDatabase = Native::new("mysql://root:password@localhost/app")
 //!     .await?
 //!     .database();
+//! # Ok(())
+//! # }
+//! # }
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "sqlx")]
+//! # {
+//! use besu::prelude::*;
+//! use besu_mysql::{Database, Sqlx};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = Database::new(Sqlx::new("mysql://root:password@localhost/app").await?);
 //! # Ok(())
 //! # }
 //! # }
@@ -92,15 +92,17 @@ pub use sqlx::arguments_for_bench;
 
 /// A [`besu::Database`] backed by MySQL's sqlx driver.
 ///
-/// This is the default whenever the `sqlx` feature is on, including when `native` is also
-/// enabled. Use `NativeDatabase` to name the native driver explicitly.
+/// This is `Database` whenever the `sqlx` feature is on, including when `native` is also
+/// enabled. The default build has only `native`, so there `Database` names the native driver;
+/// use `NativeDatabase` to name it explicitly in every build.
 #[cfg(feature = "sqlx")]
 pub type Database = besu::Database<Sqlx>;
 
 /// A [`besu::Database`] backed by MySQL's native driver.
 ///
-/// This is `Database` only when `native` is enabled without `sqlx`; with both features on,
-/// `Database` is the sqlx driver and this alias is the way to name the native one.
+/// This is `Database` whenever the `sqlx` feature is off, which is the default build. With
+/// both features on, `Database` is the sqlx driver and this alias is the way to name the
+/// native one.
 #[cfg(all(feature = "native", not(feature = "sqlx")))]
 pub type Database = besu::Database<Native>;
 

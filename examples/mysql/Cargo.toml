@@ -6,5 +6,6 @@ publish = false
 
 [dependencies]
 besu = { workspace = true, features = ["derive", "migrate"] }
-besu-mysql = { workspace = true, features = ["sqlx", "runtime-tokio"] }
+# The examples use the default native driver on purpose: it is what a new dependency gets.
+besu-mysql = { workspace = true, features = ["native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

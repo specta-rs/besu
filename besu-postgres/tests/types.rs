@@ -6,6 +6,7 @@
 )]
 
 //! Round-trip every supported column type through PostgreSQL.
+#![cfg(feature = "sqlx")]
 
 mod common;
 

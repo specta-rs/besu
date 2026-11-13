@@ -1,5 +1,6 @@
 //! Round-trip the types that arrived after the primitives: interval, network addresses and
 //! bit strings, plus a domain whose value is read through its base type.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 mod common;

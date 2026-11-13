@@ -51,8 +51,8 @@ jobs:
       - name: Check besu with every feature
         run: cargo check --target wasm32-unknown-unknown -p besu --all-features --all-targets
       # A browser needs a real dialect to spell `?`, `$1` and `` ` `` correctly, and the
-      # driver feature is what carries sqlx, tokio and mio. Turning it off leaves the
-      # dialect and the DDL, which are pure `alloc`.
+      # driver features are what carry rusqlite, sqlx, tokio and sockets. Turning them off
+      # leaves the dialect and the DDL, which are pure `alloc`.
       - name: Check the SQLite dialect without its driver
         run: cargo check --target wasm32-unknown-unknown -p besu-sqlite --no-default-features
       - name: Check the PostgreSQL dialect without its driver

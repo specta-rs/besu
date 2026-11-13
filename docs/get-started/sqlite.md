@@ -13,8 +13,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 `besu` enables `derive` and `migrate` by default: `derive` gives you `#[derive(Table)]`, and
-`migrate` gives you `push`, `introspect` and `migrate`. `besu-sqlite` enables `sqlx` and
-`runtime-tokio` by default; turning `sqlx` off leaves the dialect and the DDL without a driver.
+`migrate` gives you `push`, `introspect` and `migrate`. `besu-sqlite` enables the `native`
+driver by default: a `rusqlite` connection on its own thread. Turn on its `sqlx` feature only
+if you want a `sqlx::SqlitePool`; the dialect and the DDL are available either way.
 
 ## Define a table
 
@@ -46,14 +47,14 @@ The derive emits the row type, a `users` handle whose fields are typed column re
 ## Connect
 
 ```rust
-use besu_sqlite::Sqlx;
+use besu_sqlite::Native;
 
-let db = besu::Database::new(Sqlx::memory().await?);
+let db = Native::in_memory()?.database();
 ```
 
-`Sqlx::new("app.db")` opens or creates a file with foreign keys enforced and WAL journalling.
-`Sqlx::connect("sqlite://app.db")` parses a connection string, and `Sqlx::memory()` is the
-in-memory shorthand. See [connecting to SQLite](../connect/sqlite.md) for pool options.
+`Native::open("app.db")` opens or creates a file with foreign keys enforced and WAL
+journalling, and `Native::in_memory()` is the in-memory shorthand. See
+[connecting to SQLite](../connect/sqlite.md) for the sqlx pool options.
 
 ## Create the table
 
@@ -167,3 +168,4 @@ cannot quietly pretend a write succeeded.
   dialect-specific even though the builder is not.
 - A `Sqlx::memory()` database lives on exactly one connection because the driver pins the pool
   to `max_connections(1)`; a pool over `:memory:` would otherwise open several empty databases.
+  The default `Native::in_memory()` avoids the question: there is only one connection.

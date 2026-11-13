@@ -6,9 +6,10 @@ statement, and that is a good cache key.
 
 ## What the driver already caches
 
-sqlx prepares each statement and caches the prepared form per SQL *string*. That is why
-repeating a query shape is cheaper than inventing a new one per call, and why the PostgreSQL
-dialect appends a type suffix to statements whose parameter types can vary: two statements with
+The drivers prepare each statement, and some cache the prepared form per SQL *string* (sqlx
+on every backend, and the native MySQL driver per connection). That is why repeating a query
+shape is cheaper than inventing a new one per call, and why the PostgreSQL dialect appends a
+type suffix to statements whose parameter types can vary: two statements with
 identical text but different bound types must not share one cache entry. The cache belongs to
 the driver; Besu exposes no `prepare` handle of its own.
 
@@ -31,7 +32,7 @@ pub struct User {
 }
 
 async fn users_older_than(
-    db: &besu::Database<besu_sqlite::Sqlx>,
+    db: &besu::Database<besu_sqlite::Native>,
     cache: &mut HashMap<String, Vec<User>>,
     min_age: i32,
 ) -> Result<Vec<User>, Box<dyn std::error::Error>> {

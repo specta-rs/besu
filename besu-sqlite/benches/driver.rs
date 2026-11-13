@@ -6,6 +6,7 @@
 //! The `query` group needs a real SQLite file. Set `BESU_SQLITE_BENCH_URL` to a path — for
 //! example `/tmp/besu-bench.db` — and it runs against that file; leave it unset and the group
 //! is skipped, so `cargo bench -p besu-sqlite` works on a machine with nothing set up.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use std::{hint::black_box, path::PathBuf};

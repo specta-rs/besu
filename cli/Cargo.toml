@@ -23,6 +23,10 @@ besu = { workspace = true, features = ["derive", "migrate"] }
 besu-any = { workspace = true }
 besu-core = { workspace = true }
 besu-schema = { workspace = true }
+# The CLI shares `AnyDatabase`, whose API is typed in `sqlx::Error`, so every driver stays on
+# the sqlx path here. The drivers' default is native; `sqlx` is opt-in, and `runtime-tokio`
+# gives sqlx its runtime. Naming `sqlx` explicitly also keeps `Database` on the sqlx driver
+# if a workspace-wide build happens to enable `native` at the same time.
 besu-postgres = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 besu-mysql = { workspace = true, features = ["sqlx", "runtime-tokio"] }
 besu-sqlite = { workspace = true, features = ["sqlx", "runtime-tokio"] }

@@ -1,8 +1,8 @@
 # besu-sqlite
 
 The SQLite dialect, DDL generation, introspection and drivers for Besu. The default driver is
-sqlx; the additive `native` feature swaps in a `rusqlite` driver on a dedicated connection
-thread, with no sqlx in its path.
+`Native`, a `rusqlite` connection on a dedicated thread with no sqlx in its path. The optional
+`sqlx` feature adds a `sqlx::SqlitePool` driver for code that wants a pool.
 
 Part of [Besu](https://github.com/specta-rs/besu), a typesafe, async, database-agnostic SQL
 query builder for Rust. The query you write is the SQL that runs.

@@ -3,6 +3,7 @@
 //! The point of these tests is the guarantee, not the ergonomics: a batch either lands
 //! whole or leaves nothing behind. The generated-SQL test pins the text each statement in
 //! the tuple renders to, which is also the text the driver sends.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::Batch;

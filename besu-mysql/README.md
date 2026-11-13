@@ -1,8 +1,8 @@
 # besu-mysql
 
-The MySQL dialect, sqlx and `mysql_async` drivers, DDL generation and introspection for Besu.
-The default driver is sqlx; the additive `native` feature swaps in a `mysql_async` pool with
-no sqlx in its path.
+The MySQL dialect and drivers, DDL generation and introspection for Besu. The default driver
+is `Native`, a `mysql_async` pool with no sqlx in its path. The optional `sqlx` feature adds a
+`sqlx::MySqlPool` driver for code that wants sqlx's pool and TLS story.
 
 Part of [Besu](https://github.com/specta-rs/besu), a typesafe, async, database-agnostic SQL
 query builder for Rust. The query you write is the SQL that runs.

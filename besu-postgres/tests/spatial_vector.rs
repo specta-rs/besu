@@ -1,5 +1,6 @@
 //! PostGIS and `pgvector` columns. Both are extension types, so each test skips (with a
 //! message) when the server does not have the extension installed.
+#![cfg(feature = "sqlx")]
 #![allow(
     missing_docs,
     clippy::panic,

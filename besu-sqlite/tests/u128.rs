@@ -1,4 +1,5 @@
 //! 128-bit integers through SQLite, where they are stored as decimal text.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;

@@ -114,6 +114,21 @@ The layers are deliberately independent. `besu-core` knows nothing about the que
 knows nothing about sqlx, and each driver knows nothing about the others. Use the whole stack, or
 take just the layer you need — including writing your own driver against `besu-core`.
 
+## Drivers
+
+Each database crate ships a native driver and makes it the default. sqlx is an optional
+compatibility path for code that wants its pool or TLS story:
+
+| Crate | Default driver | Optional driver |
+| ----- | -------------- | --------------- |
+| `besu-sqlite` | `Native`: `rusqlite` on a dedicated connection thread | `Sqlx`: a `sqlx::SqlitePool`, behind the `sqlx` feature |
+| `besu-postgres` | `Native`: `tokio-postgres` over a `deadpool-postgres` pool, `NoTls` | `Sqlx`: a `sqlx::PgPool`, behind the `sqlx` feature |
+| `besu-mysql` | `Native`: a `mysql_async` pool, no TLS | `Sqlx`: a `sqlx::MySqlPool`, behind the `sqlx` feature |
+
+`Database` names the native driver in the default build and the sqlx driver when `sqlx` is
+enabled; `NativeDatabase` always names the native one. The dialect, the DDL and introspection
+are shared, so a query renders and decodes the same on either.
+
 ## Driverless SQL
 
 Because a dialect can render a query with no connection, you can hand-check the SQL in a unit test:

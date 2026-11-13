@@ -173,7 +173,7 @@ impl Native {
     /// Open a SQLite database file behind the native driver.
     ///
     /// The file is created if it does not exist, foreign keys are enabled, and the journal
-    /// is switched to WAL. Those are the same defaults as [`crate::Sqlx::new`].
+    /// is switched to WAL. Those are the same defaults as `Sqlx::new`.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, NativeError> {
         Self::open(path)
     }

@@ -3,7 +3,7 @@
 //! Run it with `cargo run -p example-mysql`.
 
 use besu::prelude::*;
-use besu_mysql::Sqlx;
+use besu_mysql::Native;
 
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "users")]
@@ -37,7 +37,8 @@ pub struct Post {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "mysql://root:besu@localhost:53306/besu".to_string());
-    let db = besu::Database::new(Sqlx::connect(&url).await?);
+    // The native driver is the default.
+    let db = Native::new(&url).await?.database();
 
     // Create both tables, or apply whatever has changed since the last run.
     //

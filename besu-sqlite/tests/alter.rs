@@ -1,4 +1,5 @@
 //! Changing a column, which on SQLite means rebuilding the table.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 // The derive emits a module with `use super::*;`, and when its model lives in another
 // module the compiler reports that glob as an unused import of the model.

@@ -1,4 +1,5 @@
 //! The migration runner, end to end against a real database.
+#![cfg(feature = "sqlx")]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
