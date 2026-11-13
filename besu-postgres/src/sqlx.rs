@@ -415,6 +415,36 @@ impl sqlx::Encode<'_, SqlxPostgres> for UntypedNull {
     }
 }
 
+/// A text parameter with no declared SQL type.
+///
+/// PostgreSQL infers a parameter's type from the statement when it is sent untyped (OID 0),
+/// which is what an enum's label needs: the type is the column's enum, and a parameter
+/// declared `TEXT` is not assignable to an enum without a cast. Every parameter is sent in
+/// PostgreSQL's binary format, and the binary form of a text-like type — `TEXT`, `VARCHAR`
+/// and an enum alike — is its UTF-8 bytes.
+#[derive(Debug, Clone, Copy)]
+struct UntypedText<'a>(&'a str);
+
+impl sqlx::Type<SqlxPostgres> for UntypedText<'_> {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for UntypedText<'_> {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buffer.extend_from_slice(self.0.as_bytes());
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// An integer bound as `NUMERIC`, encoded directly into PostgreSQL's binary wire format.
 ///
 /// sqlx ships no `u64`/`u128` support for PostgreSQL because the type system has no
@@ -546,6 +576,7 @@ fn encoded_size(value: &Value) -> usize {
         Value::UInt(_) => LENGTH_PREFIX + 8 + 5 * 2,
         Value::UInt128(_) | Value::Int128(_) => LENGTH_PREFIX + 8 + NUMERIC_GROUPS * 2,
         Value::Text(v) => LENGTH_PREFIX + v.len(),
+        Value::EnumLabel(v) => LENGTH_PREFIX + v.len(),
         Value::Bytes(v) => LENGTH_PREFIX + v.len(),
         Value::Uuid(_) => LENGTH_PREFIX + 16,
         Value::Date(_) => LENGTH_PREFIX + 4,
@@ -577,6 +608,7 @@ fn element_size(value: &Value) -> usize {
         Value::Int(_) | Value::Float(_) => 8,
         Value::UInt(_) | Value::UInt128(_) | Value::Int128(_) | Value::Decimal(_) => 8 + 20,
         Value::Text(v) => v.len(),
+        Value::EnumLabel(v) => v.len(),
         Value::Bytes(v) => v.len(),
         Value::Uuid(_) => 16,
         Value::Date(_) => 4,
@@ -610,6 +642,9 @@ pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Int128(v) => add(&mut arguments, Numeric::signed(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
+            // An enum's label has no type of its own: it is bound untyped so the server
+            // infers the enum from the column it is written to or compared with.
+            Value::EnumLabel(v) => add(&mut arguments, UntypedText(v.as_str()))?,
             // A `Decimal` column is `NUMERIC`, and PostgreSQL has no implicit `text` to
             // `numeric` cast, so the digits are written in the binary format directly.
             Value::Decimal(v) => add(&mut arguments, NumericText { text: v.as_str() })?,
@@ -678,6 +713,12 @@ impl Driver for Sqlx {
                 .map(|column| column.name().to_owned())
                 .collect(),
         )
+    }
+
+    fn decode_text(row: &Self::Row, index: usize) -> Result<String, Self::Error> {
+        // Unchecked, because the type this reads from is not `TEXT`: an enum column is a
+        // named type whose binary form is still the label's UTF-8 bytes.
+        row.try_get_unchecked(index)
     }
 
     async fn query(&self, sql: &Sql<Postgres>) -> Result<Vec<Self::Row>, Self::Error> {

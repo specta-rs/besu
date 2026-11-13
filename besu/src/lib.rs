@@ -102,8 +102,8 @@ pub use besu_core::schema::{
     IndexKind, ReferenceAction,
 };
 pub use besu_core::{
-    self, Decode, Dialect, Driver, Error, Executor, Sql, TableDef, TransactionDriver, TypeDef,
-    Value,
+    self, Decode, Dialect, Driver, EnumDef, EnumLabels, Error, Executor, Sql, TableDef,
+    TransactionDriver, TypeDef, Value,
 };
 pub use besu_core::{RowStream, Stream, futures_stream};
 #[cfg(feature = "migrate")]
@@ -152,9 +152,16 @@ pub use seed::{Seed, SeedError, SeedReport, TableSeed, seed};
 pub use selection::Selection;
 pub use stream::Rows;
 pub use table::{Insertable, Set, Table, TableRef};
-pub use types::{Column, NonNull, Nullability, Nullable, SqlType, TypeWitness};
+pub use types::{
+    Column, NonNull, Nullability, Nullable, SqlEnum, SqlType, TypeWitness, UnknownLabel,
+};
 
 /// Derive a [`Table`] from a struct.
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use besu_macros::Table;
+
+/// Derive [`SqlEnum`] from an enum, so its variants become a SQL enum's labels.
+#[cfg(feature = "derive")]
+#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
+pub use besu_macros::SqlEnum;

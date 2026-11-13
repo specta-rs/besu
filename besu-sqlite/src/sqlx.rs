@@ -122,6 +122,8 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             Value::Int128(v) => add(&mut arguments, v.to_string())?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
+            // SQLite stores an enum's label in a `TEXT` column, so it binds like text.
+            Value::EnumLabel(v) => add(&mut arguments, v.as_str())?,
             // SQLite has no decimal type: `DECIMAL` is declared as `TEXT`, so the exact
             // digits are bound as text and never pass through a float.
             Value::Decimal(v) => add(&mut arguments, v.as_str())?,
@@ -196,6 +198,11 @@ impl Driver for Sqlx {
                 .map(|column| column.name().to_owned())
                 .collect(),
         )
+    }
+
+    fn decode_text(row: &Self::Row, index: usize) -> Result<String, Self::Error> {
+        let mut offset = index;
+        <String as Decode<Self>>::decode(row, &mut offset)
     }
 
     async fn query(&self, sql: &Sql<SQLite>) -> Result<Vec<Self::Row>, Self::Error> {

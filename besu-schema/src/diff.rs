@@ -376,19 +376,21 @@ pub fn diff_with(
         }
     }
 
-    // No `TableDef` can describe an enum type, so a schema built from table definitions
-    // carries no enum information at all. A type is therefore only dropped when a column
-    // currently uses it and nothing the declared schema names still does: that is the one
-    // case where Besu can be sure the type belongs to this schema rather than to something
-    // else in the same database.
+    // An enum type is only dropped when a column currently uses it and nothing the declared
+    // schema names still does: that is the one case where Besu can be sure the type belongs
+    // to this schema rather than to something else in the same database.
     fn required_by_a_column(schema: &Schema, name: &str, managed: &[Option<&str>]) -> bool {
         schema
             .tables
             .iter()
             .filter(|table| managed.contains(&table.schema.as_deref()))
             .any(|table| {
-                table.columns.iter().any(|column| {
-                    matches!(&column.ty, besu_core::TypeDef::Custom(ty) if ty.as_ref() == name)
+                table.columns.iter().any(|column| match &column.ty {
+                    // A column of a type read back from PostgreSQL.
+                    besu_core::TypeDef::Custom(ty) => ty.as_ref() == name,
+                    // A column whose type carries the enum inline, as a declared one does.
+                    besu_core::TypeDef::Enum(def) => def.name.as_ref() == name,
+                    _ => false,
                 })
             })
     }
@@ -860,7 +862,7 @@ pub fn worst_safety(changes: &[Change]) -> Safety {
 mod tests {
     use super::{diff, worst_safety};
     use crate::{Change, Column, Enum, IndexColumn, Safety, Schema, Table, Unique};
-    use besu_core::TypeDef;
+    use besu_core::{EnumDef, TypeDef};
 
     fn column(name: &str, ty: TypeDef) -> Column {
         Column {
@@ -999,6 +1001,64 @@ mod tests {
             }]
         );
         assert_eq!(changes[0].safety(), Safety::Risky);
+    }
+
+    fn enum_def(labels: &[&str]) -> TypeDef {
+        TypeDef::Enum(EnumDef::owned("mood", labels.iter().copied()))
+    }
+
+    #[test]
+    fn a_changed_inline_enum_label_set_is_an_alter_column() {
+        // A MySQL enum is inline, so its labels are part of the column's type. Adding,
+        // removing or reordering a label has to be a diff of that one column, never a silent
+        // drop and re-add of the table.
+        let before = schema(vec![table(
+            "reviews",
+            vec![column("mood", enum_def(&["happy", "sad"]))],
+        )]);
+        let after = schema(vec![table(
+            "reviews",
+            vec![column("mood", enum_def(&["happy", "meh", "sad"]))],
+        )]);
+
+        let changes = diff(&before, &after);
+        assert_eq!(
+            changes,
+            [Change::AlterColumn {
+                table: "reviews".into(),
+                from: column("mood", enum_def(&["happy", "sad"])),
+                to: column("mood", enum_def(&["happy", "meh", "sad"])),
+            }]
+        );
+        assert_eq!(changes[0].safety(), Safety::Risky);
+
+        // Reordering is a change too: PostgreSQL compares in declaration order.
+        let reordered = schema(vec![table(
+            "reviews",
+            vec![column("mood", enum_def(&["sad", "happy"]))],
+        )]);
+        assert!(matches!(
+            diff(&before, &reordered).as_slice(),
+            [Change::AlterColumn { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_static_and_an_owned_label_set_are_not_a_change() {
+        // A declaration holds static labels and introspection produces owned ones; the two
+        // have to compare equal or every push would alter the column.
+        let before = schema(vec![table(
+            "reviews",
+            vec![column(
+                "mood",
+                TypeDef::Enum(EnumDef::new("mood", &["happy", "sad"])),
+            )],
+        )]);
+        let after = schema(vec![table(
+            "reviews",
+            vec![column("mood", enum_def(&["happy", "sad"]))],
+        )]);
+        assert!(diff(&before, &after).is_empty());
     }
 
     #[test]

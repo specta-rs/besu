@@ -149,6 +149,12 @@ impl Ddl for MySqlDdl {
     // cannot know without the table, so the indexes are rendered inside `CREATE TABLE`.
     const INLINE_INDEXES: bool = true;
 
+    /// An enum is spelled inside the column, so there is no type object for `push` to
+    /// create or drop.
+    fn inline_enums(&self) -> bool {
+        true
+    }
+
     fn quote(&self, ident: &str) -> String {
         MySql::quote(ident)
     }
@@ -180,6 +186,15 @@ impl Ddl for MySqlDdl {
             // MySQL has no array type; the declared DDL falls back to `TEXT`, so a declared
             // array has to fold onto the text column introspection reports.
             TypeDef::Array(_) => TypeDef::Text,
+            // An enum is inline, so its name names nothing and is dropped: the labels are
+            // the whole type. Introspection reports the labels with no name, and folding
+            // the name away is what makes the declared column equal to the one the database
+            // reports back. A changed label set is still a different type, and therefore an
+            // `AlterColumn` rather than a table rebuild.
+            TypeDef::Enum(def) => TypeDef::Enum(besu_core::types::EnumDef {
+                name: std::borrow::Cow::Borrowed(""),
+                labels: def.labels.clone(),
+            }),
             // A collation does not change the type under it, so the fold is applied to the
             // inner type and the name is kept.
             TypeDef::Collated(inner, collation) => {
@@ -558,6 +573,23 @@ mod tests {
         assert_eq!(
             Ddl::normalise_type(&ddl, &TypeDef::Timestamp),
             TypeDef::Timestamp
+        );
+    }
+
+    #[test]
+    fn an_inline_enum_keeps_its_labels_and_forgets_its_name() {
+        // MySQL has no named enum, so the name describes nothing and introspection reports
+        // none. Dropping it is what makes a declared enum converge; the labels stay, so a
+        // changed label set is still a change.
+        let declared = TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy", "sad"]));
+        let introspected = TypeDef::Enum(besu_core::EnumDef::owned("", ["happy", "sad"]));
+        assert_eq!(Ddl::normalise_type(&MySqlDdl, &declared), introspected);
+        assert_eq!(Ddl::type_name(&MySqlDdl, &declared), "ENUM('happy','sad')");
+
+        let changed = TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy", "meh", "sad"]));
+        assert_ne!(
+            Ddl::normalise_type(&MySqlDdl, &declared),
+            Ddl::normalise_type(&MySqlDdl, &changed)
         );
     }
 

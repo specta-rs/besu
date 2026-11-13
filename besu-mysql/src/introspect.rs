@@ -1,4 +1,4 @@
-use besu_core::{TypeDef, schema::IndexKind, schema::ReferenceAction};
+use besu_core::{EnumDef, EnumLabels, TypeDef, schema::IndexKind, schema::ReferenceAction};
 use besu_schema::{
     Check, Column, ForeignKey, Generated, Index, IndexColumn, Schema, Table, Unique, View,
 };
@@ -513,10 +513,72 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
         }
         // A `YEAR` column has its own range and formatting; `SMALLINT` is not the same type.
         "year" => TypeDef::Custom(lower.into()),
-        // Enums, sets and anything newer than this crate knows about keep their native
-        // spelling, so generated DDL round-trips.
+        // An enum is inline, and `COLUMN_TYPE` holds its labels and nothing else: MySQL has
+        // no type name to record, so the name is left empty. A `SET` is a different type and
+        // keeps its native spelling.
+        "enum" => match parse_enum(column_type) {
+            Some(def) => TypeDef::Enum(def),
+            None => TypeDef::Custom(column_type.to_owned().into()),
+        },
+        // Anything newer than this crate knows about keeps its native spelling, so generated
+        // DDL round-trips.
         _ => TypeDef::Custom(column_type.to_owned().into()),
     }
+}
+
+/// Parse the labels out of MySQL's inline `enum('a','b')` spelling.
+///
+/// The keyword is matched case-insensitively, a label is whatever sits between single quotes
+/// (with `''` as an escaped quote), and anything that does not match the shape exactly makes
+/// the column a `Custom` type rather than a half-understood enum.
+fn parse_enum(column_type: &str) -> Option<EnumDef> {
+    let open = column_type.find('(')?;
+    if !column_type[..open].trim().eq_ignore_ascii_case("enum") {
+        return None;
+    }
+    let close = column_type.rfind(')')?;
+    if close < open || !column_type[close + 1..].trim().is_empty() {
+        return None;
+    }
+
+    let mut chars = column_type[open + 1..close].chars().peekable();
+    let mut labels = Vec::new();
+    loop {
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
+        if chars.next()? != '\'' {
+            return None;
+        }
+        let mut label = String::new();
+        loop {
+            match chars.next()? {
+                '\'' if chars.peek() == Some(&'\'') => {
+                    chars.next();
+                    label.push('\'');
+                }
+                '\'' => break,
+                ch => label.push(ch),
+            }
+        }
+        labels.push(label);
+
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
+        match chars.peek() {
+            None => break,
+            Some(',') => {
+                chars.next();
+            }
+            Some(_) => return None,
+        }
+    }
+
+    Some(EnumDef {
+        name: std::borrow::Cow::Borrowed(""),
+        labels: EnumLabels::Owned(labels),
+    })
 }
 
 /// Narrow a parsed precision to the `u8` a [`TypeDef`] carries.
@@ -606,6 +668,30 @@ mod tests {
         assert_eq!(
             normalise_check_expression("((`name` <> _latin1\\'x\\') and (`balance` < 100))"),
             "name<>'x' and balance<100"
+        );
+    }
+
+    #[test]
+    fn an_inline_enum_parses_its_labels() {
+        // `COLUMN_TYPE` is `enum('a','b')`, with the keyword lowercased by the server but a
+        // label's case and escaped quotes preserved.
+        assert_eq!(
+            parse_type("enum", "enum('happy','it''s ok')"),
+            TypeDef::Enum(EnumDef::owned("", ["happy", "it's ok"]))
+        );
+        assert_eq!(
+            parse_type("enum", "ENUM('a', 'b')"),
+            TypeDef::Enum(EnumDef::owned("", ["a", "b"]))
+        );
+        // Anything that does not match the shape stays a `Custom` type rather than becoming
+        // an enum with labels Besu only half understood.
+        assert_eq!(
+            parse_type("enum", "enum(a,b)"),
+            TypeDef::Custom("enum(a,b)".into())
+        );
+        assert_eq!(
+            parse_type("set", "set('a','b')"),
+            TypeDef::Custom("set('a','b')".into())
         );
     }
 

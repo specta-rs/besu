@@ -96,6 +96,11 @@ impl Ddl for SQLiteDdl {
         SQLite::type_name(ty.clone()).into_owned()
     }
 
+    /// SQLite has no named enum type: the labels are stored as text.
+    fn inline_enums(&self) -> bool {
+        true
+    }
+
     fn normalise_type(&self, ty: &TypeDef) -> TypeDef {
         // SQLite has one integer type, one text type and one blob type, so everything else
         // is a matter of intent rather than storage. Folding here is what lets a schema that
@@ -115,6 +120,9 @@ impl Ddl for SQLiteDdl {
             // A bit string is stored as an integer and an array as JSON text.
             TypeDef::Bit(_) | TypeDef::VarBit(_) => TypeDef::Int8,
             TypeDef::Array(_) => TypeDef::Json,
+            // SQLite has no enum: the label is stored in a `TEXT` column, so a declared enum
+            // has to converge against the text type introspection reports.
+            TypeDef::Enum(_) => TypeDef::Text,
             TypeDef::Collated(inner, collation) => {
                 TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
             }
@@ -390,6 +398,15 @@ mod tests {
         let unique = &table().uniques[0];
         assert!(SQLiteDdl.add_unique("memberships", unique).is_empty());
         assert!(SQLiteDdl.drop_unique("memberships", unique).is_empty());
+    }
+
+    #[test]
+    fn an_enum_is_text_and_converges_against_the_column_it_creates() {
+        // SQLite has no enum. The label is stored in a `TEXT` column, and folding the
+        // declared enum onto `Text` is what makes the next push a no-op.
+        let declared = TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy", "sad"]));
+        assert_eq!(Ddl::type_name(&SQLiteDdl, &declared), "TEXT");
+        assert_eq!(Ddl::normalise_type(&SQLiteDdl, &declared), TypeDef::Text);
     }
 
     #[test]

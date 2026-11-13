@@ -99,11 +99,231 @@ pub enum TypeDef {
     /// type is part of a `const` [`TableDef`](crate::TableDef), and a boxed value cannot be
     /// constructed in a constant expression.
     Array(TypeRef),
-    /// An arbitrary type the user asked for verbatim, for example a Postgres enum.
+    /// An enum whose labels are part of the declaration.
+    ///
+    /// MySQL spells one inline in the column — `ENUM('a','b')` *is* the type — while
+    /// PostgreSQL has a named type that lives beside the table, and SQLite has no enum at
+    /// all. The variants carry both halves: a [`name`](EnumDef::name), which PostgreSQL
+    /// creates and names, and the [`labels`](EnumDef::labels), which every dialect needs to
+    /// spell or enforce the column.
+    ///
+    /// The name is empty when there is nothing to name: a MySQL column introspected back
+    /// reports its labels with no name, and a declaration whose enum has no name is stored
+    /// as `TEXT` on PostgreSQL. Each dialect folds the type in
+    /// [`normalise_type`](crate::Dialect) so a declaration and the column the database
+    /// reports back compare equal.
+    Enum(EnumDef),
+    /// An arbitrary type the user asked for verbatim, for example a Postgres domain.
     ///
     /// Introspection uses this for database-native types Besu does not model, so it holds a
     /// `Cow` rather than a plain `&'static str`.
     Custom(alloc::borrow::Cow<'static, str>),
+}
+
+/// A set of enum labels, in the order they were declared.
+///
+/// The two shapes are the two a label set arrives in: a literal written in the source, which
+/// has to be constructible in the `const` metadata a [`TableDef`](crate::TableDef) holds, and
+/// one read back from a database or deserialised from a snapshot. Comparison, hashing and
+/// serialisation see through the holder, so a declared enum equals the one introspection
+/// reports.
+#[derive(Debug, Clone)]
+pub enum EnumLabels {
+    /// Labels written in a constant expression.
+    Static(&'static [&'static str]),
+    /// Labels computed at run time, by introspection or deserialisation.
+    Owned(alloc::vec::Vec<alloc::string::String>),
+}
+
+// Derived comparison would compare the holder, not the labels: `Static(&["a"])` and
+// `Owned(vec!["a"])` describe the same enum, and a declaration must equal what the database
+// reports back or every `push` would see a type change.
+impl PartialEq for EnumLabels {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .zip(other.iter())
+                .all(|(left, right)| left == right)
+    }
+}
+
+impl Eq for EnumLabels {}
+
+impl core::hash::Hash for EnumLabels {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for label in self.iter() {
+            label.hash(state);
+        }
+    }
+}
+
+impl EnumLabels {
+    /// Borrow a label set that is already static, as a `const` declaration does.
+    pub const fn from_static(labels: &'static [&'static str]) -> Self {
+        Self::Static(labels)
+    }
+
+    /// Take ownership of a label set computed at run time.
+    pub fn owned(labels: alloc::vec::Vec<alloc::string::String>) -> Self {
+        Self::Owned(labels)
+    }
+
+    /// How many labels there are.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Static(labels) => labels.len(),
+            Self::Owned(labels) => labels.len(),
+        }
+    }
+
+    /// Whether there are no labels.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The label at `index`, if there is one.
+    pub fn get(&self, index: usize) -> Option<&str> {
+        match self {
+            Self::Static(labels) => labels.get(index).copied(),
+            Self::Owned(labels) => labels.get(index).map(alloc::string::String::as_str),
+        }
+    }
+
+    /// The labels, in declaration order.
+    pub fn iter(&self) -> EnumLabelsIter<'_> {
+        EnumLabelsIter {
+            labels: self,
+            index: 0,
+        }
+    }
+
+    /// The labels as a slice of string slices.
+    ///
+    /// A static set is borrowed; an owned one cannot hand out a `&[&str]` because it stores
+    /// its labels as `String`s, so this allocates a vector of borrows. It exists as the
+    /// slice-shaped accessor; [`EnumLabels::iter`] is the allocation-free one.
+    pub fn as_slice(&self) -> alloc::borrow::Cow<'_, [&str]> {
+        match self {
+            Self::Static(labels) => alloc::borrow::Cow::Borrowed(labels),
+            Self::Owned(labels) => alloc::borrow::Cow::Owned(
+                labels
+                    .iter()
+                    .map(alloc::string::String::as_str)
+                    .collect::<alloc::vec::Vec<_>>(),
+            ),
+        }
+    }
+
+    /// A copy of every label as an owned string.
+    pub fn to_vec(&self) -> alloc::vec::Vec<alloc::string::String> {
+        self.iter()
+            .map(alloc::string::ToString::to_string)
+            .collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a EnumLabels {
+    type Item = &'a str;
+    type IntoIter = EnumLabelsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// An iterator over an [`EnumLabels`].
+#[derive(Debug, Clone)]
+pub struct EnumLabelsIter<'a> {
+    labels: &'a EnumLabels,
+    index: usize,
+}
+
+impl<'a> Iterator for EnumLabelsIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let label = self.labels.get(self.index)?;
+        self.index += 1;
+        Some(label)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.labels.len().saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for EnumLabelsIter<'_> {}
+
+impl serde::Serialize for EnumLabels {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq as _;
+
+        let mut sequence = serializer.serialize_seq(Some(self.len()))?;
+        for label in self.iter() {
+            sequence.serialize_element(label)?;
+        }
+        sequence.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EnumLabels {
+    /// A deserialised label set is always owned: a snapshot borrows nothing from the input,
+    /// so there is no static slice to point at.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        alloc::vec::Vec::<alloc::string::String>::deserialize(deserializer).map(Self::Owned)
+    }
+}
+
+/// An enum type: a name, and the labels it allows.
+///
+/// The name is the PostgreSQL type name, and empty for an inline enum that has none. The
+/// labels are the values a column of this type accepts, in the order they were declared,
+/// which is also the order PostgreSQL compares them in.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EnumDef {
+    /// The type's name, or an empty string when the enum is spelled inline.
+    pub name: alloc::borrow::Cow<'static, str>,
+    /// The allowed labels, in order.
+    pub labels: EnumLabels,
+}
+
+impl EnumDef {
+    /// Construct an enum in a constant expression, as `#[derive(SqlEnum)]` metadata is.
+    pub const fn new(name: &'static str, labels: &'static [&'static str]) -> Self {
+        Self {
+            name: alloc::borrow::Cow::Borrowed(name),
+            labels: EnumLabels::Static(labels),
+        }
+    }
+
+    /// Construct an enum whose name and labels were computed at run time.
+    pub fn owned(
+        name: impl Into<alloc::string::String>,
+        labels: impl IntoIterator<Item = impl Into<alloc::string::String>>,
+    ) -> Self {
+        Self {
+            name: alloc::borrow::Cow::Owned(name.into()),
+            labels: EnumLabels::Owned(labels.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    /// How many labels the type allows.
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    /// Whether the type allows no labels at all.
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    /// The labels, in declaration order.
+    pub fn iter(&self) -> EnumLabelsIter<'_> {
+        self.labels.iter()
+    }
 }
 
 /// A reference to a [`TypeDef`] that can be written in a `const` expression.
@@ -215,5 +435,69 @@ mod tests {
         let mut b = std::hash::DefaultHasher::new();
         owned.hash(&mut b);
         assert_eq!(a.finish(), b.finish());
+    }
+
+    #[test]
+    fn an_enum_is_constructible_in_a_constant() {
+        // `#[derive(Table)]` puts a column's type in a `const TableDef`, so an enum has to
+        // be constructible without allocating.
+        const MOOD: TypeDef = TypeDef::Enum(EnumDef::new("mood", &["happy", "meh", "sad"]));
+        let TypeDef::Enum(def) = &MOOD else {
+            unreachable!("the constant must be an enum");
+        };
+        assert_eq!(def.name, "mood");
+        assert_eq!(def.iter().collect::<Vec<_>>(), ["happy", "meh", "sad"]);
+        assert_eq!(def.labels.as_slice().as_ref(), ["happy", "meh", "sad"]);
+        assert_eq!(def.len(), 3);
+    }
+
+    #[test]
+    fn static_and_owned_enum_labels_are_the_same_enum() {
+        // A declared enum holds static labels; introspection produces owned ones. If the two
+        // were not equal, every `push` would see the column's type change.
+        const DECLARED: EnumDef = EnumDef::new("mood", &["happy", "sad"]);
+        let introspected = EnumDef::owned("mood", ["happy", "sad"]);
+        assert_eq!(DECLARED, introspected);
+        assert_eq!(DECLARED.labels, introspected.labels);
+
+        use core::hash::{Hash as _, Hasher as _};
+        let mut declared = std::hash::DefaultHasher::new();
+        DECLARED.hash(&mut declared);
+        let mut introspected_hash = std::hash::DefaultHasher::new();
+        introspected.hash(&mut introspected_hash);
+        assert_eq!(declared.finish(), introspected_hash.finish());
+    }
+
+    #[test]
+    fn an_enum_serialises_as_its_name_and_labels() {
+        const DECLARED: TypeDef = TypeDef::Enum(EnumDef::new("mood", &["happy", "sad"]));
+        let json = serde_json::to_string(&DECLARED).expect("an enum must serialise");
+        assert_eq!(json, r#"{"Enum":{"name":"mood","labels":["happy","sad"]}}"#);
+
+        // A static label set and an owned one write the same JSON, and both read back owned.
+        let owned = serde_json::to_value(TypeDef::Enum(EnumDef::owned("mood", ["happy", "sad"])))
+            .expect("an owned enum must serialise");
+        assert_eq!(
+            serde_json::to_value(&DECLARED).expect("a declared enum must serialise"),
+            owned
+        );
+        let decoded: TypeDef =
+            serde_json::from_str(r#"{"Enum":{"name":"mood","labels":["happy","sad"]}}"#)
+                .expect("an enum must deserialise");
+        assert_eq!(decoded, DECLARED);
+        assert!(matches!(
+            decoded,
+            TypeDef::Enum(EnumDef {
+                labels: EnumLabels::Owned(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_enum_with_no_labels_is_empty() {
+        let def = EnumDef::owned("empty", Vec::<String>::new());
+        assert!(def.is_empty());
+        assert_eq!(def.iter().next(), None);
     }
 }

@@ -95,6 +95,9 @@ impl Dialect for SQLite {
             TypeDef::Bit(_) | TypeDef::VarBit(_) => "INTEGER",
             // An array is stored as its JSON text, which is the only collection SQLite has.
             TypeDef::Array(_) => "JSON",
+            // SQLite has no enum: the label is stored as text, and normalisation folds the
+            // declared enum onto the `TEXT` introspection reports.
+            TypeDef::Enum(_) => "TEXT",
             TypeDef::Collated(inner, collation) => {
                 return Cow::Owned(format!(
                     "{} COLLATE {}",

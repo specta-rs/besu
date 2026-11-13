@@ -7,11 +7,13 @@
 //! This brings in the query builders, the expression helpers, the derive macro and the
 //! traits that make method syntax work.
 
-pub use crate::types::{Column, NonNull, Nullability, Nullable, SqlType, TypeWitness};
+pub use crate::types::{
+    Column, NonNull, Nullability, Nullable, SqlEnum, SqlType, TypeWitness, UnknownLabel,
+};
 pub use besu_core::{TypeDef, Value};
 
 #[cfg(feature = "derive")]
-pub use besu_macros::Table;
+pub use besu_macros::{SqlEnum, Table};
 
 pub use crate::batch::{Batch, BatchWrite};
 pub use crate::database::{Database, RawQuery, Transaction, dry};

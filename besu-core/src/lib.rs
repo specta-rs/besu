@@ -52,5 +52,5 @@ pub use schema::{
     IndexKind, TableDef,
 };
 pub use sql::{Rendered, Sql};
-pub use types::TypeDef;
+pub use types::{EnumDef, EnumLabels, EnumLabelsIter, TypeDef};
 pub use value::Value;

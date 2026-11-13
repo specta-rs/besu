@@ -9,7 +9,7 @@ use syn::{
 
 /// Resolve the path to the `besu` crate, so generated code keeps working when the
 /// dependency is renamed.
-fn besu_path() -> TokenStream {
+pub(crate) fn besu_path() -> TokenStream {
     match crate_name("besu") {
         Ok(FoundCrate::Itself) => quote!(crate),
         Ok(FoundCrate::Name(name)) => {

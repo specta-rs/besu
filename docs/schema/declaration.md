@@ -142,6 +142,50 @@ pub label: String,      // VARCHAR(64)
 The field's Rust type must be the `SqlType`'s `Rust` type — `String` for `Decimal`, `Char` and
 `VarChar`. A custom marker implements `SqlType`, and its `Rust` type needs `Decode` per driver.
 
+## Enums
+
+`#[derive(SqlEnum)]` names a column's variants once. The enum implements `SqlType`, so a field
+declares it through `sql_type`:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, besu::SqlEnum)]
+#[besu(rename_all = "snake_case")]
+pub enum Mood {
+    Happy,
+    #[besu(rename = "meh")] // a label of its own
+    Neutral,
+    Sad,
+}
+
+#[derive(Table)]
+pub struct Review {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(sql_type = "Mood")]
+    pub mood: Mood,
+}
+```
+
+The type name defaults to the enum's name in `snake_case` — `Mood` is `mood`, `UserRole` is
+`user_role` — and `#[besu(name = "...")]` overrides it. A label is the variant's name as written
+unless `rename_all` is given; the accepted rules are `snake_case`, `camelCase`, `PascalCase`,
+`SCREAMING_SNAKE_CASE`, `lowercase`, `UPPERCASE` and `kebab-case`. A variant-level
+`#[besu(rename = "...")]` wins over both.
+
+| Dialect | Rendering | A changed label set |
+| --- | --- | --- |
+| MySQL | `ENUM('happy','meh','sad')`, inline in the column | `ALTER TABLE ... MODIFY COLUMN` |
+| PostgreSQL | a named type: `CREATE TYPE "mood" AS ENUM (...)`, the column is `"mood"` | `ALTER TYPE "mood" ADD VALUE '...'` |
+| SQLite | `TEXT` holding the label | the column's type does not change |
+
+MySQL and SQLite spell an enum inside the column, so `Schema::enums` stays empty there and `push`
+does not try to create a type. An enum with `#[besu(name = "")]` has nothing for PostgreSQL to
+create either, and is stored as `TEXT`.
+
+The enum must derive `Clone`, because a whole-model insert clones the value. A label that names no
+variant when a row is read is a decode error naming the column; `SqlEnum::from_label` is the
+fallible conversion the `Decode` implementation uses.
+
 ## `references`, `on_delete`, `on_update`
 
 A single-column foreign key named `{table}_{column}_fkey`; `references` must be `"table.column"`
@@ -203,6 +247,8 @@ SQL type, so `Option` never nests: the derive strips one `Option` and rejects th
 
 - An unmapped field type, a generic or non-struct table, a nullable primary key, a bad
   `references` string, an unknown key and two same-named tables are compile errors.
+- A `SqlEnum` with no variants, a variant that holds data, a duplicate label or an unknown
+  `rename_all` rule is a compile error.
 - Drift is a runtime failure, caught by `push` unless the change is destructive.
 
 ## Gotchas

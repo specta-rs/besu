@@ -51,6 +51,11 @@ impl Ddl for PostgresDdl {
             TypeDef::Collated(inner, collation) => {
                 TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
             }
+            // A named enum folds onto the `Custom(name)` a column of that type is introspected
+            // as, so a declaration converges against the server's own report. An enum with
+            // no name has no type for PostgreSQL to create, and renders as `TEXT`.
+            TypeDef::Enum(def) if def.name.is_empty() => TypeDef::Text,
+            TypeDef::Enum(def) => TypeDef::Custom(def.name.clone()),
             other => other.clone(),
         }
     }
@@ -361,6 +366,37 @@ fn is_function_call(expression: &str) -> bool {
 mod tests {
     use super::*;
     use besu_schema::{IndexColumn, IndexKind};
+
+    #[test]
+    fn a_named_enum_renders_its_name_and_an_unnamed_one_is_text() {
+        // PostgreSQL names the type, so the column's declaration is the type's name. An
+        // inline enum from another dialect has nothing to create here and reads as text.
+        assert_eq!(
+            Postgres::type_name(TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy"]))),
+            r#""mood""#
+        );
+        assert_eq!(
+            Postgres::type_name(TypeDef::Enum(besu_core::EnumDef::new("", &["happy"]))),
+            "TEXT"
+        );
+    }
+
+    #[test]
+    fn a_named_enum_folds_onto_the_custom_type_introspection_reports() {
+        let ddl = PostgresDdl;
+        let declared = TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy", "sad"]));
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &declared),
+            TypeDef::Custom("mood".into())
+        );
+        assert_eq!(
+            Ddl::normalise_type(
+                &ddl,
+                &TypeDef::Enum(besu_core::EnumDef::new("", &["happy", "sad"]))
+            ),
+            TypeDef::Text
+        );
+    }
 
     #[test]
     fn an_arithmetic_expression_is_parenthesised_and_a_function_call_is_not() {

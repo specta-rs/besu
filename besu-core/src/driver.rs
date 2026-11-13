@@ -55,6 +55,19 @@ pub trait Driver: Clone + Send + Sync + 'static {
         None
     }
 
+    /// Decode the value at `index` as text, without advancing any offset.
+    ///
+    /// This exists so a type that needs a text representation — `#[derive(SqlEnum)]` reads a
+    /// label out of a column — can decode generically over every driver. A driver that can
+    /// read a string column should override it; the default reports that the driver cannot,
+    /// which keeps a hand-written driver that has no text representation from having to
+    /// invent one.
+    fn decode_text(_row: &Self::Row, _index: usize) -> Result<String, Self::Error> {
+        Err(Self::error(Error::unsupported(
+            "this driver cannot decode a column as text",
+        )))
+    }
+
     /// Run a query and collect every row.
     fn query(
         &self,

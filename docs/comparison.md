@@ -122,8 +122,8 @@ Being honest about the gaps is more useful than a feature matrix:
   migration.
 - **No prepared-statement cache of its own.** It delegates to the driver (sqlx), so caching
   behaviour is whatever the pool does.
-- **Fewer column types.** No `u128`, no arrays, no ranges, no native `decimal` in Rust, no
-  enums generated from Rust enums.
+- **Fewer column types.** No ranges and no native `decimal` in Rust; a `u128` and an array are
+  modelled but some database-native types still round-trip through DDL only.
 - **No query observability hooks.** There is no tracing span, no slow-query log and no
   `EXPLAIN` helper in the API.
 

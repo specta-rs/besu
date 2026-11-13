@@ -15,7 +15,10 @@ pub struct Schema {
     ///
     /// Only PostgreSQL has types that are not part of a column. The differ creates these
     /// before the tables that use them and drops them after, and a column of an enum type
-    /// is `TypeDef::Custom`.
+    /// is `TypeDef::Custom`. A schema built from table definitions collects one entry per
+    /// named [`TypeDef::Enum`] column (see [`Schema::from_defs`]), so a declared enum still
+    /// reaches `CREATE TYPE`; MySQL and SQLite spell an enum inline in the column and have
+    /// nothing to collect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enums: Vec<Enum>,
     /// Views and materialised views.
@@ -533,6 +536,10 @@ impl Schema {
     }
 
     /// Build a schema from the static metadata emitted by `#[derive(Table)]`.
+    ///
+    /// A column whose type is a named [`TypeDef::Enum`] also contributes its type to
+    /// [`Schema::enums`], which is what makes a declared enum a `CREATE TYPE` on
+    /// PostgreSQL. Two columns of the same enum collect one entry, keeping the first.
     pub fn from_defs(defs: &[&'static TableDef]) -> Self {
         let mut schema = Self::new();
         for def in defs {
@@ -543,8 +550,14 @@ impl Schema {
     }
 
     /// Add (or replace) a table from static metadata.
+    ///
+    /// A named enum column is collected into [`Schema::enums`] the first time it is seen;
+    /// see [`Schema::from_defs`].
     pub fn push_def(&mut self, def: &TableDef) {
         let table = Table::from_def(def);
+        for column in &table.columns {
+            self.collect_enum(&column.ty);
+        }
         if let Some(slot) = self
             .tables
             .iter_mut()
@@ -553,6 +566,27 @@ impl Schema {
             *slot = table;
         } else {
             self.tables.push(table);
+        }
+    }
+
+    /// Record a named enum a column uses, unless it is unnamed or already recorded.
+    ///
+    /// The search reaches through the wrappers, so an array of an enum contributes the type
+    /// it needs to exist as well as a bare column does.
+    fn collect_enum(&mut self, ty: &TypeDef) {
+        match ty {
+            TypeDef::Enum(enum_def) => {
+                if enum_def.name.is_empty() || self.find_enum(&enum_def.name).is_some() {
+                    return;
+                }
+                self.enums.push(Enum {
+                    name: enum_def.name.to_string(),
+                    values: enum_def.labels.to_vec(),
+                });
+            }
+            TypeDef::Collated(inner, _) => self.collect_enum(inner),
+            TypeDef::Array(inner) => self.collect_enum(inner.as_type()),
+            _ => {}
         }
     }
 
@@ -1612,9 +1646,80 @@ mod fs_impl {
 #[cfg(test)]
 mod tests {
     use super::{
-        Index, IndexColumn, IndexKind, IndexTarget, Schema, Sequence,
+        Enum, Index, IndexColumn, IndexKind, IndexTarget, Schema, Sequence,
         normalise_generated_expression, normalise_view_definition, view_body,
     };
+    use besu_core::{ColumnDef, EnumDef, TableDef, TypeDef};
+
+    const fn column(name: &'static str, ty: TypeDef) -> ColumnDef {
+        ColumnDef {
+            name,
+            ty,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: None,
+            generated: None,
+            renamed_from: None,
+        }
+    }
+
+    #[test]
+    fn a_named_enum_column_contributes_to_the_schema_enums() {
+        // A declaration spells its variants once, on the Rust enum; the column carries the
+        // labels. Collecting them here is what turns that into a `CREATE TYPE`.
+        const REVIEWS: &TableDef = &TableDef {
+            name: "reviews",
+            schema: None,
+            columns: &[
+                column("id", TypeDef::Int8),
+                column(
+                    "mood",
+                    TypeDef::Enum(EnumDef::new("mood", &["happy", "meh", "sad"])),
+                ),
+            ],
+            indexes: &[],
+            foreign_keys: &[],
+            checks: &[],
+        };
+        // A second table over the same enum collects it once.
+        const POSTS: &TableDef = &TableDef {
+            name: "posts",
+            schema: None,
+            columns: &[column(
+                "mood",
+                TypeDef::Enum(EnumDef::new("mood", &["happy", "meh", "sad"])),
+            )],
+            indexes: &[],
+            foreign_keys: &[],
+            checks: &[],
+        };
+
+        let schema = Schema::from_defs(&[REVIEWS, POSTS]);
+        assert_eq!(
+            schema.enums,
+            [Enum {
+                name: "mood".into(),
+                values: vec!["happy".into(), "meh".into(), "sad".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_inline_enum_with_no_name_contributes_nothing() {
+        // MySQL reports an inline enum with no name, and a `TypeDef::Enum` with an empty
+        // name is a label set with no type for PostgreSQL to create.
+        const ITEMS: &TableDef = &TableDef {
+            name: "items",
+            schema: None,
+            columns: &[column("kind", TypeDef::Enum(EnumDef::new("", &["a", "b"])))],
+            indexes: &[],
+            foreign_keys: &[],
+            checks: &[],
+        };
+        assert!(Schema::from_defs(&[ITEMS]).enums.is_empty());
+    }
 
     #[test]
     fn a_sqlite_view_definition_is_wrapped_and_a_postgres_one_is_not() {

@@ -93,6 +93,22 @@ impl Dialect for MySql {
             TypeDef::Decimal(precision, scale) => {
                 Cow::Owned(format!("DECIMAL({precision},{scale})"))
             }
+            // An enum is inline: MySQL has no named type, so only the labels are rendered.
+            // A quote inside a label is escaped by doubling it, exactly as the server spells
+            // it back.
+            TypeDef::Enum(def) => {
+                let mut out = String::from("ENUM(");
+                for (i, label) in def.iter().enumerate() {
+                    if i != 0 {
+                        out.push(',');
+                    }
+                    out.push('\'');
+                    out.push_str(&label.replace('\'', "''"));
+                    out.push('\'');
+                }
+                out.push(')');
+                Cow::Owned(out)
+            }
             TypeDef::Custom(name) => name,
             other => Cow::Borrowed(match other {
                 TypeDef::Bool => "BOOLEAN",
@@ -296,6 +312,17 @@ mod tests {
         assert_eq!(MySql::type_name(TypeDef::Decimal(10, 2)), "DECIMAL(10,2)");
         assert_eq!(MySql::type_name(TypeDef::Uuid), "BINARY(16)");
         assert_eq!(MySql::type_name(TypeDef::TimestampTz), "DATETIME(6)");
+    }
+
+    #[test]
+    fn an_enum_is_inline_with_its_labels() {
+        // MySQL has no named type, so only the labels reach the DDL. A quote inside a label
+        // is doubled, which is how the server spells it back.
+        let def = besu_core::EnumDef::new("mood", &["happy", "it's ok"]);
+        assert_eq!(
+            MySql::type_name(TypeDef::Enum(def)),
+            "ENUM('happy','it''s ok')"
+        );
     }
 
     /// The DDL spelling is mostly not legal after `CAST(... AS ...)`, which accepts only

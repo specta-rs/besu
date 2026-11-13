@@ -177,6 +177,9 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             Value::Int128(v) => add(&mut arguments, Decimal::from_i128(*v))?,
             Value::Float(v) => add(&mut arguments, *v)?,
             Value::Text(v) => add(&mut arguments, v.as_str())?,
+            // MySQL coerces a text parameter to the column's type, so a label binds exactly
+            // like text.
+            Value::EnumLabel(v) => add(&mut arguments, v.as_str())?,
             // MySQL coerces a string parameter to the column's type, so the exact decimal
             // text goes over the wire unchanged and the server rounds it to the column's
             // scale. Building a `BigDecimal` would copy the digits twice for no gain.
@@ -242,6 +245,11 @@ impl Driver for Sqlx {
                 .map(|column| column.name().to_owned())
                 .collect(),
         )
+    }
+
+    fn decode_text(row: &Self::Row, index: usize) -> Result<String, Self::Error> {
+        let mut offset = index;
+        <String as Decode<Self>>::decode(row, &mut offset)
     }
 
     async fn query(&self, sql: &Sql<MySqlDialect>) -> Result<Vec<Self::Row>, Self::Error> {

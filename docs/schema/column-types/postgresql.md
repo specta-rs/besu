@@ -30,6 +30,7 @@ that holds it, or to `NUMERIC` when no integer is wide enough.
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TIMESTAMPTZ` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `Vec<T>` | `Array<T>` | `Array(T)` | `<T>[]` |
+| `#[derive(SqlEnum)]` | the enum itself | `Enum` | the enum's name |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>`, `Jsonb` | matching | `CHAR(n)`, `VARCHAR(n)`, `NUMERIC(p,s)`, `JSONB` |
 
 Everything in the table round-trips through an insert and a `SELECT`. The `Custom` types below
@@ -152,6 +153,43 @@ The two share a spelling, so introspection cannot tell them apart: a `NUMERIC(39
 reported as `Decimal(39, 0)`, and the differ folds `UInt(128)` onto the same type, which is why
 a push still converges.
 
+## Enums
+
+A Rust enum becomes a named PostgreSQL type. The name defaults to the enum's `snake_case` name and
+the labels are the variants:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, besu::SqlEnum)]
+#[besu(rename_all = "snake_case")]
+pub enum Mood {
+    Happy,
+    #[besu(rename = "meh")]
+    Neutral,
+    Sad,
+}
+
+#[derive(Table)]
+pub struct Review {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(sql_type = "Mood")]
+    pub mood: Mood,
+}
+```
+
+`push` renders `CREATE TYPE "mood" AS ENUM ('happy', 'meh', 'sad')` before the table, and the
+column is declared `"mood"`. A label appended to the Rust enum diffs as
+`ALTER TYPE "mood" ADD VALUE '...'`; a label that disappears is destructive and is refused, because
+PostgreSQL has no `ALTER TYPE ... DROP VALUE`.
+
+The server reports the column as `Custom("mood")`, and `TypeDef::Enum` folds onto that, so a
+declaration and the database converge. A label is bound as an untyped parameter, which lets the
+server infer the enum from the column — a `TEXT` parameter would not be assignable to an enum
+without a cast.
+
+An enum with no name (`#[besu(name = "")]`) has nothing to create, so it is stored as `TEXT`. That
+is how a schema shared with MySQL keeps working; see the [declaration guide](../declaration.md#enums).
+
 ## What introspection reports
 
 | Native type | `TypeDef` |
@@ -203,15 +241,16 @@ typed expression path rather than a whole-model insert.
 Enums, domains, composite types, ranges, `INET`/`CIDR`, `INTERVAL`, `tsvector` and extension
 types such as `pgvector` all come back as `Custom(name)`. The name is preserved and each dotted
 part is quoted, so `MySchema.Mood` reaches the type it names rather than folding to lowercase.
-There is no Rust type to decode into and the derive has no spelling for one. Keep such a column
-out of the model and read it through `sql!`.
+An enum is the exception to "there is no Rust type": [`#[derive(SqlEnum)]`](https://docs.rs/besu/latest/besu/derive.SqlEnum.html)
+declares one and names its variants once. Everything else still has to be read through `sql!`.
 
 Arrays and bit strings are no longer `Custom`: they have their own `TypeDef` variants and
 round-trip as themselves.
 
-A column over a PostgreSQL enum is `Custom("mood")`; the type itself lives in `Schema::enums`,
-which is introspected, diffed and rendered as `CREATE TYPE`. The derive cannot declare an enum,
-so the type list belongs to a snapshot (`besu pull`) or a migration.
+A column over a PostgreSQL enum declared by hand is `Custom("mood")`; the type itself lives in
+`Schema::enums`, which is introspected, diffed and rendered as `CREATE TYPE`. A derived enum
+contributes its type to `Schema::enums` at declaration time, so it reaches the same place without a
+snapshot.
 
 ## Gotchas
 
@@ -222,8 +261,9 @@ so the type list belongs to a snapshot (`besu pull`) or a migration.
 - `DateTime<Local>` is declared `TIMESTAMPTZ` by name matching and then fails to compile when a
   query returns the model. Use `DateTime<Utc>`.
 - `TIMETZ` can be created, introspected and rendered, but not read into a Rust value.
-- An enum or domain column round-trips through `push`/`pull` and is invisible to the derive.
-  Dropping one is destructive and is refused without `push_destructive`.
+- An enum or domain column round-trips through `push`/`pull`. A domain is invisible to the derive;
+  an enum is declared with `#[derive(SqlEnum)]`. Dropping either is destructive and is refused
+  without `push_destructive`.
 - A `BIT` or `BIT VARYING` column round-trips, but no `Value` variant carries one, so it cannot
   be read into Rust yet.
 - A column with an explicit `COLLATE` is part of its type: a declared `String` will report drift

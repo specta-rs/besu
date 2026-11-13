@@ -85,6 +85,10 @@ impl Dialect for Postgres {
                 Value::Int128(_) => 'I',
                 Value::Float(_) => 'f',
                 Value::Text(_) => 't',
+                // An enum's label is bound untyped, so it is a distinct parameter shape in
+                // the prepared-statement cache: the same SQL text could otherwise resolve to
+                // different enum types in different statements.
+                Value::EnumLabel(_) => 'e',
                 Value::Bytes(_) => 'x',
                 Value::Uuid(_) => 'd',
                 Value::Date(_) => 'e',
@@ -167,6 +171,10 @@ impl Dialect for Postgres {
                 Postgres::type_name(*inner),
                 Postgres::quote(&collation)
             )),
+            // A named enum is the type's name, exactly as a domain is. An enum with no name
+            // is a label set with nothing for PostgreSQL to create, so it is stored as text.
+            TypeDef::Enum(def) if def.name.is_empty() => Cow::Borrowed("TEXT"),
+            TypeDef::Enum(def) => quote_type_name(&def.name),
             TypeDef::Custom(name) => quote_type_name(&name),
             _ => Cow::Borrowed("TEXT"),
         }

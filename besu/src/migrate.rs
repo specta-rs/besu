@@ -269,6 +269,16 @@ impl<Dr: SchemaDriver> Database<Dr> {
         }
 
         let ddl = Dr::Ddl::default();
+
+        // A dialect that spells an enum inside the column has no named type to create or
+        // drop. A declaration still collects its named enums (so the same struct works on
+        // PostgreSQL), so leaving them in the comparison would report a `CreateEnum` that
+        // renders as nothing on every push. The labels travel on the column's own type.
+        if ddl.inline_enums() {
+            current.enums.clear();
+            desired.enums.clear();
+        }
+
         let changes = besu_schema::diff_with(&current, &desired, &|ty| ddl.normalise_type(ty));
 
         if !allow_destructive {

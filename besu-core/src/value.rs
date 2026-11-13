@@ -34,6 +34,14 @@ pub enum Value {
     Float(f64),
     /// UTF-8 text.
     Text(String),
+    /// A label of a SQL enum, carried as text.
+    ///
+    /// The SQL type of a label is the enum type of the column it is written to or compared
+    /// with, and nothing at the binding site names that type. MySQL and SQLite bind it as
+    /// ordinary text; PostgreSQL declares the parameter untyped so the server infers the
+    /// enum from the column, because an explicitly `TEXT` parameter is not assignable to an
+    /// enum without a cast.
+    EnumLabel(String),
     /// Binary data.
     Bytes(Vec<u8>),
     /// A UUID.
@@ -92,6 +100,7 @@ impl Value {
                     Value::Int128(v) => write!(f, "{v}"),
                     Value::Float(v) => write!(f, "{v}"),
                     Value::Text(v) => write!(f, "'{}'", v.escape_debug()),
+                    Value::EnumLabel(v) => write!(f, "'{}'", v.escape_debug()),
                     Value::Bytes(v) => {
                         f.write_str("x'")?;
                         for b in v {

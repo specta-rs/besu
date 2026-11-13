@@ -136,6 +136,59 @@ impl<S: SqlType> TypeWitness<S> for S {}
 
 impl<T, S: SqlType, N: Nullability> TypeWitness<S> for Column<T, S, N> {}
 
+/// A Rust enum whose variants are the labels of a SQL enum.
+///
+/// `#[derive(SqlEnum)]` implements this, [`SqlType`], `From<Self> for Value`,
+/// `IntoSqlValue<Self>` and [`Decode`](besu_core::Decode), so the enum can be a column type,
+/// be compared in a query and be read back out of a row.
+///
+/// The same enum works on every dialect: MySQL renders the labels inline, PostgreSQL creates
+/// and names a type, and SQLite stores the label as text.
+pub trait SqlEnum: SqlType<Rust = Self> + Sized + 'static {
+    /// The enum's canonical type: its name and labels.
+    const DEF: besu_core::types::EnumDef;
+
+    /// The labels, in declaration order.
+    const LABELS: &'static [&'static str];
+
+    /// The label this variant is stored as.
+    fn label(&self) -> &'static str;
+
+    /// The variant the stored `label` names, or an error when it names none.
+    fn from_label(label: &str) -> Result<Self, UnknownLabel>;
+}
+
+/// A label read from a column that names no variant of its enum.
+///
+/// This is what [`SqlEnum::from_label`] returns, and the `Decode` implementation the derive
+/// generates turns it into the driver's own error, naming the column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownLabel {
+    label: String,
+}
+
+impl UnknownLabel {
+    /// Record the label that matched no variant.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+        }
+    }
+
+    /// The label that matched no variant.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+impl core::fmt::Display for UnknownLabel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "`{}` is not a label of this enum", self.label)
+    }
+}
+
+impl core::error::Error for UnknownLabel {}
+
 macro_rules! sql_types {
     ($($(#[$attr:meta])* $name:ident = $def:expr => $rust:ty),* $(,)?) => {
         $(

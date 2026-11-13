@@ -29,6 +29,7 @@ timestamps are `DATETIME(6)` rather than `TIMESTAMP`.
 | `chrono::NaiveDateTime` | `Timestamp` | `Timestamp` | `DATETIME(6)` |
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `DATETIME(6)` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
+| `#[derive(SqlEnum)]` | the enum itself | `Enum` | `ENUM('a','b')` |
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>` | matching | `CHAR(n)`, `VARCHAR(n)`, `DECIMAL(p,s)` |
 
 Everything in the table round-trips through an insert and a `SELECT`. MySQL has no array type, so
@@ -153,6 +154,38 @@ pub signed: i128,   // DECIMAL(39,0)
 Introspection cannot tell the two apart, and the differ folds `UInt(128)` onto `Decimal(39,0)`,
 so a declared `u128` converges against the `DECIMAL(39,0)` reported back.
 
+## Enums
+
+A Rust enum is an inline MySQL enum. The labels are the variants, so the column's type *is* the
+list:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, besu::SqlEnum)]
+#[besu(rename_all = "snake_case")]
+pub enum Mood {
+    Happy,
+    #[besu(rename = "meh")]
+    Neutral,
+    Sad,
+}
+
+#[derive(Table)]
+pub struct Review {
+    #[besu(primary_key, auto_increment)]
+    pub id: i64,
+    #[besu(sql_type = "Mood")]
+    pub mood: Mood,
+}
+```
+
+The column is declared `ENUM('happy','meh','sad')`, and a `Mood` value is bound and decoded as its
+label. A quote inside a label is escaped by doubling it.
+
+An enum has no name of its own here: `ENUM(...)` belongs to the column rather than to the schema,
+so `Schema::enums` stays empty and `push` never tries to create a type. A label set that changes is
+one `ALTER TABLE ... MODIFY COLUMN`, not a drop and re-add of the table, and the column converges
+again on the next push.
+
 ## What introspection reports
 
 | Native type | `TypeDef` |
@@ -174,6 +207,7 @@ so a declared `u128` converges against the `DECIMAL(39,0)` reported back.
 | `date` | `Date` |
 | `time[(p)]`, `datetime[(p)]`, `timestamp[(p)]` | `Time`/`TimeP(p)`, `Timestamp`/`TimestampP(p)`, `TimestampTz`/`TimestampTzP(p)` |
 | `decimal(p,s)`, `numeric(p,s)` | `Decimal(p, s)` |
+| `enum('a','b')` | `Enum(EnumDef { name: "", labels })` |
 | `year` | `Custom("year")` |
 | a column whose collation differs from the table's | `Collated(inner, collation)` |
 | anything else | `Custom(column_type)` |
@@ -186,14 +220,13 @@ a declared `i8` or `String` still converges against them.
 
 ## Custom types
 
-MySQL's inline `ENUM(...)` and `SET(...)` keep their native spelling, so a column arrives as
-`Custom("enum('a','b')")`. They belong to the column rather than to the schema, so
-`Schema::enums` is empty on MySQL and there is no derive spelling for one. Anything newer than
-the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` for the same reason. The
-DDL round-trips; the value cannot be decoded into Rust.
+MySQL's `SET(...)` keeps its native spelling, so a column arrives as `Custom("set('a','b')")`.
+Anything newer than the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` for the
+same reason. The DDL round-trips; the value cannot be decoded into Rust.
 
-Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98), and
-inline enums in [#102](https://github.com/specta-rs/besu/issues/102).
+Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98). Inline
+enums are no longer `Custom`: they are [`TypeDef::Enum`](https://docs.rs/besu-core/latest/besu_core/enum.TypeDef.html)
+and are declared with [`#[derive(SqlEnum)]`](https://docs.rs/besu/latest/besu/derive.SqlEnum.html).
 
 ## Gotchas
 

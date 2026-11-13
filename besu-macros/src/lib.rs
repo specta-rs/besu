@@ -8,6 +8,7 @@
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
+mod sql_enum;
 mod table;
 
 /// Turn a struct into a database table.
@@ -77,6 +78,61 @@ mod table;
 #[proc_macro_derive(Table, attributes(besu))]
 pub fn table(input: TokenStream) -> TokenStream {
     match table::expand(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Turn a Rust enum into a SQL enum.
+///
+/// The enum's variants are the labels a column of this type accepts, so a MySQL column is
+/// declared `ENUM('happy','meh','sad')`, a PostgreSQL column uses a named type created with
+/// `CREATE TYPE`, and a SQLite column is `TEXT` holding the label. The same declaration
+/// works on every dialect.
+///
+/// ```ignore
+/// #[derive(Clone, Debug, PartialEq, Eq, besu::SqlEnum)]
+/// #[besu(rename_all = "snake_case")]
+/// pub enum Mood {
+///     Happy,
+///     #[besu(rename = "meh")]
+///     Neutral,
+///     Sad,
+/// }
+///
+/// #[derive(Table)]
+/// pub struct Review {
+///     #[besu(primary_key, auto_increment)]
+///     pub id: i64,
+///     #[besu(sql_type = "Mood")]
+///     pub mood: Mood,
+/// }
+/// ```
+///
+/// The derive implements [`SqlType`](https://docs.rs/besu/latest/besu/trait.SqlType.html),
+/// `From<Mood> for Value`, `IntoSqlValue<Mood>` and `Decode` for every driver, so the field
+/// can be inserted, compared and read back. The enum itself must also derive `Clone`,
+/// because a whole-model insert clones the value.
+///
+/// # Attributes
+///
+/// On the enum:
+///
+/// - `#[besu(name = "mood")]` — the SQL type name. Defaults to the enum's name in
+///   `snake_case`. PostgreSQL creates a type with this name; MySQL and SQLite ignore it.
+/// - `#[besu(rename_all = "...")]` — how variant names become labels. One of `snake_case`,
+///   `camelCase`, `PascalCase`, `SCREAMING_SNAKE_CASE`, `lowercase`, `UPPERCASE` or
+///   `kebab-case`. Without it a label is the variant name exactly as written.
+///
+/// On a variant:
+///
+/// - `#[besu(rename = "meh")]` — the label for this variant, overriding `rename_all`.
+///
+/// An empty enum, a variant that holds data, a duplicate label and an unknown rename rule
+/// are compile errors.
+#[proc_macro_derive(SqlEnum, attributes(besu))]
+pub fn sql_enum(input: TokenStream) -> TokenStream {
+    match sql_enum::expand(parse_macro_input!(input as DeriveInput)) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

@@ -55,6 +55,8 @@ pub trait Ddl {
             Value::Int128(v) => v.to_string(),
             Value::Float(v) => v.to_string(),
             Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
+            // An enum label renders exactly as the text it is; the column supplies the type.
+            Value::EnumLabel(v) => format!("'{}'", v.replace('\'', "''")),
             Value::Decimal(v) => v.clone(),
             Value::Array { values, .. } => {
                 let mut out = String::from("ARRAY[");
@@ -331,6 +333,16 @@ pub trait Ddl {
     /// which keeps a schema shared with PostgreSQL usable everywhere.
     fn create_enum(&self, _e: &Enum) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Whether an enum is spelled inside the column rather than as a type of its own.
+    ///
+    /// MySQL's `ENUM('a','b')` and SQLite's `TEXT` have no schema-level object to create or
+    /// drop, so the labels travel on the column's [`TypeDef`] instead. `push` uses this to
+    /// leave [`Schema::enums`] out of the comparison, which would otherwise report a
+    /// `CreateEnum` the dialect cannot apply on every push.
+    fn inline_enums(&self) -> bool {
+        false
     }
 
     /// Statements that drop a named enum type.
@@ -702,6 +714,78 @@ mod tests {
         assert_eq!(
             TestDdl.drop_check("accounts", &check),
             r#"ALTER TABLE "accounts" DROP CONSTRAINT "accounts_balance_check""#
+        );
+    }
+
+    /// A dialect that has named enums, to prove the IR's ordering.
+    struct EnumDdl;
+
+    impl Ddl for EnumDdl {
+        fn name(&self) -> &'static str {
+            "enum-test"
+        }
+
+        fn quote(&self, ident: &str) -> String {
+            format!("\"{ident}\"")
+        }
+
+        fn type_name(&self, ty: &TypeDef) -> String {
+            match ty {
+                TypeDef::Enum(def) if !def.name.is_empty() => self.quote(&def.name),
+                _ => "TEXT".into(),
+            }
+        }
+
+        fn column_sql(&self, column: &Column, _inline_pk: bool) -> String {
+            format!(
+                "{} {}",
+                self.quote(&column.name),
+                self.type_name(&column.ty)
+            )
+        }
+
+        fn create_enum(&self, e: &Enum) -> Vec<String> {
+            let values: Vec<String> = e
+                .values
+                .iter()
+                .map(|value| format!("'{}'", value.replace('\'', "''")))
+                .collect();
+            vec![format!(
+                "CREATE TYPE {} AS ENUM ({})",
+                self.quote_table(&e.name),
+                values.join(", ")
+            )]
+        }
+    }
+
+    #[test]
+    fn a_declared_enum_is_created_before_the_table_that_uses_it() {
+        const REVIEWS: &besu_core::TableDef = &besu_core::TableDef {
+            name: "reviews",
+            schema: None,
+            columns: &[besu_core::ColumnDef {
+                name: "mood",
+                ty: TypeDef::Enum(besu_core::EnumDef::new("mood", &["happy", "meh", "sad"])),
+                nullable: false,
+                auto_increment: false,
+                primary_key: false,
+                unique: false,
+                default: None,
+                generated: None,
+                renamed_from: None,
+            }],
+            indexes: &[],
+            foreign_keys: &[],
+            checks: &[],
+        };
+
+        let schema = Schema::from_defs(&[REVIEWS]);
+        assert_eq!(
+            EnumDdl.create_schema(&schema),
+            [
+                r#"CREATE TYPE "mood" AS ENUM ('happy', 'meh', 'sad')"#,
+                r#"CREATE TABLE "reviews" ("mood" "mood")"#,
+            ]
         );
     }
 }
