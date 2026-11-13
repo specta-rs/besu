@@ -19,13 +19,18 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["sqlx", "runtime-tokio"]
 sqlx = ["dep:sqlx", "dep:num-traits"]
-runtime-tokio = ["sqlx/runtime-tokio"]
+runtime-tokio = ["sqlx?/runtime-tokio"]
+# The `mysql_async`-backed driver. Additive: it does not replace the sqlx driver, which
+# stays the default until the native one has proven itself. It uses `mysql_async` without a
+# TLS feature (`minimal-rust`), so TLS is an explicit opt-in rather than a hidden dependency.
+native = ["dep:mysql_async", "dep:futures-channel", "dep:tokio"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 besu = { workspace = true, features = ["derive", "migrate"] }
 
@@ -38,6 +43,11 @@ besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu = { workspace = true, features = ["derive", "migrate"] }
 sqlx = { workspace = true, optional = true, features = ["mysql", "chrono", "uuid", "json", "bigdecimal"] }
+mysql_async = { workspace = true, optional = true }
+futures-channel = { workspace = true, optional = true }
+# `mysql_async` runs on tokio; the driver only needs `rt` for the streaming task. Adding it
+# directly does not add a runtime to the graph, because tokio is already there.
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }

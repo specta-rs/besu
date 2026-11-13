@@ -73,14 +73,16 @@ let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
 No pool, no connection string, no server — and the SQL is the real SQL, not an approximation
 produced by a second implementation.
 
-A dialect can have more than one driver, and two do. `besu-sqlite` has `Sqlx` (the default)
+A dialect can have more than one driver, and three do. `besu-sqlite` has `Sqlx` (the default)
 and `Native`, behind the additive `native` feature, which is `rusqlite` on a dedicated
 connection thread. `besu-postgres` has the same split: `Sqlx` is the default, and `Native`
-behind its own `native` feature is `tokio-postgres` over a `deadpool-postgres` pool. In both
-crates the drivers share the dialect, the DDL and one generic introspection implementation,
-so a query renders identically and decodes the same values on either. The `native` feature
-never becomes the default by accident: when both features are on, `Database` is still the
-sqlx driver, and `NativeDatabase` names the other.
+behind its own `native` feature is `tokio-postgres` over a `deadpool-postgres` pool.
+`besu-mysql` completes the set: `Sqlx` is the default, and `Native` behind its own `native`
+feature is `mysql_async` over its pool, using MySQL's binary protocol. In all three crates the
+drivers share the dialect, the DDL and one generic introspection implementation, so a query
+renders identically and decodes the same values on either. The `native` feature never becomes
+the default by accident: when both features are on, `Database` is still the sqlx driver, and
+`NativeDatabase` names the other.
 
 The PostgreSQL pair also shows where a driver's work actually is. sqlx declares a SQL type
 for every parameter and lets the server cast it; `tokio-postgres` sends no parameter types,
@@ -91,6 +93,18 @@ through raw bytes for the same reason: a `NUMERIC` has no built-in Rust type, an
 decimal text is the value Besu models. TLS is deliberately absent from the native driver:
 `NoTls` is what it uses, and adding a connector is an API change rather than a dependency
 change, so it is left for its own decision.
+
+The MySQL pair has the same shape and a different hard part. `mysql_async` decodes the
+binary protocol into typed values, so a number, a date and a blob arrive already separated;
+`DECIMAL`, `SET`, `ENUM`, `JSON`, `BIT` and spatial values arrive as byte strings beside the
+declared column type, and that type is what says whether the bytes are digits, a label or
+WKB. The decimal path keeps the column's own scale for a `String` and truncates toward zero
+for a 128-bit integer, matching the sqlx driver. Transactions are handles that own one pooled
+connection, and a pooled stream runs in a task that forwards rows over a bounded channel,
+because `mysql_async`'s row stream borrows the connection it reads from. The pool does not
+reset a connection when it is returned, so the prepared-statement cache and the pinned
+session survive a checkout, exactly as they do under sqlx. TLS is absent here too:
+`mysql_async` is built without either of its TLS features.
 
 ### `Executor` versus `Driver`
 
@@ -328,7 +342,7 @@ documentation.
 | `besu` | Works with every feature, including `derive`, `migrate` and `tracing`. Building, rendering, `sql!` and the schema IR never reach for the operating system. |
 | `besu-sqlite` / `-postgres` / `-mysql` with `default-features = false` | Works: the dialect and the DDL, which is what a client needs to spell `?`, `$1` and identifiers correctly. |
 | `besu-bridge` | Works. The client is `fetch`, `serde` and a channel; the server helper is a plain async function and runs on either target. |
-| Any driver feature (`sqlx`, `runtime-tokio`, `native`) | Does not build. sqlx reaches tokio, tokio reaches mio, and mio needs a socket API that this target does not have; `native` pulls in `rusqlite` and `libsqlite3-sys`, which need a C toolchain and a filesystem. |
+| Any driver feature (`sqlx`, `runtime-tokio`, `native`) | Does not build. sqlx reaches tokio, tokio reaches mio, and mio needs a socket API that this target does not have; `native` pulls either `rusqlite` and `libsqlite3-sys`, which need a C toolchain and a filesystem, or a wire-protocol client (`tokio-postgres`, `mysql_async`) with the same socket requirement. |
 | Running a query through a database driver, `push`, `introspect`, `Migrator` | Do not run. Every one of them needs a `SchemaDriver` or a `Driver` backed by a connection. The bridge is the exception: its "connection" is an HTTP endpoint. |
 
 The boundary is enforced, not assumed: the `wasm` CI job checks every crate for this target,

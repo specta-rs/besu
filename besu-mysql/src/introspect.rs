@@ -3,7 +3,7 @@ use besu_schema::{
     Check, Column, ForeignKey, Generated, Index, IndexColumn, Schema, Table, Unique, View,
 };
 
-use crate::Sqlx;
+use crate::MySql;
 
 /// Read the database's schema from MySQL's `information_schema`.
 ///
@@ -15,7 +15,17 @@ use crate::Sqlx;
 /// MySQL's own backticks, keyword case and literal escaping folded back onto the declared
 /// expression. Views are read into [`Schema::views`] for `besu pull`; MySQL has no
 /// materialised views and no sequences. Triggers are not read at all.
-pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
+///
+/// The two drivers share this implementation: everything here is expressed as Besu SQL, so
+/// the only requirement is a driver for [`MySql`] that can decode the columns
+/// `information_schema` returns.
+pub async fn introspect<Dr>(db: &besu::Database<Dr>) -> Result<Schema, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = MySql>,
+    String: besu_core::Decode<Dr>,
+    u64: besu_core::Decode<Dr>,
+    u32: besu_core::Decode<Dr>,
+{
     let tables = db
         .execute(besu::sql!(
             "SELECT TABLE_NAME FROM information_schema.TABLES \
@@ -35,7 +45,11 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
     Ok(schema)
 }
 
-async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::Error> {
+async fn introspect_views<Dr>(db: &besu::Database<Dr>) -> Result<Vec<View>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = MySql>,
+    String: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
@@ -79,7 +93,13 @@ fn column_names(columns: &[IndexColumn]) -> Option<Vec<String>> {
         .collect()
 }
 
-async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Table, sqlx::Error> {
+async fn introspect_table<Dr>(db: &besu::Database<Dr>, name: String) -> Result<Table, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = MySql>,
+    String: besu_core::Decode<Dr>,
+    u64: besu_core::Decode<Dr>,
+    u32: besu_core::Decode<Dr>,
+{
     // `information_schema` reports numbers as `BIGINT UNSIGNED`, hence `u64` throughout.
     let columns = db
         .execute(table_query(

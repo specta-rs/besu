@@ -14,6 +14,9 @@ the same dialect:
   pool, real streaming and a type mapping that follows the server's inferred parameter
   types. It shares the dialect, the DDL and one introspection implementation with the sqlx
   driver.
+- `besu-mysql` has a `mysql_async` driver behind its own `native` feature: a pool, a
+  per-connection prepared-statement cache, MySQL's binary protocol, and one generic
+  introspection shared with the sqlx driver.
 
 ## The traits
 
@@ -423,6 +426,47 @@ domain into its base type. A tiny `FromSql` wrapper that accepts every type and 
 payload lets the driver reuse the same binary parsers the sqlx driver tests. `Option<Raw>`
 distinguishes `NULL`, because `Row` has no public null check.
 
+### A third asynchronous driver: MySQL's binary protocol
+
+`besu-mysql`'s `native` feature is `mysql_async` over its own pool. MySQL sits between the
+other two: unlike PostgreSQL it declares no parameter types at the SQL level, and unlike
+SQLite it speaks a binary protocol. `mysql_async` decodes that protocol into
+`mysql_async::Value`, so most of the driver is a match on the variant rather than a byte
+parser:
+
+```rust
+match value {
+    MySqlValue::Int(value) => Ok(*value),
+    MySqlValue::UInt(value) => i64::try_from(*value)
+        .map_err(|_| column.error("a MySQL unsigned integer is larger than i64::MAX")),
+    _ => Err(column.not_a("an integer")),
+}
+```
+
+Three details are worth knowing.
+
+**`DECIMAL` is text, and the column's type says so.** MySQL sends `DECIMAL`, `SET`, `ENUM`,
+`JSON`, `BIT` and spatial values as byte strings. The declared column type is what tells the
+driver that a byte string is a decimal rather than a `VARCHAR`. `String` returns the exact
+text, including the column's scale, so `0.00` stays `0.00`; a 128-bit integer parses the
+digits directly and truncates a fractional value toward zero, which is what the sqlx driver's
+`BigDecimal` conversion does. `BIT(n)` keeps only its significant bits, because MySQL stores
+the value as an integer and the width is not on the wire.
+
+**A transaction pins one connection.** `mysql_async::Transaction` owns a pooled connection
+until `commit` or `rollback`. Dropping it without either marks the connection as requiring a
+rollback, and the pool's recycler rolls it back before the next borrower sees it. Nested
+`tx.transaction(..)` calls are still `SAVEPOINT` statements from `besu`, so the driver does
+not implement savepoints itself.
+
+**A pooled stream needs a task, a transaction's does not.** `mysql_async`'s row stream borrows
+the connection, so it cannot be returned from a function that owns the connection on its own
+stack. The driver therefore checks a connection out, spawns one task that pumps its rows into
+a bounded channel, and returns a stream over the receiver; a slow consumer applies
+backpressure and memory stays at one row. Inside a transaction there is no spawn:
+`stream_and_drop` takes ownership of the query result while borrowing the transaction, so the
+returned stream has exactly the transaction's lifetime.
+
 
 ## `SchemaDriver` and `Ddl`
 
@@ -556,7 +600,9 @@ that still enforces foreign keys and cascade into child rows, so all statements 
 one connection; the native driver sends the whole list as one request for the same reason, and
 to keep anything else from interleaving with a rebuild. The native PostgreSQL driver overrides
 it too, to run the whole list on one pooled connection: `push` is not atomic, but it should
-still be one session. Override it when your statements only make sense together.
+still be one session. The native MySQL driver does the same: DDL commits implicitly, but every
+statement of one `push` still belongs to one session. Override it when your statements only
+make sense together.
 
 ## Choosing a driver at runtime
 
@@ -718,7 +764,9 @@ so an empty result set has none; a server that knows its columns can fill
    a second `push` is empty and that `introspect` reports the columns, indexes and foreign
    keys you expect. `besu-sqlite/tests/query.rs` does exactly this in
    `schema_push_converges`, and `besu-postgres/tests/native.rs` does it for a driver that
-   shares its introspection with another.
+   shares its introspection with another. `besu-mysql/tests/native.rs` does it for a driver
+   speaking a binary protocol, where `information_schema` columns arrive as typed values
+   rather than text.
 3. **Decode every supported type.** The `Decode` impls are where a driver is most likely to
    be subtly wrong: an unsigned integer that wraps, a timestamp that loses its timezone, a
    `NULL` that becomes a zero.

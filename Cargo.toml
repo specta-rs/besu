@@ -50,6 +50,11 @@ rusqlite = { version = "0.32", default-features = false }
 # off, so the default build is unchanged.
 tokio-postgres = { version = "0.7", default-features = true }
 deadpool-postgres = { version = "0.14", default-features = false }
+# The native MySQL driver. `mysql_async` supplies the protocol, the pool and the types; it is
+# already tokio-based, so it does not pull in a second runtime. `minimal-rust` keeps the
+# flate2 backend pure Rust and leaves TLS off (no `rustls-tls` / `native-tls-tls` feature),
+# which is the API decision the issue left open.
+mysql_async = { version = "0.36", default-features = false, features = ["minimal-rust"] }
 bytes = "1"
 futures-core = "0.3"
 futures-channel = "0.3"

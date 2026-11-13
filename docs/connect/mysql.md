@@ -1,7 +1,16 @@
 # Connect to MySQL
 
-`besu_mysql::Sqlx` wraps a sqlx `MySqlPool`. The only interesting decision is whether to let
-the driver pin the session to UTF-8 and UTC, which is what `new` does and `connect` does not.
+Besu ships two drivers for MySQL:
+
+- `besu_mysql::Sqlx` wraps a sqlx `MySqlPool`. It is the default and is what `Database` names.
+- `besu_mysql::Native` wraps a `mysql_async::Pool`, behind the additive `native` feature. It
+  has no sqlx in its path and is the driver to reach for when the dependency graph matters.
+  With both features enabled, `Database` is still the sqlx driver; `NativeDatabase` names the
+  native one.
+
+Everything below applies to both unless a section says otherwise. The only interesting
+decision for `Sqlx` is whether to let the driver pin the session to UTF-8 and UTC, which is
+what `new` does and `connect` does not; `Native` makes the same choice.
 
 ## A connection string
 
@@ -83,8 +92,9 @@ raise it on the pool if that shows up in `SHOW GLOBAL STATUS LIKE 'Prepared_stmt
 let pool = db.driver().pool();
 ```
 
-`pool()` returns the `MySqlPool` for anything Besu does not expose, such as closing it at
-shutdown. `db.driver()` is the `Sqlx`.
+On `Sqlx`, `pool()` returns the `MySqlPool` for anything Besu does not expose, such as closing
+it at shutdown. On `Native` it returns the `mysql_async::Pool`. `db.driver()` is the driver
+itself.
 
 ## Transactions
 
@@ -96,7 +106,78 @@ tx.commit().await?;
 
 `begin` borrows the database and keeps every statement on one connection; `commit` and
 `rollback` consume the handle. `db.transaction(..)` commits on `Ok` and rolls back on `Err`,
-and `tx.savepoint("name", ..)` nests.
+and `tx.savepoint("name", ..)` nests. Both drivers behave the same here; a native transaction
+owns one pooled connection, and dropping it without committing marks it for rollback so the
+pool cleans it up before reuse.
+
+## The native driver
+
+Enable the additive feature (sqlx stays available and stays the default):
+
+```toml
+[dependencies]
+besu-mysql = { version = "0.1", features = ["native"] }
+```
+
+```rust
+use besu_mysql::Native;
+
+let db = besu::Database::new(
+    Native::new("mysql://root:besu@localhost:3306/app").await?,
+);
+```
+
+`Native::new` parses the URL and pins the session with `SET NAMES utf8mb4` and
+`SET time_zone = '+00:00'`. `Native::connect` uses the URL's connection options exactly as
+written. Both cap the pool at ten connections (the sqlx driver's maximum) and open them
+lazily. `Native::from_pool` takes a `mysql_async::Pool` you built yourself, and `pool()` hands
+the one it owns back for anything Besu does not expose.
+
+The pool holds at most ten connections, opened lazily. `mysql_async` caches prepared
+statements per connection, keyed by SQL text, so a repeated query shape skips the prepare
+round trip. A connection is not reset when it goes back to the pool (the same choice the sqlx
+driver makes), so that cache and the pinned session survive; the pool still rolls back an open
+transaction and drains an unread result before reusing a connection. Build a pool with
+`reset_connection` enabled and pass it to `Native::from_pool` if you want every checkout to
+start from a clean session, at the cost of a round trip and the statement cache.
+
+### TLS
+
+The native driver is compiled without a `mysql_async` TLS feature, so connections are
+unencrypted. `mysql_async` offers TLS as the `rustls-tls` (with a provider such as `ring`) or
+`native-tls-tls` feature plus `SslOpts` on `Opts`; Besu does not yet expose a constructor that
+accepts those, so enabling TLS is an API change rather than a dependency flip. A URL that asks
+for TLS (`require_ssl=true`) hits `mysql_async`'s own guard, which panics with a message
+naming the features to enable; it never silently goes unencrypted.
+
+If you need TLS today, enable the `mysql_async` feature yourself and pass a pool built with
+`SslOpts` to `Native::from_pool`. Cargo unifies the features of a single `mysql_async`
+version, so the driver's dependency gets the same TLS backend:
+
+```toml
+[dependencies]
+mysql_async = { version = "0.36", features = ["default-rustls-ring"] }
+besu-mysql = { version = "0.1", features = ["native"] }
+```
+
+TLS is never required by Besu; it is only ever the caller's choice.
+
+### Writes
+
+The native driver's output carries both numbers MySQL reports:
+
+```rust
+let output = db.insert(users).value(users.insert("a@example.com", "A", 21)).await?;
+let id: Option<u64> = output.last_insert_id();
+assert_eq!(output.rows_affected(), 1);
+```
+
+### Streaming
+
+`db.stream(..)` is a real stream on both drivers. The native driver checks a pooled
+connection out, forwards rows from the server over a bounded channel, and returns the
+connection when the stream is dropped; a slow consumer applies backpressure. Inside a
+transaction the stream borrows the transaction's connection and needs no task.
 
 ## No connection at all
 
@@ -114,9 +195,11 @@ returns an error that points at `to_sql`.
 
 - MySQL has no `RETURNING`. `Insert::returning` compiles and then fails when the SQL is built,
   with "`mysql` does not support `RETURNING`". Read the row back by a unique column, or use
-  `MySqlQueryResult::last_insert_id()` from the insert's output.
+  `last_insert_id()` from the insert's output (`MySqlQueryResult` on sqlx, `NativeOutput` on
+  the native driver).
 - A statement that is not pinned to `utf8mb4` can mangle text and reject an emoji. Use
-  `Sqlx::new`, or set the charset on a pool you build yourself.
+  `Sqlx::new`/`Native::new`, or set the charset on a pool you build yourself. The same goes
+  for the `+00:00` session timezone.
 - A session timezone is not the same thing as a timezone-aware column. MySQL's
   `DATETIME(6)` stores no offset; Besu sends and reads UTC and relies on the pinned session.
 - DDL causes an implicit commit on MySQL, so wrapping a schema change in `db.transaction(..)`
@@ -127,4 +210,6 @@ returns an error that points at `to_sql`.
   ordering on `expr IS NULL` first.
 - MySQL identifiers are quoted with backticks and a backtick inside one is doubled, so a table
   or column with an unusual name round-trips through DDL.
-- `push` is not transactional, and a failed statement leaves the earlier ones applied.
+- `push` is not transactional, and a failed statement leaves the earlier ones applied. On the
+  native driver every statement of one push still runs on one connection, so per-session state
+  such as `sql_mode` is consistent across the list.
