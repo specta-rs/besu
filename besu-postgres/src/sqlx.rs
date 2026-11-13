@@ -1,5 +1,6 @@
 use besu_core::{
-    BitString, Cidr, Decode, Driver, Error, Inet, Sql, SqlInterval, TransactionDriver, Value,
+    BitString, Cidr, Decode, Driver, Error, Geometry, Inet, Range, Sql, SqlInterval,
+    TransactionDriver, Value, Vector,
 };
 use chrono::Timelike;
 use sqlx::{
@@ -312,6 +313,17 @@ fn element_oid(ty: &besu_core::TypeDef) -> Option<u32> {
         TypeDef::UInt(16) => 23,
         TypeDef::UInt(32) => 20,
         TypeDef::UInt(_) | TypeDef::Decimal(_, _) => 1700,
+        // PostgreSQL's six built-in range types have fixed OIDs, and an array of one carries
+        // the range's OID in its header. A range over anything else has no OID Besu can name.
+        TypeDef::Range(inner) => match inner.as_type() {
+            TypeDef::Int4 | TypeDef::UInt(16) => 3904,
+            TypeDef::Int8 | TypeDef::UInt(32) => 3926,
+            TypeDef::Decimal(_, _) => 3906,
+            TypeDef::Timestamp | TypeDef::TimestampP(_) => 3908,
+            TypeDef::TimestampTz | TypeDef::TimestampTzP(_) => 3910,
+            TypeDef::Date => 3912,
+            _ => return None,
+        },
         TypeDef::Collated(inner, _) => return element_oid(inner),
         // An enum, a domain, a MySQL `SET` or an array of an array is a type Besu has no
         // binary encoder for, and guessing its OID would send bytes the server decodes as
@@ -421,8 +433,64 @@ fn encode_element(
             | TypeDef::TimestampTzP(_),
             Value::TimestampTz(v),
         ) => out.extend_from_slice(&micros_since_epoch(v.naive_utc())?.to_be_bytes()),
+        (TypeDef::Range(inner), Value::Range { range, .. }) => {
+            write_range(inner.as_type(), range, out)?;
+        }
         (TypeDef::Collated(inner, _), _) => return encode_element(inner, value, out),
         (_, _) => return Err("this value does not match its declared element type"),
+    }
+    Ok(())
+}
+
+/// Write a range in PostgreSQL's binary range format.
+///
+/// `range_send` writes one flag byte and then, for each finite bound, the bound's own
+/// encoding behind a four-byte length — exactly as an array element is written. The flags are
+/// the empty marker plus one bit for each bound's inclusivity and one for each infinite end.
+fn write_range(
+    element: &besu_core::TypeDef,
+    range: &Range<Value>,
+    out: &mut Vec<u8>,
+) -> Result<(), &'static str> {
+    /// The range is the empty one.
+    const EMPTY: u8 = 0x01;
+    /// The lower bound is included.
+    const LOWER_INCLUDED: u8 = 0x02;
+    /// The upper bound is included.
+    const UPPER_INCLUDED: u8 = 0x04;
+    /// The lower bound is infinite.
+    const LOWER_INFINITE: u8 = 0x08;
+    /// The upper bound is infinite.
+    const UPPER_INFINITE: u8 = 0x10;
+
+    let Some((start, end)) = range.bounds() else {
+        out.push(EMPTY);
+        return Ok(());
+    };
+
+    let mut flags = 0_u8;
+    match start {
+        besu_core::Bound::Included(_) => flags |= LOWER_INCLUDED,
+        besu_core::Bound::Excluded(_) => {}
+        besu_core::Bound::Unbounded => flags |= LOWER_INFINITE,
+    }
+    match end {
+        besu_core::Bound::Included(_) => flags |= UPPER_INCLUDED,
+        besu_core::Bound::Excluded(_) => {}
+        besu_core::Bound::Unbounded => flags |= UPPER_INFINITE,
+    }
+    out.push(flags);
+
+    for bound in [start, end] {
+        let Some(value) = bound.value() else {
+            continue;
+        };
+        let mut payload = Vec::new();
+        encode_element(element, value, &mut payload)?;
+        let length =
+            i32::try_from(payload.len()).map_err(|_| "a range bound is too large to encode")?;
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(&payload);
     }
     Ok(())
 }
@@ -645,6 +713,77 @@ impl sqlx::Encode<'_, SqlxPostgres> for BitValue<'_> {
     }
 }
 
+/// A range encoded into PostgreSQL's binary range format.
+///
+/// The parameter is sent untyped, so the server infers which of the six range types it is
+/// from the column; the subtype's own encoding is inside the bytes and the server checks it
+/// against the type it inferred.
+#[derive(Debug, Clone, Copy)]
+struct RangeValue<'a> {
+    element: &'a besu_core::TypeDef,
+    range: &'a Range<Value>,
+}
+
+impl sqlx::Type<SqlxPostgres> for RangeValue<'_> {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for RangeValue<'_> {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        write_range(self.element, self.range, buffer)
+            .map_err(|reason| <Sqlx as Driver>::error(Error::encode("range", reason)))?;
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        // One flag byte, then at most two bounds of a four-byte length and the element.
+        1 + self
+            .range
+            .bounds()
+            .map(|(start, end)| {
+                [start, end]
+                    .into_iter()
+                    .filter_map(besu_core::Bound::value)
+                    .map(|value| 4 + element_size(value))
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// Bytes bound as an untyped parameter.
+///
+/// PostGIS's `geometry` and `geography` OIDs are assigned when the extension is created, so
+/// there is no stable OID to declare. Sending the EWKB untyped lets the server infer the
+/// column's own type instead, exactly as an enum label does.
+#[derive(Debug, Clone, Copy)]
+struct UntypedBytes<'a>(&'a [u8]);
+
+impl sqlx::Type<SqlxPostgres> for UntypedBytes<'_> {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, SqlxPostgres> for UntypedBytes<'_> {
+    fn encode_by_ref(
+        &self,
+        buffer: &mut PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buffer.extend_from_slice(self.0);
+        Ok(sqlx::encode::IsNull::No)
+    }
+
+    fn size_hint(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// An integer bound as `NUMERIC`, encoded directly into PostgreSQL's binary wire format.
 ///
 /// sqlx ships no `u64`/`u128` support for PostgreSQL because the type system has no
@@ -791,6 +930,24 @@ fn encoded_size(value: &Value) -> usize {
         Value::Inet(_) | Value::Cidr(_) => LENGTH_PREFIX + 20,
         // The int32 bit length plus the packed bits.
         Value::Bit(v) => LENGTH_PREFIX + 4 + v.len().div_ceil(8),
+        // One flag byte plus each finite bound's length prefix and element.
+        Value::Range { range, .. } => {
+            let bounds = range
+                .bounds()
+                .map(|(start, end)| {
+                    [start, end]
+                        .into_iter()
+                        .filter_map(besu_core::Bound::value)
+                        .map(|value| 4 + element_size(value))
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            LENGTH_PREFIX + 1 + bounds
+        }
+        // EWKB is the value itself.
+        Value::Geometry(v) => LENGTH_PREFIX + v.ewkb().len(),
+        // A dimension and two unused bytes, then four bytes per component.
+        Value::Vector(v) => LENGTH_PREFIX + 4 + v.len() * 4,
         // The array header plus a four-byte length and a payload per element; the element
         // sizes are estimated from the values themselves.
         Value::Array { values, .. } => {
@@ -822,6 +979,18 @@ fn element_size(value: &Value) -> usize {
         Value::Interval(_) => 16,
         Value::Inet(_) | Value::Cidr(_) => 20,
         Value::Bit(v) => 4 + v.len().div_ceil(8),
+        Value::Range { range, .. } => range
+            .bounds()
+            .map(|(start, end)| {
+                1 + [start, end]
+                    .into_iter()
+                    .filter_map(besu_core::Bound::value)
+                    .map(|value| 4 + element_size(value))
+                    .sum::<usize>()
+            })
+            .unwrap_or(1),
+        Value::Geometry(v) => v.ewkb().len(),
+        Value::Vector(v) => 4 + v.len() * 4,
         // An array of an array is not supported by the encoder, so it adds nothing.
         _ => 0,
     }
@@ -866,6 +1035,20 @@ pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             Value::Inet(v) => add(&mut arguments, NetworkValue::inet(v))?,
             Value::Cidr(v) => add(&mut arguments, NetworkValue::cidr(v))?,
             Value::Bit(v) => add(&mut arguments, BitValue(v))?,
+            // A range is bound untyped: the server infers which of the six range types it is
+            // from the column, and the subtype's encoding travels inside the bytes.
+            Value::Range { element, range } => add(&mut arguments, RangeValue { element, range })?,
+            // PostGIS's OIDs are extension-defined, so the EWKB goes over as an untyped
+            // parameter and the server infers `geometry` or `geography`.
+            Value::Geometry(v) => add(&mut arguments, UntypedBytes(v.ewkb()))?,
+            // `pgvector`'s OID is extension-defined too, so the value goes over untyped and
+            // the server infers the column's `vector(n)` type. Every sqlx parameter is sent
+            // in binary format, so what travels is `vector_recv`'s form — a dimension and
+            // big-endian components — not the `[1,2,3]` text a SQL literal would use.
+            Value::Vector(v) => {
+                let bytes = v.to_binary();
+                add(&mut arguments, UntypedBytes(&bytes))?;
+            }
             Value::Json(v) => {
                 // The document is already JSON text. Validating it in place and binding the
                 // borrowed `RawValue` lets sqlx copy those bytes into its buffer, instead of
@@ -1483,6 +1666,172 @@ impl Decode<Sqlx> for BitString {
     }
 }
 
+/// A type that can be the subtype of a PostgreSQL range.
+///
+/// Only the six built-in range types are modelled, and each one's element has a fixed OID
+/// that the decoder needs because the range wire format does not repeat it.
+trait RangeElement: ArrayElement {
+    /// The OID of the element type, as an array of it would report.
+    const ELEMENT_OID: u32;
+}
+
+impl RangeElement for i32 {
+    const ELEMENT_OID: u32 = 23;
+}
+
+impl RangeElement for i64 {
+    const ELEMENT_OID: u32 = 20;
+}
+
+impl RangeElement for String {
+    const ELEMENT_OID: u32 = NUMERIC_OID;
+}
+
+impl RangeElement for chrono::NaiveDateTime {
+    const ELEMENT_OID: u32 = 1114;
+}
+
+impl RangeElement for chrono::DateTime<chrono::Utc> {
+    const ELEMENT_OID: u32 = 1184;
+}
+
+impl RangeElement for chrono::NaiveDate {
+    const ELEMENT_OID: u32 = 1082;
+}
+
+/// Decode a range from PostgreSQL's binary format: a flag byte, then each finite bound as a
+/// four-byte length and the element's own encoding.
+fn decode_range_binary<T: RangeElement>(bytes: &[u8]) -> Result<Range<T>, &'static str> {
+    /// The range is the empty one.
+    const EMPTY: u8 = 0x01;
+    /// The lower bound is included.
+    const LOWER_INCLUDED: u8 = 0x02;
+    /// The upper bound is included.
+    const UPPER_INCLUDED: u8 = 0x04;
+    /// The lower bound is infinite.
+    const LOWER_INFINITE: u8 = 0x08;
+    /// The upper bound is infinite.
+    const UPPER_INFINITE: u8 = 0x10;
+    /// Either bound may be `NULL`, which a Rust range cannot hold.
+    const ANY_NULL: u8 = 0x20 | 0x40;
+
+    let (flags, mut rest) = bytes.split_first().ok_or("malformed range value")?;
+    if flags & ANY_NULL != 0 {
+        return Err("a range with a NULL bound does not fit in `Range`");
+    }
+    if flags & EMPTY != 0 {
+        return Ok(Range::empty());
+    }
+
+    let decode_bound = |rest: &mut &[u8],
+                        infinite: u8,
+                        included: u8|
+     -> Result<besu_core::Bound<T>, &'static str> {
+        if flags & infinite != 0 {
+            return Ok(besu_core::Bound::Unbounded);
+        }
+        let length = rest.get(..4).ok_or("malformed range value")?;
+        let length = i32::from_be_bytes([length[0], length[1], length[2], length[3]]);
+        let length = usize::try_from(length).map_err(|_| "malformed range value")?;
+        // Step past the length word before reading the payload.
+        *rest = rest.get(4..).ok_or("malformed range value")?;
+        let (payload, tail) = rest
+            .split_at_checked(length)
+            .ok_or("malformed range value")?;
+        *rest = tail;
+        let value = T::decode_element(T::ELEMENT_OID, payload)?;
+        Ok(if flags & included != 0 {
+            besu_core::Bound::Included(value)
+        } else {
+            besu_core::Bound::Excluded(value)
+        })
+    };
+    let start = decode_bound(&mut rest, LOWER_INFINITE, LOWER_INCLUDED)?;
+    let end = decode_bound(&mut rest, UPPER_INFINITE, UPPER_INCLUDED)?;
+    Ok(Range::new(start, end))
+}
+
+impl<T: RangeElement> Decode<Sqlx> for Range<T> {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        match value.format() {
+            PgValueFormat::Text => {
+                let text = value.as_str().map_err(|err| malformed(&err.to_string()))?;
+                Range::parse_with(text.trim(), T::decode_text)
+                    .map_err(|err| malformed(&err.to_string()))
+            }
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                decode_range_binary::<T>(bytes).map_err(malformed)
+            }
+        }
+    }
+}
+
+impl<T: RangeElement> ArrayElement for Range<T> {
+    fn decode_element(_element: u32, bytes: &[u8]) -> Result<Self, &'static str> {
+        decode_range_binary::<T>(bytes)
+    }
+
+    fn decode_text(text: &str) -> Result<Self, &'static str> {
+        Range::parse_with(text.trim(), T::decode_text)
+            .map_err(|_| "an array element is not a range")
+    }
+}
+
+impl Decode<Sqlx> for Geometry {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        match value.format() {
+            // PostGIS's output function writes the EWKB as hex, not as WKT.
+            PgValueFormat::Text => {
+                let text = value.as_str().map_err(|err| malformed(&err.to_string()))?;
+                Self::from_hex(text).map_err(|err| malformed(&err.to_string()))
+            }
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                Ok(Self::from_ewkb_unchecked(bytes.to_vec()))
+            }
+        }
+    }
+}
+
+impl Decode<Sqlx> for Vector {
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+        let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
+
+        let value = row.try_get_raw(index)?;
+        match value.format() {
+            PgValueFormat::Text => {
+                let text = value.as_str().map_err(|err| malformed(&err.to_string()))?;
+                text.trim()
+                    .parse()
+                    .map_err(|err: besu_core::ParseValueError| malformed(&err.to_string()))
+            }
+            PgValueFormat::Binary => {
+                let bytes = value
+                    .as_bytes()
+                    .map_err(|err| malformed(&err.to_string()))?;
+                Self::from_binary(bytes).map_err(|err| malformed(&err.to_string()))
+            }
+        }
+    }
+}
+
 /// Decode a `NUMERIC` as its exact decimal text.
 fn decode_numeric_text(value: PgValueRef<'_>, index: usize) -> Result<String, sqlx::Error> {
     let malformed = |reason: &str| <Sqlx as Driver>::error(Error::decode(index, reason));
@@ -1906,7 +2255,30 @@ impl ArrayElement for chrono::DateTime<chrono::Utc> {
     }
 
     fn decode_text(text: &str) -> Result<Self, &'static str> {
-        chrono::DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%:z")
+        // PostgreSQL prints a timestamp with a two-digit offset (`+00`) or a colon-separated
+        // one (`+00:00`), while chrono's `%:z` wants the colon and `%z` wants no colon at
+        // all. Normalising the offset once covers both spellings.
+        let text = text.trim();
+        let offset = text
+            .rfind(['+', '-'])
+            .filter(|index| *index > 10)
+            .map(|index| (&text[..index], &text[index..]));
+        let normalised = match offset {
+            Some((head, offset)) => {
+                let digits = offset.trim_start_matches(['+', '-']);
+                if digits.len() == 2 && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    Some(format!("{head}{offset}:00"))
+                } else if digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    Some(format!("{head}{}:{}", &offset[..3], &offset[3..]))
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let text = normalised.as_deref().unwrap_or(text);
+        chrono::DateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f%:z")
+            .or_else(|_| chrono::DateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f%:z"))
             .map(|value| value.with_timezone(&chrono::Utc))
             .map_err(|_| "an array element is not a timestamp with a time zone")
     }
@@ -2045,6 +2417,12 @@ impl_decode_array!(
     Inet,
     Cidr,
     BitString,
+    Range<i32>,
+    Range<i64>,
+    Range<String>,
+    Range<chrono::NaiveDateTime>,
+    Range<chrono::DateTime<chrono::Utc>>,
+    Range<chrono::NaiveDate>,
 );
 
 /// Parse PostgreSQL's text array literal: `{a,"b,c",NULL}`.
@@ -2102,4 +2480,186 @@ fn text_element<T: ArrayElement>(text: &str, was_quoted: bool) -> Result<T, &'st
         return Err("the array contains a NULL element, which a `Vec<T>` cannot hold");
     }
     T::decode_text(text)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use besu_core::{Bound, TypeDef};
+
+    /// Encode a range exactly as the driver sends it.
+    fn encode(element: &TypeDef, range: Range<Value>) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_range(element, &range, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_range_is_written_with_its_flags_and_read_back() {
+        // The empty range is one flag byte and nothing else.
+        assert_eq!(encode(&TypeDef::Int4, Range::empty()), [0x01]);
+        assert_eq!(
+            decode_range_binary::<i32>(&encode(&TypeDef::Int4, Range::empty())),
+            Ok(Range::empty())
+        );
+
+        // `[1,5]` is both bounds finite and included: 0x02 | 0x04.
+        let bytes = encode(
+            &TypeDef::Int4,
+            Range::new(
+                Bound::Included(Value::Int(1)),
+                Bound::Included(Value::Int(5)),
+            ),
+        );
+        assert_eq!(
+            bytes,
+            [
+                0x06, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00,
+                0x00, 0x00, 0x05,
+            ]
+        );
+        assert_eq!(decode_range_binary::<i32>(&bytes), Ok(Range::closed(1, 5)));
+
+        // `(1,5]`: the lower bound is excluded, so only 0x04 is set.
+        let bytes = encode(
+            &TypeDef::Int4,
+            Range::new(
+                Bound::Excluded(Value::Int(1)),
+                Bound::Included(Value::Int(5)),
+            ),
+        );
+        assert_eq!(bytes[0], 0x04);
+        assert_eq!(
+            decode_range_binary::<i32>(&bytes),
+            Ok(Range::open_closed(1, 5))
+        );
+
+        // `(,5)`: an infinite lower bound sets 0x08, and only the upper bound is written.
+        let bytes = encode(
+            &TypeDef::Int4,
+            Range::new(Bound::Unbounded, Bound::Excluded(Value::Int(5))),
+        );
+        assert_eq!(bytes[0], 0x08);
+        assert_eq!(bytes.len(), 1 + 4 + 4);
+        assert_eq!(
+            decode_range_binary::<i32>(&bytes),
+            Ok(Range::new(Bound::Unbounded, Bound::Excluded(5)))
+        );
+
+        // `(,)`: both ends are infinite.
+        let bytes = encode(
+            &TypeDef::Int4,
+            Range::new(Bound::<Value>::Unbounded, Bound::Unbounded),
+        );
+        assert_eq!(bytes, [0x18]);
+        assert_eq!(
+            decode_range_binary::<i32>(&bytes),
+            Ok(Range::new(Bound::Unbounded, Bound::Unbounded))
+        );
+    }
+
+    #[test]
+    fn an_empty_range_is_written_as_the_empty_flag_even_with_bounds() {
+        // `Range::empty()` has no bounds, so the flags carry only the empty marker.
+        assert_eq!(encode(&TypeDef::Int8, Range::empty()), [0x01]);
+    }
+
+    #[test]
+    fn a_range_of_timestamps_and_a_numeric_range_round_trip() {
+        let start = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2021, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let bytes = encode(
+            &TypeDef::Timestamp,
+            Range::new(
+                Bound::Included(Value::Timestamp(start)),
+                Bound::Excluded(Value::Timestamp(end)),
+            ),
+        );
+        assert_eq!(
+            decode_range_binary::<chrono::NaiveDateTime>(&bytes),
+            Ok(Range::closed_open(start, end))
+        );
+
+        let bytes = encode(
+            &TypeDef::Decimal(0, 0),
+            Range::new(
+                Bound::Included(Value::Decimal("1.25".into())),
+                Bound::Excluded(Value::Decimal("9".into())),
+            ),
+        );
+        // The decimal bounds are NUMERIC, so the subtype's payload is a `numeric` body.
+        assert_eq!(
+            decode_range_binary::<String>(&bytes),
+            Ok(Range::closed_open("1.25".to_owned(), "9".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_range_whose_value_does_not_match_its_subtype_is_an_error() {
+        let mut out = Vec::new();
+        assert!(
+            write_range(
+                &TypeDef::Int4,
+                &Range::new(
+                    Bound::Included(Value::Text("one".into())),
+                    Bound::Excluded(Value::Int(5)),
+                ),
+                &mut out,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_malformed_range_does_not_panic() {
+        assert!(decode_range_binary::<i32>(&[]).is_err());
+        assert!(decode_range_binary::<i32>(&[0x00]).is_err());
+        assert!(decode_range_binary::<i32>(&[0x02, 0x00, 0x00]).is_err());
+        // `LB_NULL` cannot be represented by a Rust range.
+        assert!(decode_range_binary::<i32>(&[0x20]).is_err());
+    }
+
+    #[test]
+    fn every_builtin_range_has_its_oid() {
+        assert_eq!(
+            element_oid(&TypeDef::Range(TypeDef::Int4.into())),
+            Some(3904)
+        );
+        assert_eq!(
+            element_oid(&TypeDef::Range(TypeDef::Int8.into())),
+            Some(3926)
+        );
+        assert_eq!(
+            element_oid(&TypeDef::Range(TypeDef::Decimal(10, 2).into())),
+            Some(3906)
+        );
+        assert_eq!(
+            element_oid(&TypeDef::Range(TypeDef::Timestamp.into())),
+            Some(3908)
+        );
+        assert_eq!(
+            element_oid(&TypeDef::Range(TypeDef::TimestampTz.into())),
+            Some(3910)
+        );
+        assert_eq!(
+            element_oid(&TypeDef::Range(TypeDef::Date.into())),
+            Some(3912)
+        );
+        // A `TEXT` range has no PostgreSQL type, and an extension type's OID is not stable.
+        assert_eq!(element_oid(&TypeDef::Range(TypeDef::Text.into())), None);
+        assert_eq!(
+            element_oid(&TypeDef::Geometry {
+                kind: besu_core::GeometryKind::Point,
+                srid: None,
+            }),
+            None
+        );
+    }
 }

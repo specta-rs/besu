@@ -898,9 +898,11 @@ fn seed_inferred_supported(ty: &Type) -> bool {
     };
 
     match segment.ident.to_string().as_str() {
-        // An interval, a network address and a bit string have no obvious generated value,
-        // so the seeder leaves them unset and asks for `.set(..)` instead of inventing one.
-        "SqlInterval" | "Inet" | "Cidr" | "BitString" => false,
+        // An interval, a network address, a bit string, a range, a spatial value and a vector
+        // have no obvious generated value, so the seeder leaves them unset and asks for
+        // `.set(..)` instead of inventing one.
+        "SqlInterval" | "Inet" | "Cidr" | "BitString" | "Range" | "Geometry" | "Geography"
+        | "Vector" => false,
         "Vec" => match &segment.arguments {
             syn::PathArguments::AngleBracketed(args) => match args.args.first() {
                 Some(syn::GenericArgument::Type(inner)) => seed_inferred_supported(inner),
@@ -962,6 +964,37 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
         "SqlInterval" => (quote!(#besu::SqlInterval), quote!(#besu::TypeDef::Interval)),
         "Inet" => (quote!(#besu::Inet), quote!(#besu::TypeDef::Inet)),
         "Cidr" => (quote!(#besu::Cidr), quote!(#besu::TypeDef::Cidr)),
+        // A spatial or vector value names its column type itself. The width or shape is part
+        // of the declared type, so narrowing one goes through `sql_type`; a bare field is
+        // the unmodified `GEOMETRY` or `VECTOR`.
+        "Geometry" => (
+            quote!(#besu::Geometry),
+            quote!(#besu::TypeDef::Geometry {
+                kind: #besu::GeometryKind::Geometry,
+                srid: None,
+            }),
+        ),
+        "Vector" => (quote!(#besu::Vector), quote!(#besu::TypeDef::Vector(0))),
+        // A range's element decides the PostgreSQL range type, and the element's own mapping
+        // resolves it exactly as it would for a bare field: `Range<i32>` is `int4range`.
+        "Range" => {
+            let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                return Err(Error::new(ty.span(), "a range needs an element type"));
+            };
+            let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
+                return Err(Error::new(ty.span(), "a range needs an element type"));
+            };
+            let (element, element_def) = sql_type(inner, besu)?;
+            (
+                quote!(#besu::Range<#element>),
+                // `TypeRef::Static` rather than `from_static`: the nested definition is
+                // written straight into the `const TableDef`, and a function call is not a
+                // promotable expression there.
+                quote!(#besu::TypeDef::Range(
+                    #besu::besu_core::types::TypeRef::Static(&#element_def)
+                )),
+            )
+        }
         "Value" => (quote!(#besu::Json), quote!(#besu::TypeDef::Json)),
         "Vec" => {
             let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
@@ -985,9 +1018,11 @@ fn sql_type(ty: &Type, besu: &TokenStream) -> Result<(TokenStream, TokenStream)>
                 let (element, element_def) = sql_type(inner, besu)?;
                 (
                     quote!(#besu::Array<#element>),
-                    quote!(#besu::TypeDef::Array(#besu::besu_core::types::TypeRef::from_static(
-                        &#element_def
-                    ))),
+                    // `TypeRef::Static` directly: an `Array` of a nested definition has to
+                    // stay a promotable expression inside the `const TableDef`.
+                    quote!(#besu::TypeDef::Array(
+                        #besu::besu_core::types::TypeRef::Static(&#element_def)
+                    )),
                 )
             }
         }

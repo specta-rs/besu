@@ -1,5 +1,6 @@
 use besu_core::{
-    BitString, Cidr, Decode, Driver, Error, Inet, Sql, SqlInterval, TransactionDriver, Value,
+    BitString, Cidr, Decode, Driver, Error, Geometry, Inet, Range, Sql, SqlInterval,
+    TransactionDriver, Value, Vector,
 };
 use core::fmt::Write as _;
 use num_traits::ToPrimitive;
@@ -202,6 +203,14 @@ fn arguments(sql: &Sql<MySqlDialect>) -> Result<MySqlArguments, sqlx::Error> {
             // packed bytes are what `BIT` accepts; binding them as a binary parameter is the
             // same value as writing `b'...'` by hand.
             Value::Bit(v) => add(&mut arguments, v.to_bytes())?,
+            // MySQL has no range type, so the column is `TEXT` and the canonical
+            // `[a,b)` spelling is exactly what is stored.
+            Value::Range { range, .. } => add(&mut arguments, Value::range_text(range))?,
+            // A spatial column accepts MySQL's internal format: the four-byte SRID then the
+            // WKB. The value itself is EWKB, so it is converted rather than re-encoded.
+            Value::Geometry(v) => add(&mut arguments, v.to_mysql_bytes())?,
+            // MySQL 8.4 has no vector type; the `[1,2,3]` text is the storage.
+            Value::Vector(v) => add(&mut arguments, v.to_string())?,
             Value::Json(v) => {
                 let text = std::str::from_utf8(v).unwrap_or("null");
                 add(&mut arguments, if text.is_empty() { "null" } else { text })?
@@ -703,5 +712,50 @@ impl Decode<Sqlx> for BitString {
             significant
         })
         .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl<T> Decode<Sqlx> for Range<T>
+where
+    T: core::str::FromStr,
+{
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Range::parse_with(text.trim(), str::parse::<T>)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for Geometry {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        *offset += 1;
+
+        // A geometry column is not a blob as far as sqlx is concerned, so the raw bytes are
+        // decoded directly. MySQL sends the internal format: a four-byte SRID and WKB.
+        let value = row.try_get_raw(index)?;
+        if value.is_null() {
+            return Err(<Sqlx as Driver>::error(Error::decode(
+                index,
+                "a NULL geometry is not a `Geometry`",
+            )));
+        }
+        let bytes = <&[u8] as sqlx::Decode<MySql>>::decode(value)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))?;
+        Self::from_mysql_bytes(bytes)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for Vector {
+    fn decode(row: &MySqlRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        text.trim()
+            .parse()
+            .map_err(|err: besu_core::ParseValueError| {
+                <Sqlx as Driver>::error(Error::decode(index, err.to_string()))
+            })
     }
 }

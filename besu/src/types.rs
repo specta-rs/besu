@@ -5,7 +5,9 @@ use core::marker::PhantomData;
 use alloc::string::String;
 
 use besu_core::TypeDef;
-pub use besu_core::scalars::{BitString, Cidr, Inet, SqlInterval};
+pub use besu_core::scalars::{
+    BitString, Bound, Cidr, Geometry, GeometryKind, Inet, Range, SqlInterval, Vector,
+};
 use besu_core::types::TypeRef;
 use besu_core::value::Value;
 
@@ -448,3 +450,199 @@ impl<const PRECISION: u8, const SCALE: u8> SqlType for Array<Decimal<PRECISION, 
     const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::Decimal(PRECISION, SCALE)));
     type Rust = alloc::vec::Vec<String>;
 }
+
+/// SQL `GEOMETRY`, a PostGIS spatial column.
+///
+/// The value type names the column type itself, so a field of [`Geometry`] is a plain
+/// `GEOMETRY` column — every shape and no fixed SRID. A column narrowed to a shape or an SRID
+/// is declared with one of the markers below:
+///
+/// ```ignore
+/// pub any: Geometry,                                              // GEOMETRY
+/// #[besu(sql_type = "besu::Point<4326>")] pub home: Geometry,     // GEOMETRY(POINT,4326)
+/// #[besu(sql_type = "besu::GeographyPoint")] pub area: Geometry,  // GEOGRAPHY(POINT)
+/// ```
+///
+/// MySQL spells the same shapes `POINT`, `LINESTRING` and so on, and SQLite stores the EWKB
+/// bytes in a `BLOB`.
+impl SqlType for Geometry {
+    const DEF: TypeDef = TypeDef::Geometry {
+        kind: GeometryKind::Geometry,
+        srid: None,
+    };
+    type Rust = Geometry;
+}
+
+/// A spatial column narrowed to a shape and, optionally, an SRID.
+///
+/// The shape and SRID are const parameters so a marker can name them:
+/// `GeometryOf<{ KIND }>` is what the aliases below build, and `SRID` of zero means the
+/// declaration has no SRID, exactly like `VARCHAR` with no length.
+///
+/// You normally name an alias such as [`Point`] rather than this type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct GeometryOf<const KIND: u8, const SRID: u32>;
+
+impl<const KIND: u8, const SRID: u32> SqlType for GeometryOf<KIND, SRID> {
+    const DEF: TypeDef = TypeDef::Geometry {
+        kind: GeometryKind::from_code(KIND),
+        srid: optional_srid(SRID),
+    };
+    type Rust = Geometry;
+}
+
+/// A `GEOGRAPHY` column narrowed to a shape and an optional SRID. See [`GeometryOf`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct GeographyOf<const KIND: u8, const SRID: u32>;
+
+impl<const KIND: u8, const SRID: u32> SqlType for GeographyOf<KIND, SRID> {
+    const DEF: TypeDef = TypeDef::Geography {
+        kind: GeometryKind::from_code(KIND),
+        srid: optional_srid(SRID),
+    };
+    type Rust = Geometry;
+}
+
+/// A zero SRID means "no SRID in the declaration", which is a constant expression.
+const fn optional_srid(srid: u32) -> Option<u32> {
+    if srid == 0 { None } else { Some(srid) }
+}
+
+/// `GEOMETRY(POINT[, SRID])`.
+pub type Point<const SRID: u32 = 0> = GeometryOf<1, SRID>;
+/// `GEOMETRY(LINESTRING[, SRID])`.
+pub type LineString<const SRID: u32 = 0> = GeometryOf<2, SRID>;
+/// `GEOMETRY(POLYGON[, SRID])`.
+pub type Polygon<const SRID: u32 = 0> = GeometryOf<3, SRID>;
+/// `GEOMETRY(MULTIPOINT[, SRID])`.
+pub type MultiPoint<const SRID: u32 = 0> = GeometryOf<4, SRID>;
+/// `GEOMETRY(MULTILINESTRING[, SRID])`.
+pub type MultiLineString<const SRID: u32 = 0> = GeometryOf<5, SRID>;
+/// `GEOMETRY(MULTIPOLYGON[, SRID])`.
+pub type MultiPolygon<const SRID: u32 = 0> = GeometryOf<6, SRID>;
+/// `GEOMETRY(GEOMETRYCOLLECTION[, SRID])`.
+pub type GeometryCollection<const SRID: u32 = 0> = GeometryOf<7, SRID>;
+
+/// `GEOGRAPHY(POINT[, SRID])`.
+pub type GeographyPoint<const SRID: u32 = 0> = GeographyOf<1, SRID>;
+/// `GEOGRAPHY(LINESTRING[, SRID])`.
+pub type GeographyLineString<const SRID: u32 = 0> = GeographyOf<2, SRID>;
+/// `GEOGRAPHY(POLYGON[, SRID])`.
+pub type GeographyPolygon<const SRID: u32 = 0> = GeographyOf<3, SRID>;
+/// `GEOGRAPHY(MULTIPOINT[, SRID])`.
+pub type GeographyMultiPoint<const SRID: u32 = 0> = GeographyOf<4, SRID>;
+/// `GEOGRAPHY(MULTILINESTRING[, SRID])`.
+pub type GeographyMultiLineString<const SRID: u32 = 0> = GeographyOf<5, SRID>;
+/// `GEOGRAPHY(MULTIPOLYGON[, SRID])`.
+pub type GeographyMultiPolygon<const SRID: u32 = 0> = GeographyOf<6, SRID>;
+/// `GEOGRAPHY(GEOMETRYCOLLECTION[, SRID])`.
+pub type GeographyCollection<const SRID: u32 = 0> = GeographyOf<7, SRID>;
+
+/// A `pgvector` `VECTOR` column with no fixed dimension.
+///
+/// A field of [`Vector`] alone is a `VECTOR` column that accepts any dimension. A dimension
+/// is part of the declared type, so a `VECTOR(n)` column is declared with
+/// [`VectorOf`]:
+///
+/// ```ignore
+/// pub any: Vector,                                       // VECTOR
+/// #[besu(sql_type = "besu::VectorOf<3>")] pub xyz: Vector, // VECTOR(3)
+/// ```
+///
+/// A `Vec<f32>` field stays a PostgreSQL array; this type is what says "vector".
+impl SqlType for Vector {
+    const DEF: TypeDef = TypeDef::Vector(0);
+    type Rust = Vector;
+}
+
+/// A `pgvector` `VECTOR(n)` column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct VectorOf<const N: u32>;
+
+impl<const N: u32> SqlType for VectorOf<N> {
+    const DEF: TypeDef = TypeDef::Vector(N);
+    type Rust = Vector;
+}
+
+/// A SQL range over one of PostgreSQL's built-in range subtypes.
+///
+/// The Rust type is [`Range<S::Rust>`](Range), so `Range<Int4>` is a `Range<i32>` and
+/// `Range<TimestampTz>` a `Range<DateTime<Utc>>`. A `Range` field is inferred by the derive:
+///
+/// ```ignore
+/// pub window: besu::Range<i32>,   // int4range
+/// ```
+///
+/// MySQL and SQLite have no range type and store the canonical text.
+///
+/// A `DECIMAL` range is `Range<Decimal<PRECISION, SCALE>>`; the precision and scale are not
+/// part of PostgreSQL's `numrange` (its subtype is an unconstrained `numeric`), so the dialect
+/// folds them away. `Range<Decimal<0, 0>>` is the spelling that compares equal to what
+/// introspection reports.
+impl SqlType for Range<Int4> {
+    const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Int4));
+    type Rust = Range<i32>;
+}
+
+impl SqlType for Range<Int8> {
+    const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Int8));
+    type Rust = Range<i64>;
+}
+
+impl SqlType for Range<Timestamp> {
+    const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Timestamp));
+    type Rust = Range<chrono::NaiveDateTime>;
+}
+
+impl SqlType for Range<TimestampTz> {
+    const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::TimestampTz));
+    type Rust = Range<chrono::DateTime<chrono::Utc>>;
+}
+
+impl SqlType for Range<Date> {
+    const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Date));
+    type Rust = Range<chrono::NaiveDate>;
+}
+
+impl<const PRECISION: u8, const SCALE: u8> SqlType for Range<Decimal<PRECISION, SCALE>> {
+    const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Decimal(PRECISION, SCALE)));
+    type Rust = Range<String>;
+}
+
+/// A PostgreSQL array of ranges, as in `int4range[]`.
+///
+/// PostgreSQL's binary array header names the element OID, and the driver knows the six
+/// built-in range types, so a `Vec<Range<T>>` round-trips like any other array.
+impl SqlType for Array<Range<Int4>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&RANGE_INT4));
+    type Rust = alloc::vec::Vec<Range<i32>>;
+}
+
+impl SqlType for Array<Range<Int8>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&RANGE_INT8));
+    type Rust = alloc::vec::Vec<Range<i64>>;
+}
+
+impl SqlType for Array<Range<Timestamp>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&RANGE_TIMESTAMP));
+    type Rust = alloc::vec::Vec<Range<chrono::NaiveDateTime>>;
+}
+
+impl SqlType for Array<Range<TimestampTz>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&RANGE_TIMESTAMPTZ));
+    type Rust = alloc::vec::Vec<Range<chrono::DateTime<chrono::Utc>>>;
+}
+
+impl SqlType for Array<Range<Date>> {
+    const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&RANGE_DATE));
+    type Rust = alloc::vec::Vec<Range<chrono::NaiveDate>>;
+}
+
+// A range type is built once as a named `static`: nesting the reference to the subtype's
+// `TypeDef` inside another promoted temporary cannot be evaluated in a constant, and a
+// `static` is a place rather than a value that has to be dropped.
+static RANGE_INT4: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Int4));
+static RANGE_INT8: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Int8));
+static RANGE_TIMESTAMP: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Timestamp));
+static RANGE_TIMESTAMPTZ: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::TimestampTz));
+static RANGE_DATE: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Date));

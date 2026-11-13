@@ -40,6 +40,13 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
                AND t.table_schema NOT LIKE 'pg_temp%' \
                AND t.table_type = 'BASE TABLE' \
                AND t.table_name <> '_besu_migrations' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   JOIN pg_class c ON c.oid = d.objid \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   WHERE d.deptype = 'e' \
+                     AND n.nspname = t.table_schema AND c.relname = t.table_name \
+               ) \
              ORDER BY t.table_schema, t.table_name"
         ))
         .all::<(String, String)>()
@@ -205,6 +212,11 @@ async fn introspect_views(
                AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
                AND n.nspname NOT LIKE 'pg_toast%' \
                AND n.nspname NOT LIKE 'pg_temp%' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid \
+                     AND d.deptype = 'e' \
+               ) \
              ORDER BY n.nspname, c.relname"
         ))
         .all::<(String, String, bool, Option<String>)>()
@@ -249,6 +261,12 @@ async fn introspect_sequences(
                      AND d.classid = 'pg_class'::regclass \
                      AND d.refclassid = 'pg_class'::regclass \
                      AND d.deptype IN ('a', 'i') \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   WHERE d.objid = c.oid \
+                     AND d.classid = 'pg_class'::regclass \
+                     AND d.deptype = 'e' \
                ) \
              ORDER BY s.schemaname, s.sequencename"
         ))
@@ -514,7 +532,7 @@ fn column_type(
         // `[]` suffix `format_type` writes is only used for a type Besu models directly.
         if let (Some(element), Some(element_typname), Some(element_typnamespace)) =
             (element_typtype, element_typname, element_typnamespace)
-            && matches!(element, "d" | "e" | "c" | "r")
+            && matches!(element, "d" | "e" | "c")
         {
             return TypeDef::Array(besu_core::types::TypeRef::owned(TypeDef::Custom(
                 qualified(element_typnamespace, element_typname, current).into(),
@@ -535,8 +553,10 @@ fn parse_named_type(
     current: Option<&str>,
 ) -> TypeDef {
     match typtype {
-        // An enum, a composite, a range or another domain is a name, not a spelling.
-        "e" | "d" | "c" | "r" => TypeDef::Custom(qualified(typnamespace, typname, current).into()),
+        // An enum, a composite or another domain is a name, not a spelling. A range keeps
+        // its name in `format_type` too, but the six built-in range types are recognised by
+        // spelling, so `parse_type_name` sees it rather than a `Custom` in advance.
+        "e" | "d" | "c" => TypeDef::Custom(qualified(typnamespace, typname, current).into()),
         _ => match formatted.strip_suffix("[]") {
             Some(element) => {
                 TypeDef::Array(besu_core::types::TypeRef::owned(parse_type_name(element)))
@@ -597,9 +617,52 @@ fn parse_type_name(formatted: &str) -> TypeDef {
         "interval" => TypeDef::Interval,
         "inet" => TypeDef::Inet,
         "cidr" => TypeDef::Cidr,
+        // The six built-in range types. Their subtype is what the value's wire format is, and
+        // it is also the only thing the type name encodes.
+        "int4range" => TypeDef::Range(TypeRef::from_static(&TypeDef::Int4)),
+        "int8range" => TypeDef::Range(TypeRef::from_static(&TypeDef::Int8)),
+        // `numrange`'s subtype is an unconstrained `numeric`, which `Decimal` cannot express;
+        // `Decimal(0, 0)` is the spelling the dialect folds to and renders from.
+        "numrange" => TypeDef::Range(TypeRef::from_static(&TypeDef::Decimal(0, 0))),
+        "tsrange" => TypeDef::Range(TypeRef::from_static(&TypeDef::Timestamp)),
+        "tstzrange" => TypeDef::Range(TypeRef::from_static(&TypeDef::TimestampTz)),
+        "daterange" => TypeDef::Range(TypeRef::from_static(&TypeDef::Date)),
+        // PostGIS spells a narrowed column `geometry(Point,4326)`, which `split_modifier` has
+        // already separated into the base name and the `Point,4326` modifier.
+        "geometry" => spatial_type(false, modifier),
+        "geography" => spatial_type(true, modifier),
+        // `pgvector` reports `vector(3)` and, for a column declared without a dimension,
+        // `vector`.
+        "vector" => TypeDef::Vector(number(modifier).unwrap_or(0)),
         // An enum, a composite, a range, `tsvector` and every extension type keep their
         // native spelling, so generated DDL names the same type.
         _ => TypeDef::Custom(formatted.to_owned().into()),
+    }
+}
+
+/// Build a PostGIS `geometry`/`geography` type from `format_type`'s modifier.
+///
+/// A plain `geometry` has no modifier at all; a narrowed one spells the shape and,
+/// optionally, the SRID — `Point,4326`.
+fn spatial_type(geography: bool, modifier: Option<&str>) -> TypeDef {
+    use besu_core::GeometryKind;
+
+    let (kind, srid) = match modifier {
+        None => (GeometryKind::Geometry, None),
+        Some(modifier) => {
+            let mut parts = modifier.split(',');
+            let kind = parts
+                .next()
+                .map(GeometryKind::from_name)
+                .unwrap_or(GeometryKind::Geometry);
+            let srid = parts.next().and_then(|srid| srid.trim().parse().ok());
+            (kind, srid)
+        }
+    };
+    if geography {
+        TypeDef::Geography { kind, srid }
+    } else {
+        TypeDef::Geometry { kind, srid }
     }
 }
 

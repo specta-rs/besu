@@ -30,6 +30,12 @@ that holds it, or to `NUMERIC` when no integer is wide enough.
 | `chrono::DateTime<Utc>` | `TimestampTz` | `TimestampTz` | `TIMESTAMPTZ` |
 | `serde_json::Value` | `Json` | `Json` | `JSON` |
 | `Vec<T>` | `Array<T>` | `Array(T)` | `<T>[]` |
+| `besu::Range<T>` | `Range<T>` | `Range(T)` | `int4range`, `int8range`, `numrange`, `tsrange`, `tstzrange`, `daterange` |
+| `besu::Geometry` | the type itself | `Geometry { .. }` | `GEOMETRY` |
+| `#[besu(sql_type = "besu::Point<srid>")]` | `Point<srid>` and the other shapes | `Geometry { kind, srid }` | `GEOMETRY(POINT,4326)` |
+| `#[besu(sql_type = "besu::GeographyPoint<srid>")]` | the `Geography*` markers | `Geography { kind, srid }` | `GEOGRAPHY(POINT,4326)` |
+| `besu::Vector` | the type itself | `Vector(0)` | `VECTOR` |
+| `#[besu(sql_type = "besu::VectorOf<n>")]` | `VectorOf<n>` | `Vector(n)` | `VECTOR(n)` |
 | `besu::SqlInterval` | the type itself | `Interval` | `INTERVAL` |
 | `besu::Inet` | the type itself | `Inet` | `INET` |
 | `besu::Cidr` | the type itself | `Cidr` | `CIDR` |
@@ -39,7 +45,9 @@ that holds it, or to `NUMERIC` when no integer is wide enough.
 | `#[besu(sql_type = "..")]` | `Char<N>`, `VarChar<N>`, `Decimal<P, S>`, `Jsonb` | matching | `CHAR(n)`, `VARCHAR(n)`, `NUMERIC(p,s)`, `JSONB` |
 
 Everything in the table round-trips through an insert and a `SELECT`. A pulled `Custom` type
-round-trips through DDL only.
+round-trips through DDL only. The rows for ranges, spatial columns and vectors describe native
+PostgreSQL and extension types: a range needs nothing extra, while PostGIS and `pgvector` must
+be installed (`CREATE EXTENSION postgis` / `CREATE EXTENSION vector`).
 
 ## Integers
 
@@ -209,6 +217,9 @@ is how a schema shared with MySQL keeps working; see the [declaration guide](../
 | `interval` | `Interval` |
 | `inet` | `Inet` |
 | `cidr` | `Cidr` |
+| `int4range`, `int8range`, `numrange`, `tsrange`, `tstzrange`, `daterange` | `Range(Int4)`, `Range(Int8)`, `Range(Decimal(0,0))`, `Range(Timestamp)`, `Range(TimestampTz)`, `Range(Date)` |
+| `geometry[(shape[, srid])]`, `geography[(shape[, srid])]` | `Geometry { kind, srid }`, `Geography { kind, srid }` |
+| `vector[(n)]` | `Vector(n)`; a bare `vector` is `Vector(0)` |
 | `<inner>[]` | `Array(inner)`, read through `pg_type.typelem`/`typarray` |
 | a domain | `Domain(name, base)`, where `base` is what the domain is built on |
 | an enum | `Custom(name)`, and listed in `Schema::enums` |
@@ -303,15 +314,127 @@ A `Vec` decodes one dimension. A multi-dimensional array, or one containing a `N
 needs `sql!`. `Vec<String>` binds its elements as `TEXT[]`, so a `VARCHAR(n)[]` column needs the
 typed expression path rather than a whole-model insert.
 
+## Ranges
+
+A `Range<T>` field is one of PostgreSQL's six built-in range types, named after its subtype:
+
+```rust
+use besu::Range;
+
+pub ids: Range<i32>,                          // int4range
+pub huge: Range<i64>,                         // int8range
+pub window: Range<chrono::NaiveDateTime>,     // tsrange
+pub window_tz: Range<chrono::DateTime<chrono::Utc>>, // tstzrange
+pub day: Range<chrono::NaiveDate>,            // daterange
+#[besu(sql_type = "besu::Range<besu::Decimal<0, 0>>")]
+pub amount: Range<String>,                    // numrange
+```
+
+`numrange`'s subtype is an unconstrained `numeric`, so the precision and scale on the marker are
+not part of the column type: `Range<Decimal<10,2>>` still declares `numrange`, and introspection
+reports `Range(Decimal(0, 0))`. A range over any other subtype has no built-in PostgreSQL type
+and is stored as `TEXT`.
+
+The value is [`besu::Range`](https://docs.rs/besu/latest/besu/enum?search=Range), which keeps
+each bound and whether it is included:
+
+```rust
+let ids = Range::closed(1, 5);                    // [1,5]
+let window = Range::new(Bound::Included(1), Bound::Excluded(5)); // [1,5)
+let nothing = Range::empty();
+assert!(window.contains(&2));
+```
+
+`Display` writes PostgreSQL's `[a,b)` spelling and `FromStr` reads it, including `empty`, an
+open end and a quoted bound. The value is written in PostgreSQL's binary range format — a flag
+byte, then each finite bound as the subtype's own encoding behind a four-byte length — and read
+back the same way, so `int8range` keeps values wider than 64 bits and `tstzrange` keeps the
+instant.
+
+PostgreSQL canonicalises a **discrete** range: `[1,5]` is stored as `[1,6)`, and `(1,5)` as
+`[2,5)`. `int4range`, `int8range` and `daterange` are discrete; the timestamp and numeric ranges
+are continuous and keep their bounds exactly. A model compares against what the server returns,
+so write the canonical spelling when it matters — or use `closed_open`.
+
+An array of ranges (`Vec<Range<i32>>`) is a real `int4range[]`: the binary array header names the
+range's OID, which the driver knows for all six built-in types.
+
+## Spatial
+
+PostGIS columns are `Geometry` values carrying EWKB:
+
+```rust
+use besu::Geometry;
+
+pub any: Geometry,                                      // GEOMETRY
+#[besu(sql_type = "besu::Point<4326>")]
+pub home: Geometry,                                     // GEOMETRY(POINT,4326)
+#[besu(sql_type = "besu::LineString<4326>")]
+pub route: Geometry,                                    // GEOMETRY(LINESTRING,4326)
+#[besu(sql_type = "besu::GeographyPoint<4326>")]
+pub area: Geometry,                                     // GEOGRAPHY(POINT,4326)
+```
+
+The shape and SRID are part of the declared column type: PostgreSQL reports them through
+`format_type` as `geometry(Point,4326)`, so they are carried in
+`TypeDef::Geometry { kind, srid }` and `TypeDef::Geography { kind, srid }`. A bare `Geometry`
+field is the unmodified `GEOMETRY`, which accepts every shape and names no SRID. The markers are
+`Point`, `LineString`, `Polygon`, `MultiPoint`, `MultiLineString`, `MultiPolygon` and
+`GeometryCollection`, plus the `Geography*` spellings; the optional const parameter is the SRID.
+A shape Besu does not name — `PointZ`, say — is kept verbatim as `GeometryKind::Other`.
+
+The value stores EWKB exactly as PostGIS sends it, so a round trip is byte-for-byte lossless:
+
+```rust
+let point = Geometry::from_hex("0101000020E6100000...")?;
+assert_eq!(point.srid(), Some(4326));
+assert_eq!(point.kind(), Some(besu::GeometryKind::Point));
+assert_eq!(point.ewkb(), &point.clone().into_ewkb()[..]);
+```
+
+`Geometry::from_ewkb` and `ewkb()` are the raw form; `from_hex`/`to_hex` and `Display`/`FromStr`
+are the hex form PostGIS's output function writes. The driver binds the EWKB as an untyped
+parameter, because PostGIS's OID is assigned when the extension is created and there is no stable
+OID to declare, and decodes through the raw bytes for the same reason.
+
+`push`/`pull` skip tables, views and sequences that belong to an extension, so PostGIS's own
+`spatial_ref_sys` and `topology` objects are not seen as drift.
+
+## Vectors
+
+`pgvector`'s `VECTOR(n)` is a `besu::Vector`, a `Vec<f32>` wrapper:
+
+```rust
+use besu::Vector;
+
+pub any: Vector,                                        // VECTOR
+#[besu(sql_type = "besu::VectorOf<3>")]
+pub xyz: Vector,                                        // VECTOR(3)
+```
+
+A `Vec<f32>` field stays a PostgreSQL `REAL[]`; `Vector` is what says "vector column". The
+dimension is part of the declared type, so it is reached through `VectorOf<n>` and carried as
+`TypeDef::Vector(n)`; a bare `VECTOR` accepts any dimension and introspects as `Vector(0)`.
+
+The parameter is sent untyped in `pgvector`'s binary form — a two-byte dimension, two unused
+bytes and the components as big-endian `f32`s — so the server infers `vector(n)` from the column
+and checks the dimension itself. A result is decoded from the same binary form; if a server
+returns the `[1,2,3]` text instead, that spelling is parsed too. `Display` and `FromStr` write and
+read `[1,2,3]`.
+
+The `halfvec` and `sparsevec` types are not modelled: they come back as `Custom("halfvec")` and
+`Custom("sparsevec")`, round-trip through DDL, and are read through `sql!`.
+
 ## Custom types
 
-Composite types, ranges, `tsvector` and extension types such as `pgvector` come back as
-`Custom(name)`. The name is preserved and each dotted part is quoted, so `MySchema.Mood` reaches
-the type it names rather than folding to lowercase. There is no Rust type for these, so read
-them through `sql!`.
+Composite types, `tsvector` and an extension type Besu does not model — `halfvec`, `sparsevec`,
+`hstore` — come back as `Custom(name)`. The name is preserved and each dotted part is quoted, so
+`MySchema.Mood` reaches the type it names rather than folding to lowercase. There is no Rust type
+for these, so read them through `sql!`.
 
-Enums, domains, intervals, network addresses and bit strings are not `Custom`: they have their
-own `TypeDef` variants and values that round-trip.
+Enums, domains, intervals, network addresses, bit strings, ranges, PostGIS geometries and
+`pgvector` vectors are not `Custom`: they have their own `TypeDef` variants and values that
+round-trip.
 
 A column over a PostgreSQL enum declared by hand is `Custom("mood")`; the type itself lives in
 `Schema::enums`, which is introspected, diffed and rendered as `CREATE TYPE`. A derived enum
@@ -357,3 +480,10 @@ is the innermost base's.
   `Custom("numeric")` rather than a decimal.
 - An interval with a field qualifier, such as `INTERVAL DAY TO SECOND`, keeps its full spelling
   as `Custom`; only the plain `INTERVAL` is modelled.
+- A discrete range is canonicalised by the server: `[1,5]` in an `int4range` reads back as
+  `[1,6)`. The value is right; only the spelling changed.
+- PostGIS and `pgvector` are extensions. A database without them rejects the DDL, and Besu's
+  introspection reports a column it cannot decode when the extension is missing from the
+  connection's search path.
+- A `GEOMETRY` column with a shape or SRID is a different type from a bare `GEOMETRY`, so a
+  declared bare `Geometry` field against a `geometry(Point,4326)` column reports drift.

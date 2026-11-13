@@ -49,7 +49,10 @@ pub use driver::{Driver, RowStream, TransactionDriver, futures_stream};
 pub use error::Error;
 pub use executor::{DialectOf, Dry, DryDriver, DryRow, ErrorOf, Executor, RowOf};
 pub use futures_core::Stream;
-pub use scalars::{BitString, Cidr, Inet, ParseValueError, SqlInterval};
+pub use scalars::{
+    BitString, Bound, Cidr, Geometry, GeometryKind, Inet, ParseValueError, Range, SqlInterval,
+    Vector,
+};
 pub use schema::{
     CheckDef, ColumnDef, DefaultValue, ForeignKey, Generated, Index, IndexColumn, IndexEntry,
     IndexKind, TableDef,

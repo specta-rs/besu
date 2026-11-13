@@ -556,6 +556,7 @@ pub(crate) fn type_names(ty: &TypeDef, name: &str) -> bool {
         TypeDef::Domain(def) => def.name.as_ref() == name,
         TypeDef::Collated(inner, _) => type_names(inner, name),
         TypeDef::Array(inner) => type_names(inner.as_type(), name),
+        TypeDef::Range(inner) => type_names(inner.as_type(), name),
         _ => false,
     }
 }
@@ -623,7 +624,7 @@ impl Schema {
                 });
             }
             TypeDef::Collated(inner, _) => self.collect_enum(inner),
-            TypeDef::Array(inner) => self.collect_enum(inner.as_type()),
+            TypeDef::Array(inner) | TypeDef::Range(inner) => self.collect_enum(inner.as_type()),
             _ => {}
         }
     }
@@ -644,7 +645,7 @@ impl Schema {
                 });
             }
             TypeDef::Collated(inner, _) => self.collect_domain(inner),
-            TypeDef::Array(inner) => self.collect_domain(inner.as_type()),
+            TypeDef::Array(inner) | TypeDef::Range(inner) => self.collect_domain(inner.as_type()),
             _ => {}
         }
     }

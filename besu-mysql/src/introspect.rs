@@ -231,6 +231,34 @@ async fn introspect_table(db: &besu::Database<Sqlx>, name: String) -> Result<Tab
 
     table.foreign_keys = group_foreign_keys(foreign_keys);
 
+    // A spatial column's SRID is not part of `COLUMN_TYPE`; MySQL 8 keeps it in
+    // `ST_GEOMETRY_COLUMNS`. A server that does not have the view (MariaDB, or a very old
+    // MySQL) simply reports no SRIDs, which is the same as every column having none.
+    let srids = db
+        .execute(table_query(
+            "SELECT COLUMN_NAME, SRS_ID FROM information_schema.ST_GEOMETRY_COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+            &name,
+        ))
+        .all::<(String, Option<u32>)>()
+        .await
+        .unwrap_or_default();
+    for column in &mut table.columns {
+        // The view reports an SRID of zero for a geometry with none, which is not an SRID
+        // PostgreSQL or MySQL would name in a declaration.
+        let srid = srids
+            .iter()
+            .find(|(column_name, _)| *column_name == column.name)
+            .and_then(|(_, srid)| *srid)
+            .filter(|srid| *srid != 0);
+        match &mut column.ty {
+            TypeDef::Geometry { srid: slot, .. } | TypeDef::Geography { srid: slot, .. } => {
+                *slot = srid;
+            }
+            _ => {}
+        }
+    }
+
     let mut indexes: Vec<RawIndex> = Vec::new();
     for (index_name, column_name, expression, non_unique, index_type) in statistics {
         // A column key part has a `COLUMN_NAME`; a functional one has an `EXPRESSION` and no
@@ -527,6 +555,43 @@ fn parse_type(data_type: &str, column_type: &str) -> TypeDef {
         },
         // `BIT(n)` is a fixed-width bit string. MySQL reports the width in `COLUMN_TYPE`.
         "bit" => TypeDef::Bit(length(&lower).unwrap_or(1)),
+        // MySQL's spatial types are named by their shape. The SRID is a column attribute in
+        // `ST_GEOMETRY_COLUMNS`, which is read separately below; a column without one has no
+        // SRID at all.
+        "geometry" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::Geometry,
+            srid: None,
+        },
+        "point" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::Point,
+            srid: None,
+        },
+        "linestring" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::LineString,
+            srid: None,
+        },
+        "polygon" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::Polygon,
+            srid: None,
+        },
+        "multipoint" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::MultiPoint,
+            srid: None,
+        },
+        "multilinestring" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::MultiLineString,
+            srid: None,
+        },
+        "multipolygon" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::MultiPolygon,
+            srid: None,
+        },
+        // MySQL 8 reports the collection as `geomcollection`; the standard name is also
+        // accepted when the server writes it.
+        "geomcollection" | "geometrycollection" => TypeDef::Geometry {
+            kind: besu_core::GeometryKind::GeometryCollection,
+            srid: None,
+        },
         // Anything newer than this crate knows about keeps its native spelling, so generated
         // DDL round-trips.
         _ => TypeDef::Custom(column_type.to_owned().into()),

@@ -159,6 +159,46 @@ pub flags: besu::BitString,
 pub tail: besu::BitString,
 ```
 
+A range is inferred from its element, because the element is what names the PostgreSQL type:
+
+```rust
+pub ids: besu::Range<i32>,                          // int4range
+pub window: besu::Range<chrono::NaiveDateTime>,     // tsrange
+#[besu(sql_type = "besu::Range<besu::Decimal<0, 0>>")]
+pub amount: besu::Range<String>,                    // numrange
+```
+
+A `Vec<Range<i32>>` field is an `int4range[]`. MySQL and SQLite have no range type: the column is
+`TEXT` there and the canonical `[a,b)` spelling round-trips through the driver.
+
+Spatial columns are `besu::Geometry`, and a bare field is the unmodified `GEOMETRY`:
+
+```rust
+pub any: besu::Geometry,                                // GEOMETRY (BLOB on SQLite)
+#[besu(sql_type = "besu::Point<4326>")]
+pub home: besu::Geometry,                               // GEOMETRY(POINT,4326)
+#[besu(sql_type = "besu::LineString")]
+pub route: besu::Geometry,                              // GEOMETRY(LINESTRING)
+#[besu(sql_type = "besu::GeographyPoint<4326>")]
+pub area: besu::Geometry,                               // GEOGRAPHY(POINT,4326) on PostgreSQL
+```
+
+The shape and SRID are part of the declared type, so they are spelled with an optional const
+parameter: `Point`, `LineString`, `Polygon`, `MultiPoint`, `MultiLineString`, `MultiPolygon`,
+`GeometryCollection` and the `Geography*` spellings. SQLite stores the EWKB bytes in a `BLOB`.
+
+A vector is `besu::Vector`, and its dimension is part of the type:
+
+```rust
+pub any: besu::Vector,                                  // VECTOR (any dimension)
+#[besu(sql_type = "besu::VectorOf<3>")]
+pub xyz: besu::Vector,                                  // VECTOR(3)
+```
+
+A `Vec<f32>` field stays a PostgreSQL `REAL[]`: a vector column is always the explicit field
+type, because the Rust shape `Vec<f32>` cannot say which of the two it means. On MySQL and
+SQLite the column is `TEXT` and holds `[1,2,3]`.
+
 MySQL's `SET(...)` has a label list of its own, so it is declared by writing the marker:
 
 ```rust

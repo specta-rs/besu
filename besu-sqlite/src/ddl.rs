@@ -121,6 +121,11 @@ impl Ddl for SQLiteDdl {
             // domain is stored as its base type.
             TypeDef::Bit(_) | TypeDef::VarBit(_) => TypeDef::Text,
             TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => TypeDef::Text,
+            TypeDef::Range(_) => TypeDef::Text,
+            // A declared spatial column is stored in a `BLOB`, which is what introspection
+            // reports back for it.
+            TypeDef::Geometry { .. } | TypeDef::Geography { .. } => TypeDef::Bytes,
+            TypeDef::Vector(_) => TypeDef::Text,
             TypeDef::Set(_) => TypeDef::Text,
             TypeDef::Domain(def) => self.normalise_type(def.base.as_type()),
             TypeDef::Array(_) => TypeDef::Json,
@@ -438,6 +443,34 @@ mod tests {
             ),
             TypeDef::Int8
         );
+    }
+
+    #[test]
+    fn a_range_and_a_vector_fold_onto_text_and_a_spatial_type_onto_a_blob() {
+        // SQLite has no range, vector or spatial type, so the declaration has to fold onto
+        // the storage that introspection reports: `TEXT` for the canonical text and `BLOB`
+        // for the EWKB bytes.
+        let ddl = SQLiteDdl;
+        let range = TypeDef::Range(besu_core::types::TypeRef::owned(TypeDef::Int4));
+        assert_eq!(Ddl::type_name(&ddl, &range), "TEXT");
+        assert_eq!(Ddl::normalise_type(&ddl, &range), TypeDef::Text);
+
+        let vector = TypeDef::Vector(3);
+        assert_eq!(Ddl::type_name(&ddl, &vector), "TEXT");
+        assert_eq!(Ddl::normalise_type(&ddl, &vector), TypeDef::Text);
+
+        let point = TypeDef::Geometry {
+            kind: besu_core::GeometryKind::Point,
+            srid: Some(4326),
+        };
+        assert_eq!(Ddl::type_name(&ddl, &point), "BLOB");
+        assert_eq!(Ddl::normalise_type(&ddl, &point), TypeDef::Bytes);
+        let geography = TypeDef::Geography {
+            kind: besu_core::GeometryKind::Geometry,
+            srid: None,
+        };
+        assert_eq!(Ddl::type_name(&ddl, &geography), "BLOB");
+        assert_eq!(Ddl::normalise_type(&ddl, &geography), TypeDef::Bytes);
     }
 
     #[test]

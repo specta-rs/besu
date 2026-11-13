@@ -20,6 +20,7 @@ use crate::types::{
     Inet, Int1, Int2, Int4, Int8, Json, Jsonb, Nullability, SqlInterval, SqlType, Text, Time,
     Timestamp, TimestampTz, TypeWitness, U128, UInt1, UInt2, UInt4, UInt8, Uuid, VarBit, VarChar,
 };
+use crate::types::{GeographyOf, Geometry, GeometryOf, Range, Vector, VectorOf};
 
 use crate::condition::Contains;
 
@@ -2768,6 +2769,92 @@ impl<const N: u32> IntoSqlValue<Bit<N>> for BitString {
 impl<const N: u32> IntoSqlValue<VarBit<N>> for BitString {
     fn into_sql_value(self) -> Value {
         Value::Bit(self)
+    }
+}
+
+/// A range is bound with its subtype, because PostgreSQL's binary range format stores each
+/// bound as the subtype's own encoding.
+macro_rules! range_values {
+    ($($sql:ty, $rust:ty => $element:expr, $convert:expr;)*) => {
+        $(
+            impl IntoSqlValue<Range<$sql>> for Range<$rust> {
+                fn into_sql_value(self) -> Value {
+                    Value::Range {
+                        element: $element,
+                        range: alloc::boxed::Box::new(self.map($convert)),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+range_values! {
+    Int4, i32 => TypeDef::Int4, |value| Value::Int(i64::from(value));
+    Int8, i64 => TypeDef::Int8, Value::Int;
+    Timestamp, chrono::NaiveDateTime => TypeDef::Timestamp, Value::Timestamp;
+    TimestampTz, chrono::DateTime<chrono::Utc> => TypeDef::TimestampTz, Value::TimestampTz;
+    Date, chrono::NaiveDate => TypeDef::Date, Value::Date;
+}
+
+impl<const PRECISION: u8, const SCALE: u8> IntoSqlValue<Range<Decimal<PRECISION, SCALE>>>
+    for Range<String>
+{
+    fn into_sql_value(self) -> Value {
+        // The declared subtype is an unconstrained `numeric` in PostgreSQL's `numrange`; the
+        // marker's precision and scale only describe the Rust field.
+        Value::Range {
+            element: TypeDef::Decimal(PRECISION, SCALE),
+            range: alloc::boxed::Box::new(self.map(Value::Decimal)),
+        }
+    }
+}
+
+// An array of ranges binds each element through the range's own conversion, which is the
+// blanket `Vec<S::Rust>: IntoSqlValue<Array<S>>` implementation already in this file.
+impl IntoSqlValue<Geometry> for Geometry {
+    fn into_sql_value(self) -> Value {
+        Value::Geometry(self)
+    }
+}
+
+/// A narrowed `GEOMETRY(n)` marker holds the same value as the generic one.
+impl<const KIND: u8, const SRID: u32> IntoSqlValue<GeometryOf<KIND, SRID>> for Geometry {
+    fn into_sql_value(self) -> Value {
+        Value::Geometry(self)
+    }
+}
+
+/// A `GEOGRAPHY` marker holds the same EWKB value as a `GEOMETRY` one.
+impl<const KIND: u8, const SRID: u32> IntoSqlValue<GeographyOf<KIND, SRID>> for Geometry {
+    fn into_sql_value(self) -> Value {
+        Value::Geometry(self)
+    }
+}
+
+impl IntoSqlValue<Vector> for Vector {
+    fn into_sql_value(self) -> Value {
+        Value::Vector(self)
+    }
+}
+
+/// A `VECTOR(n)` marker holds the same value as the unbounded one.
+impl<const N: u32> IntoSqlValue<VectorOf<N>> for Vector {
+    fn into_sql_value(self) -> Value {
+        Value::Vector(self)
+    }
+}
+
+/// A vector column takes anything that converts into its components.
+impl IntoSqlValue<Vector> for Vec<f32> {
+    fn into_sql_value(self) -> Value {
+        Value::Vector(Vector::new(self))
+    }
+}
+
+impl<const N: u32> IntoSqlValue<VectorOf<N>> for Vec<f32> {
+    fn into_sql_value(self) -> Value {
+        Value::Vector(Vector::new(self))
     }
 }
 

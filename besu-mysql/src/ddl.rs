@@ -189,6 +189,19 @@ impl Ddl for MySqlDdl {
             // MySQL has no interval, address or bit-string text type either: all three are
             // declared `TEXT` and the canonical text is what comes back.
             TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => TypeDef::Text,
+            // The same is true of a range and a vector: both are declared `TEXT` and the
+            // canonical text is what the column holds.
+            TypeDef::Range(_) | TypeDef::Vector(_) => TypeDef::Text,
+            // MySQL has real spatial types but no `GEOGRAPHY` and no SRID of zero: `SRID 0`
+            // means "no SRID" and the view reports it as absent.
+            TypeDef::Geometry { kind, srid } => TypeDef::Geometry {
+                kind: kind.clone(),
+                srid: srid.filter(|srid| *srid != 0),
+            },
+            TypeDef::Geography { kind, srid } => TypeDef::Geometry {
+                kind: kind.clone(),
+                srid: srid.filter(|srid| *srid != 0),
+            },
             // MySQL has one bit type. `VARBIT(n)` is declared `BIT(n)`, and an unbounded
             // `VARBIT` is `BIT(64)`, so the two fold together by width.
             TypeDef::VarBit(0) => TypeDef::Bit(64),
@@ -569,6 +582,57 @@ impl Ddl for MySqlDdl {
 mod tests {
     use super::*;
     use besu_schema::Unique;
+
+    #[test]
+    fn a_range_vector_and_spatial_type_have_their_storage_spelling() {
+        // MySQL has no range or vector type, so both are `TEXT`; a range's canonical
+        // spelling and a vector's `[1,2,3]` text are exact and round-trip. Spatial columns
+        // are real types, with the SRID as a column attribute.
+        let range = TypeDef::Range(besu_core::types::TypeRef::owned(TypeDef::Int4));
+        assert_eq!(MySql::type_name(range.clone()), "TEXT");
+        assert_eq!(Ddl::normalise_type(&MySqlDdl, &range), TypeDef::Text);
+
+        let vector = TypeDef::Vector(3);
+        assert_eq!(MySql::type_name(vector.clone()), "TEXT");
+        assert_eq!(Ddl::normalise_type(&MySqlDdl, &vector), TypeDef::Text);
+
+        let point = TypeDef::Geometry {
+            kind: besu_core::GeometryKind::Point,
+            srid: Some(4326),
+        };
+        assert_eq!(MySql::type_name(point.clone()), "POINT SRID 4326");
+        assert_eq!(Ddl::normalise_type(&MySqlDdl, &point), point);
+
+        // MySQL has no `GEOGRAPHY`, so the declaration renders as `GEOMETRY` and the fold
+        // says the two are the same column.
+        let geography = TypeDef::Geography {
+            kind: besu_core::GeometryKind::Point,
+            srid: None,
+        };
+        assert_eq!(MySql::type_name(geography.clone()), "POINT");
+        assert_eq!(
+            Ddl::normalise_type(&MySqlDdl, &geography),
+            TypeDef::Geometry {
+                kind: besu_core::GeometryKind::Point,
+                srid: None,
+            }
+        );
+
+        // `SRID 0` means "no SRID" and folds away.
+        assert_eq!(
+            Ddl::normalise_type(
+                &MySqlDdl,
+                &TypeDef::Geometry {
+                    kind: besu_core::GeometryKind::LineString,
+                    srid: Some(0),
+                }
+            ),
+            TypeDef::Geometry {
+                kind: besu_core::GeometryKind::LineString,
+                srid: None,
+            }
+        );
+    }
 
     #[test]
     fn a_timestamp_with_a_zone_converges() {

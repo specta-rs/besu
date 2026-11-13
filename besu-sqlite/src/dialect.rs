@@ -94,6 +94,16 @@ impl Dialect for SQLite {
             // the exact value and is what introspection reports back.
             TypeDef::Bit(_) | TypeDef::VarBit(_) => "TEXT",
             TypeDef::Interval | TypeDef::Inet | TypeDef::Cidr => "TEXT",
+            // SQLite has no range type; the canonical `[a,b)` text is exact and is what the
+            // declaration and introspection both see.
+            TypeDef::Range(_) => "TEXT",
+            // SQLite has no spatial type. SpatiaLite adds one, but a plain database has
+            // nothing to declare, so the bytes are stored in a `BLOB` and `normalise_type`
+            // folds the declaration onto it. A SpatiaLite `geometry` column read back is
+            // `Custom("geometry")`; see the SQLite column-type page.
+            TypeDef::Geometry { .. } | TypeDef::Geography { .. } => "BLOB",
+            // SQLite has no vector type; the `[1,2,3]` text is the storage.
+            TypeDef::Vector(_) => "TEXT",
             // SQLite has no `SET`; the comma-separated labels are text.
             TypeDef::Set(_) => "TEXT",
             // SQLite has no domains; the base type is the storage.

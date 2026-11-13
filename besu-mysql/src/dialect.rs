@@ -14,6 +14,32 @@ use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MySql;
 
+/// MySQL's spelling of a spatial column: `POINT`, optionally narrowed by `SRID n`.
+///
+/// MySQL has no `GEOGRAPHY`, and no `GEOMETRY(...)` typmod wrapper: the shape *is* the type
+/// name, and the SRID is a column attribute.
+fn spatial_type_name(kind: &besu_core::GeometryKind, srid: Option<u32>) -> Cow<'static, str> {
+    use besu_core::GeometryKind;
+
+    let base: Cow<'static, str> = match kind {
+        GeometryKind::Geometry => Cow::Borrowed("GEOMETRY"),
+        GeometryKind::Point => Cow::Borrowed("POINT"),
+        GeometryKind::LineString => Cow::Borrowed("LINESTRING"),
+        GeometryKind::Polygon => Cow::Borrowed("POLYGON"),
+        GeometryKind::MultiPoint => Cow::Borrowed("MULTIPOINT"),
+        GeometryKind::MultiLineString => Cow::Borrowed("MULTILINESTRING"),
+        GeometryKind::MultiPolygon => Cow::Borrowed("MULTIPOLYGON"),
+        GeometryKind::GeometryCollection => Cow::Borrowed("GEOMETRYCOLLECTION"),
+        GeometryKind::Other(name) => Cow::Owned(name.to_uppercase()),
+        // `GeometryKind` is `#[non_exhaustive]`: a shape added later still renders.
+        _ => Cow::Owned(kind.name().to_uppercase()),
+    };
+    match srid {
+        Some(srid) if srid != 0 => Cow::Owned(format!("{base} SRID {srid}")),
+        _ => base,
+    }
+}
+
 impl Dialect for MySql {
     type Value = Value;
 
@@ -127,6 +153,18 @@ impl Dialect for MySql {
             // MySQL has no domain. A schema pulled from PostgreSQL still has to render, so the
             // base type is the closest safe spelling; `normalise_type` folds it back.
             TypeDef::Domain(def) => MySql::type_name(def.base.as_type().clone()),
+            // MySQL has no range type. The canonical `[a,b)` text is exact and survives a
+            // round trip, and `normalise_type` folds a declared range onto the `TEXT` column
+            // introspection reports.
+            TypeDef::Range(_) => Cow::Borrowed("TEXT"),
+            // MySQL has real spatial types, spelled like PostGIS's shapes without the
+            // `GEOMETRY(...)` wrapper. `GEOGRAPHY` has no MySQL counterpart, so it renders as
+            // the equivalent `GEOMETRY` and the fold says so.
+            TypeDef::Geometry { kind, srid } | TypeDef::Geography { kind, srid } => {
+                spatial_type_name(&kind, srid)
+            }
+            // MySQL 8.4 has no vector type, so the `[1,2,3]` text is the storage.
+            TypeDef::Vector(_) => Cow::Borrowed("TEXT"),
             other => Cow::Borrowed(match other {
                 TypeDef::Bool => "BOOLEAN",
                 TypeDef::Int2 => "SMALLINT",

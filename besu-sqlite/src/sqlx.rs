@@ -1,7 +1,8 @@
 use std::{path::Path, str::from_utf8};
 
 use besu_core::{
-    BitString, Cidr, Decode, Driver, Error, Inet, Sql, SqlInterval, TransactionDriver, Value,
+    BitString, Cidr, Decode, Driver, Error, Geometry, Inet, Range, Sql, SqlInterval,
+    TransactionDriver, Value, Vector,
 };
 use sqlx::{
     Arguments, Column as _, Row, Sqlite, SqlitePool,
@@ -151,6 +152,13 @@ fn arguments<'q>(sql: &'q Sql<SQLite>) -> Result<SqliteArguments<'q>, sqlx::Erro
             Value::Inet(v) => add(&mut arguments, v.as_str())?,
             Value::Cidr(v) => add(&mut arguments, v.as_str())?,
             Value::Bit(v) => add(&mut arguments, v.as_str())?,
+            // SQLite has no range type: the column is `TEXT` and the canonical spelling is
+            // what is stored.
+            Value::Range { range, .. } => add(&mut arguments, Value::range_text(range))?,
+            // SQLite has no spatial type: the EWKB bytes go into the `BLOB` column.
+            Value::Geometry(v) => add(&mut arguments, v.ewkb())?,
+            // SQLite has no vector type; the `[1,2,3]` text is the storage.
+            Value::Vector(v) => add(&mut arguments, v.to_string())?,
             // `add` takes a `&str`, and sqlx stores it as `Cow::Borrowed`, so the JSON bytes
             // are not copied. Binding the `&[u8]` instead would cost the same and lose the
             // column's `TEXT` affinity, which JSON functions rely on.
@@ -456,5 +464,38 @@ impl Decode<Sqlx> for BitString {
         let text: String = decode_via_sqlx(row, offset)?;
         Self::new(text.trim())
             .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl<T> Decode<Sqlx> for Range<T>
+where
+    T: core::str::FromStr,
+{
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        Range::parse_with(text.trim(), str::parse::<T>)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for Geometry {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let bytes: Vec<u8> = decode_via_sqlx(row, offset)?;
+        Self::from_ewkb(bytes)
+            .map_err(|err| <Sqlx as Driver>::error(Error::decode(index, err.to_string())))
+    }
+}
+
+impl Decode<Sqlx> for Vector {
+    fn decode(row: &SqliteRow, offset: &mut usize) -> Result<Self, sqlx::Error> {
+        let index = *offset;
+        let text: String = decode_via_sqlx(row, offset)?;
+        text.trim()
+            .parse()
+            .map_err(|err: besu_core::ParseValueError| {
+                <Sqlx as Driver>::error(Error::decode(index, err.to_string()))
+            })
     }
 }

@@ -38,6 +38,61 @@ fn quote_type_name(name: &str) -> Cow<'static, str> {
     )
 }
 
+/// The PostgreSQL name of the built-in range type over an element type.
+///
+/// PostgreSQL has six built-in range types and no generic `RANGE` spelling, so an element
+/// outside these six has no type to name. A `Decimal` range is `numrange` whatever precision
+/// and scale the Rust marker carries, because the subtype is an unconstrained `numeric`.
+pub(crate) fn range_type_name(element: &TypeDef) -> Option<&'static str> {
+    Some(match element {
+        TypeDef::Int4 => "int4range",
+        TypeDef::Int8 => "int8range",
+        TypeDef::Decimal(_, _) => "numrange",
+        TypeDef::Timestamp | TypeDef::TimestampP(_) => "tsrange",
+        TypeDef::TimestampTz | TypeDef::TimestampTzP(_) => "tstzrange",
+        TypeDef::Date => "daterange",
+        // The fold lets a declared `Range(UInt(32))` render through its signed storage.
+        TypeDef::UInt(16) => "int4range",
+        TypeDef::UInt(32) => "int8range",
+        _ => return None,
+    })
+}
+
+/// The PostGIS spelling of a spatial column's type.
+///
+/// A plain `GEOMETRY`/`GEOGRAPHY` has no shape and no SRID, so it is written bare. Anything
+/// narrowed is written with its typmod, exactly as `format_type` reports it back.
+fn spatial_type_name(
+    geography: bool,
+    kind: &besu_core::GeometryKind,
+    srid: Option<u32>,
+) -> Cow<'static, str> {
+    use besu_core::GeometryKind;
+
+    let base = if geography { "GEOGRAPHY" } else { "GEOMETRY" };
+    if *kind == GeometryKind::Geometry && srid.is_none() {
+        return Cow::Borrowed(base);
+    }
+    let shape: Cow<'static, str> = match kind {
+        GeometryKind::Geometry => Cow::Borrowed("GEOMETRY"),
+        GeometryKind::Point => Cow::Borrowed("POINT"),
+        GeometryKind::LineString => Cow::Borrowed("LINESTRING"),
+        GeometryKind::Polygon => Cow::Borrowed("POLYGON"),
+        GeometryKind::MultiPoint => Cow::Borrowed("MULTIPOINT"),
+        GeometryKind::MultiLineString => Cow::Borrowed("MULTILINESTRING"),
+        GeometryKind::MultiPolygon => Cow::Borrowed("MULTIPOLYGON"),
+        GeometryKind::GeometryCollection => Cow::Borrowed("GEOMETRYCOLLECTION"),
+        // A shape from a newer PostGIS is written exactly as the catalogue spelled it.
+        GeometryKind::Other(name) => Cow::Owned(name.to_string()),
+        // `GeometryKind` is `#[non_exhaustive]`: a shape added later still renders.
+        _ => Cow::Owned(kind.name().to_string()),
+    };
+    Cow::Owned(match srid {
+        Some(srid) => format!("{base}({shape},{srid})"),
+        None => format!("{base}({shape})"),
+    })
+}
+
 impl Dialect for Postgres {
     type Value = Value;
 
@@ -101,6 +156,15 @@ impl Dialect for Postgres {
                 Value::Inet(_) => 'a',
                 Value::Cidr(_) => 'c',
                 Value::Bit(_) => 'B',
+                Value::Range { element, .. } => {
+                    // The subtype is part of the bytes: `int4range` and `int8range` share
+                    // this SQL text but not their wire format.
+                    suffix.push('R');
+                    suffix.push_str(&format!("{element:?}"));
+                    continue;
+                }
+                Value::Geometry(_) => 'G',
+                Value::Vector(_) => 'V',
                 Value::Array { element, .. } => {
                     // The element OID is part of the bytes, so it has to be part of the key:
                     // `int8[]` and `text[]` bind differently into the same SQL text.
@@ -177,6 +241,19 @@ impl Dialect for Postgres {
                 "{}[]",
                 Postgres::type_name(inner.as_type().clone())
             )),
+            // A range is one of PostgreSQL's six built-in range types, named after its
+            // subtype. An element with no built-in range type is stored as text, matching
+            // what `normalise_type` folds it to.
+            TypeDef::Range(inner) => {
+                Cow::Borrowed(range_type_name(inner.as_type()).unwrap_or("TEXT"))
+            }
+            // PostGIS spells a narrowed spatial column as `GEOMETRY(POINT,4326)`.
+            TypeDef::Geometry { kind, srid } => spatial_type_name(false, &kind, srid),
+            TypeDef::Geography { kind, srid } => spatial_type_name(true, &kind, srid),
+            // `VECTOR` with no modifier accepts any dimension; `pgvector` reports it back the
+            // same way, so a dimension-less declaration converges.
+            TypeDef::Vector(0) => Cow::Borrowed("VECTOR"),
+            TypeDef::Vector(n) => Cow::Owned(format!("VECTOR({n})")),
             // A collation is written after the type it applies to, which is legal both in
             // `CREATE TABLE` and after `ALTER COLUMN ... TYPE`.
             TypeDef::Collated(inner, collation) => Cow::Owned(format!(

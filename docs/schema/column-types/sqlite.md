@@ -34,6 +34,10 @@ driver both understand, not about storage width.
 | `besu::Cidr` | the type itself | `Cidr` | `TEXT` |
 | `#[besu(sql_type = "besu::Bit<n>")]` | `Bit<n>` | `Bit(n)` | `TEXT` |
 | `#[besu(sql_type = "besu::VarBit<n>")]` | `VarBit<n>` | `VarBit(n)` | `TEXT` |
+| `besu::Range<T>` | `Range<T>` | `Range(T)` | `TEXT` |
+| `besu::Geometry` | the type itself | `Geometry { .. }` | `BLOB` |
+| `#[besu(sql_type = "besu::Point<srid>")]` | the shape markers | `Geometry { kind, srid }` | `BLOB` |
+| `besu::Vector` | the type itself | `Vector(_)` | `TEXT` |
 | `#[besu(sql_type = "..")]` | e.g. `VarChar<64>` | `VarChar(64)` | `TEXT` |
 
 Every type in the table round-trips through an insert and a `SELECT`. The only types that do not
@@ -150,6 +154,36 @@ is text order, and a comparison against a hand-written literal is a string compa
 collapses all three onto `TEXT` when it introspects them, so the declaration converges on a second
 push.
 
+## Ranges, spatial values and vectors
+
+SQLite has no range, spatial or vector type, so all three are stored in their canonical form:
+
+```rust
+use besu::{Geometry, Range, Vector};
+
+pub window: Range<i32>,       // "[1,5)" in a TEXT column
+pub day: Range<chrono::NaiveDate>,
+pub point: Geometry,          // EWKB bytes in a BLOB column
+#[besu(sql_type = "besu::Point<4326>")]
+pub located: Geometry,
+pub embedding: Vector,        // "[1,2,3]" in a TEXT column
+#[besu(sql_type = "besu::VectorOf<3>")]
+pub xyz: Vector,
+```
+
+A range is bound as its `[a,b)` spelling and parsed back on decode, so there is no range
+semantics: `[1,5]` stays `[1,5]`, and comparison and `ORDER BY` are text order. A spatial value
+is the EWKB bytes exactly as PostGIS sends them, in a `BLOB`; `Geometry` decodes from that blob
+and keeps its SRID and shape. A vector is its `[1,2,3]` text.
+
+The declarations fold onto the storage: `Range` and `Vector` to `Text`, `Geometry` and
+`Geography` to `Bytes`, so a second push is a no-op.
+
+SpatiaLite adds a real `geometry` type, but the declaration here is a plain `BLOB` and Besu does
+not detect SpatiaLite columns. A SpatiaLite geometry column read by introspection is
+`Custom("geometry")`, not `Geometry`; keep such a column out of the declaration (or declare it
+`Custom`) and read it through `sql!`.
+
 ## Arrays
 
 SQLite has no array type. A `Vec<T>` field renders `TEXT` and binding an array is an error before
@@ -172,8 +206,9 @@ SQLite's catalogue reports the declared type name, which is mapped back as follo
 
 The differ folds the types SQLite cannot distinguish — every integer width to `Int8`, `UInt(128)`
 to `Text`, `Char`/`VarChar`/`Decimal` to `Text`, `Jsonb` to `Json`, `TimestampTz` to `Timestamp`,
-a fractional-second precision to the plain time type, `Bit`/`VarBit`/`Interval`/`Inet`/`Cidr`/
-`Set` to `Text`, and an array to `Json` — so a declared `i32` converges against the `INTEGER` that
+a fractional-second precision to the plain time type,
+`Bit`/`VarBit`/`Interval`/`Inet`/`Cidr`/`Set`/`Range`/`Vector` to `Text`, `Geometry`/`Geography`
+to `Bytes`, and an array to `Json` — so a declared `i32` converges against the `INTEGER` that
 introspection reports. Without that folding, every push would report a column change that changes
 nothing. A PostgreSQL domain folds onto its base type here.
 
@@ -185,8 +220,9 @@ generated DDL round-trips, but no driver decodes it: there is no Rust type to de
 such a column out of your model, or read it through `sql!` and a cast.
 
 Custom column types are tracked in [#98](https://github.com/specta-rs/besu/issues/98). Intervals,
-network addresses, bit strings and MySQL's `SET` are not `Custom`: they are stored as `TEXT` and
-round-trip through the driver.
+network addresses, bit strings, MySQL's `SET`, ranges, vectors and spatial values are not
+`Custom`: they are stored as `TEXT` or `BLOB` and round-trip through the driver. A SpatiaLite
+`geometry` column is the exception, described above.
 
 ## Gotchas
 
@@ -201,3 +237,7 @@ round-trip through the driver.
   in Rust and absent in the database.
 - A `BLOB` column bound from a `String` writes text into it; SQLite does not convert. Bind the
   type the column was declared with.
+- A `Range` or `Geometry` declared here is not a database type: another client sees `TEXT` or
+  `BLOB`, and SQL that compares it has to use the text or blob form.
+- SpatiaLite's own geometry columns are `Custom("geometry")`, not `Geometry`; SpatiaLite is not
+  detected.

@@ -112,6 +112,47 @@ pub enum TypeDef {
     /// type is part of a `const` [`TableDef`](crate::TableDef), and a boxed value cannot be
     /// constructed in a constant expression.
     Array(TypeRef),
+    /// A PostgreSQL range type, such as `int4range` or `tstzrange`.
+    ///
+    /// The element is the range's subtype, which decides the value's wire format and the
+    /// name PostgreSQL gives the type: `Int4` is `int4range`, `Timestamp` is `tsrange`, and
+    /// so on. Only the six built-in range types are modelled; a user-defined range over
+    /// another type stays a [`TypeDef::Custom`].
+    ///
+    /// A [`TypeRef`] rather than a `Box<TypeDef>`, for the same reason
+    /// [`TypeDef::Array`] uses one: a declared column's type is a constant.
+    ///
+    /// PostgreSQL has ranges; MySQL and SQLite do not, and store the value's canonical text
+    /// as `TEXT`.
+    Range(TypeRef),
+    /// A PostGIS `GEOMETRY` column, optionally narrowed to a shape and an SRID.
+    ///
+    /// PostGIS reports the narrowing through `format_type` as `geometry(Point,4326)`, so the
+    /// shape and SRID are part of the column's type. A plain `GEOMETRY` column is
+    /// `kind: GeometryKind::Geometry, srid: None`.
+    Geometry {
+        /// The shape the column accepts.
+        kind: crate::scalars::GeometryKind,
+        /// The spatial reference system identifier, when the column names one.
+        srid: Option<u32>,
+    },
+    /// A PostGIS `GEOGRAPHY` column, the ellipsoidal counterpart of
+    /// [`TypeDef::Geometry`].
+    Geography {
+        /// The shape the column accepts.
+        kind: crate::scalars::GeometryKind,
+        /// The spatial reference system identifier, when the column names one.
+        srid: Option<u32>,
+    },
+    /// A `pgvector` vector column, `VECTOR(n)`.
+    ///
+    /// The dimension is part of the declared type, exactly as `VARCHAR(n)`'s length is. A
+    /// dimension of zero means the declaration had no modifier, which `pgvector` accepts as
+    /// "any dimension"; introspection reports it the same way, so a push converges. The
+    /// value is [`Vector`](crate::Vector), sent untyped in the extension's binary form.
+    ///
+    /// SQLite and MySQL store the `[1,2,3]` text in a `TEXT` column.
+    Vector(u32),
     /// An enum whose labels are part of the declaration.
     ///
     /// MySQL spells one inline in the column — `ENUM('a','b')` *is* the type — while
@@ -594,5 +635,63 @@ mod tests {
         let declared = TypeDef::Set(EnumLabels::from_static(&["read", "write"]));
         let introspected = TypeDef::Set(EnumLabels::owned(vec!["read".into(), "write".into()]));
         assert_eq!(declared, introspected);
+    }
+
+    #[test]
+    fn a_range_geometry_and_vector_are_constructible_in_a_constant() {
+        // A declared column's type is part of a `const TableDef`, so every new variant has to
+        // be buildable without allocating.
+        const RANGE: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Int4));
+        const POINT: TypeDef = TypeDef::Geometry {
+            kind: crate::scalars::GeometryKind::Point,
+            srid: Some(4326),
+        };
+        const GEOGRAPHY: TypeDef = TypeDef::Geography {
+            kind: crate::scalars::GeometryKind::Geometry,
+            srid: None,
+        };
+        const VECTOR: TypeDef = TypeDef::Vector(1536);
+
+        assert_eq!(
+            RANGE,
+            TypeDef::Range(TypeRef::owned(TypeDef::Int4)),
+            "a static and an owned element must be the same range"
+        );
+        assert_eq!(
+            POINT,
+            TypeDef::Geometry {
+                kind: crate::scalars::GeometryKind::from_name("Point"),
+                srid: Some(4326),
+            }
+        );
+        assert_eq!(
+            GEOGRAPHY,
+            TypeDef::Geography {
+                kind: crate::scalars::GeometryKind::Geometry,
+                srid: None
+            }
+        );
+        assert_eq!(VECTOR, TypeDef::Vector(1536));
+    }
+
+    #[test]
+    fn the_new_types_serialise_and_deserialise() {
+        let types = [
+            TypeDef::Range(TypeRef::from_static(&TypeDef::TimestampTz)),
+            TypeDef::Geometry {
+                kind: crate::scalars::GeometryKind::MultiPolygon,
+                srid: Some(3857),
+            },
+            TypeDef::Geography {
+                kind: crate::scalars::GeometryKind::Other("PolyhedralSurface".into()),
+                srid: None,
+            },
+            TypeDef::Vector(3),
+        ];
+        for ty in types {
+            let json = serde_json::to_string(&ty).expect("the type must serialise");
+            let decoded: TypeDef = serde_json::from_str(&json).expect("the type must deserialise");
+            assert_eq!(decoded, ty, "{json}");
+        }
     }
 }

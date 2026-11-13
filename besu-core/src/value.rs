@@ -1,7 +1,7 @@
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
-use crate::scalars::{BitString, Cidr, Inet, SqlInterval};
+use crate::scalars::{BitString, Bound, Cidr, Geometry, Inet, Range, SqlInterval, Vector};
 
 /// An owned, dialect-independent SQL value.
 ///
@@ -92,12 +92,69 @@ pub enum Value {
     /// PostgreSQL's `BIT(n)` and `BIT VARYING(n)` send a length and the packed bytes; MySQL's
     /// `BIT(n)` sends the packed bytes alone; SQLite stores the text.
     Bit(BitString),
+    /// A SQL range.
+    ///
+    /// The element's [`TypeDef`](crate::TypeDef) travels with the bounds for the same reason an
+    /// array carries its element's: PostgreSQL's binary range format stores each bound as the
+    /// element's own encoding, with no type name on the wire, so the encoder has to know what
+    /// it is writing. [`Value::Range`] stores each bound as a [`Value`], which is the form the
+    /// element encoder already accepts.
+    Range {
+        /// The declared type of the range's subtype.
+        element: crate::TypeDef,
+        /// The bounds, or the empty range.
+        ///
+        /// Boxed because a [`Value`] is what a bound holds, and a `Value` that contains a
+        /// range that contains a `Value` needs one indirection to have a size.
+        range: alloc::boxed::Box<Range<Value>>,
+    },
+    /// A spatial value, as EWKB bytes.
+    ///
+    /// PostgreSQL's PostGIS sends and accepts EWKB; MySQL sends an SRID prefix followed by
+    /// WKB, which the driver converts. The value itself is always the EWKB form.
+    Geometry(Geometry),
+    /// A `pgvector` vector.
+    ///
+    /// PostgreSQL binds it untyped in the extension's binary form so the server infers
+    /// `vector(n)` from the column, and reads that form back; the `[1,2,3]` text is parsed if a
+    /// result arrives that way. SQLite and MySQL store the text.
+    Vector(Vector),
 }
 
 impl Value {
     /// Whether this value is SQL `NULL`.
     pub const fn is_null(&self) -> bool {
         matches!(self, Self::Null)
+    }
+
+    /// Render a range in PostgreSQL's canonical text spelling.
+    ///
+    /// A dialect without a range type stores this text, and a value read back is parsed with
+    /// [`Range::parse_with`](crate::Range::parse_with), so the two directions agree. The
+    /// spelling uses each bound's diagnostic form, which quotes a text value exactly as the
+    /// parser expects it.
+    pub fn range_text(range: &Range<Value>) -> String {
+        let mut out = String::new();
+        let Some((start, end)) = range.bounds() else {
+            out.push_str("empty");
+            return out;
+        };
+        out.push_str(match start {
+            Bound::Included(_) => "[",
+            Bound::Excluded(_) | Bound::Unbounded => "(",
+        });
+        if let Some(value) = start.value() {
+            out.push_str(&range_bound_text(value));
+        }
+        out.push(',');
+        if let Some(value) = end.value() {
+            out.push_str(&range_bound_text(value));
+        }
+        out.push_str(match end {
+            Bound::Included(_) => "]",
+            Bound::Excluded(_) | Bound::Unbounded => ")",
+        });
+        out
     }
 
     /// Render the value for diagnostics. Quoting is *not* SQL-escaped, so never feed the
@@ -145,6 +202,32 @@ impl Value {
                     Value::Inet(v) => write!(f, "'{v}'"),
                     Value::Cidr(v) => write!(f, "'{v}'"),
                     Value::Bit(v) => write!(f, "B'{}'", v.as_str()),
+                    Value::Range { range, .. } => {
+                        f.write_str("'")?;
+                        match range.bounds() {
+                            None => f.write_str("empty")?,
+                            Some((start, end)) => {
+                                f.write_str(match start {
+                                    Bound::Included(_) => "[",
+                                    Bound::Excluded(_) | Bound::Unbounded => "(",
+                                })?;
+                                if let Some(value) = start.value() {
+                                    write!(f, "{}", value.display())?;
+                                }
+                                f.write_str(",")?;
+                                if let Some(value) = end.value() {
+                                    write!(f, "{}", value.display())?;
+                                }
+                                f.write_str(match end {
+                                    Bound::Included(_) => "]",
+                                    Bound::Excluded(_) | Bound::Unbounded => ")",
+                                })?;
+                            }
+                        }
+                        f.write_str("'")
+                    }
+                    Value::Geometry(v) => write!(f, "'{v}'"),
+                    Value::Vector(v) => write!(f, "'{v}'"),
                 }
             }
         }
@@ -320,6 +403,18 @@ impl From<BitString> for Value {
     }
 }
 
+impl From<Geometry> for Value {
+    fn from(value: Geometry) -> Self {
+        Self::Geometry(value)
+    }
+}
+
+impl From<Vector> for Value {
+    fn from(value: Vector) -> Self {
+        Self::Vector(value)
+    }
+}
+
 /// A `Vec` of a scalar is an array of that scalar's canonical type.
 ///
 /// The element type has to be recovered from the Rust type, because `From` is the only
@@ -344,8 +439,7 @@ macro_rules! from_vec {
 }
 
 from_vec! {
-    bool => crate::TypeDef::Bool,
-    i8 => crate::TypeDef::Int2,
+    bool => crate::TypeDef::Bool,    i8 => crate::TypeDef::Int2,
     i16 => crate::TypeDef::Int2,
     i32 => crate::TypeDef::Int4,
     i64 => crate::TypeDef::Int8,
@@ -367,4 +461,80 @@ from_vec! {
     SqlInterval => crate::TypeDef::Interval,
     Inet => crate::TypeDef::Inet,
     Cidr => crate::TypeDef::Cidr,
+}
+
+/// A range is bound with its subtype, because PostgreSQL's binary range format stores each
+/// bound as the subtype's own encoding.
+///
+/// The subtype has to be named per element type, since `From` is the only conversion a
+/// `SqlType::Rust` has to provide and a generic `Range<T>` cannot know its SQL type.
+macro_rules! from_range {
+    ($($rust:ty => $element:expr, $convert:expr;)*) => {
+        $(
+            impl From<Range<$rust>> for Value {
+                fn from(range: Range<$rust>) -> Self {
+                    Self::Range {
+                        element: $element,
+                        range: alloc::boxed::Box::new(range.map($convert)),
+                    }
+                }
+            }
+
+            impl From<Vec<Range<$rust>>> for Value {
+                fn from(ranges: Vec<Range<$rust>>) -> Self {
+                    Self::Array {
+                        element: crate::TypeDef::Range(crate::types::TypeRef::from_static(
+                            &$element,
+                        )),
+                        values: ranges.into_iter().map(Value::from).collect(),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+from_range! {
+    i32 => crate::TypeDef::Int4, |value| Value::Int(i64::from(value));
+    i64 => crate::TypeDef::Int8, Value::Int;
+    chrono::NaiveDateTime => crate::TypeDef::Timestamp, Value::Timestamp;
+    chrono::DateTime<chrono::Utc> => crate::TypeDef::TimestampTz, Value::TimestampTz;
+    chrono::NaiveDate => crate::TypeDef::Date, Value::Date;
+    // The only text-shaped range Besu models is `numrange`, whose subtype is `numeric`.
+    String => crate::TypeDef::Decimal(0, 0), Value::Decimal;
+}
+
+/// One range bound in a spelling [`Range::parse_with`](crate::Range::parse_with) reads back.
+///
+/// A date, a timestamp and a decimal are written in a form their own `FromStr` accepts, which
+/// is what lets a dialect without ranges store the text and decode it again. Text is quoted
+/// when it contains a character the bracket syntax uses.
+fn range_bound_text(value: &Value) -> String {
+    match value {
+        Value::Text(text) => {
+            let needs_quotes = text.chars().any(|ch| {
+                matches!(ch, ',' | '"' | '\\' | '(' | ')' | '[' | ']') || ch.is_whitespace()
+            });
+            if needs_quotes {
+                alloc::format!("\"{}\"", text.replace('"', "\"\""))
+            } else {
+                text.clone()
+            }
+        }
+        Value::Date(date) => date.format("%Y-%m-%d").to_string(),
+        Value::Time(time) => time.format("%H:%M:%S%.f").to_string(),
+        Value::Timestamp(timestamp) => timestamp.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+        // `DateTime<Utc>`'s `FromStr` is RFC 3339, so that is the spelling to write.
+        Value::TimestampTz(timestamp) => timestamp.to_rfc3339(),
+        Value::Decimal(text) => text.clone(),
+        Value::Int(value) => value.to_string(),
+        Value::UInt(value) => value.to_string(),
+        Value::UInt128(value) => value.to_string(),
+        Value::Int128(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        // Every value a range can hold is covered above; the diagnostic form is the honest
+        // fallback for anything else.
+        other => other.display().to_string(),
+    }
 }

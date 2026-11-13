@@ -48,6 +48,19 @@ impl Ddl for PostgresDdl {
             TypeDef::Array(inner) => TypeDef::Array(besu_core::types::TypeRef::owned(
                 self.normalise_type(inner.as_type()),
             )),
+            // A range's subtype is folded the same way, and a subtype with no built-in range
+            // type falls back to `TEXT` exactly as `type_name` renders it. The precision of a
+            // `Decimal` subtype is not part of `numrange`, so it folds away too.
+            TypeDef::Range(inner) => {
+                let inner = match self.normalise_type(inner.as_type()) {
+                    TypeDef::Decimal(_, _) => TypeDef::Decimal(0, 0),
+                    other => other,
+                };
+                match crate::dialect::range_type_name(&inner) {
+                    Some(_) => TypeDef::Range(besu_core::types::TypeRef::owned(inner)),
+                    None => TypeDef::Text,
+                }
+            }
             TypeDef::Collated(inner, collation) => {
                 TypeDef::Collated(Box::new(self.normalise_type(inner)), collation.clone())
             }
@@ -59,6 +72,16 @@ impl Ddl for PostgresDdl {
                 name: def.name.clone(),
                 base: besu_core::types::TypeRef::owned(self.normalise_type(def.base.as_type())),
             }),
+            // PostGIS reports a geometry with SRID zero as one with no SRID at all, so
+            // `Some(0)` folds away exactly as MySQL's does.
+            TypeDef::Geometry { kind, srid } => TypeDef::Geometry {
+                kind: kind.clone(),
+                srid: srid.filter(|srid| *srid != 0),
+            },
+            TypeDef::Geography { kind, srid } => TypeDef::Geography {
+                kind: kind.clone(),
+                srid: srid.filter(|srid| *srid != 0),
+            },
             // A named enum folds onto the `Custom(name)` a column of that type is introspected
             // as, so a declaration converges against the server's own report. An enum with
             // no name has no type for PostgreSQL to create, and renders as `TEXT`.
@@ -457,6 +480,116 @@ mod tests {
         assert_eq!(
             Ddl::normalise_type(&ddl, &declared),
             TypeDef::Domain(besu_core::DomainDef::new("small", &TypeDef::Int4))
+        );
+    }
+
+    #[test]
+    fn ranges_and_spatial_columns_render_their_postgis_spellings() {
+        use besu_core::GeometryKind;
+        use besu_core::types::TypeRef;
+
+        let range = |element: TypeDef| TypeDef::Range(TypeRef::owned(element));
+        assert_eq!(Postgres::type_name(range(TypeDef::Int4)), "int4range");
+        assert_eq!(Postgres::type_name(range(TypeDef::Int8)), "int8range");
+        assert_eq!(
+            Postgres::type_name(range(TypeDef::Decimal(10, 2))),
+            "numrange",
+            "numrange's subtype is an unconstrained numeric, whatever the marker says"
+        );
+        assert_eq!(Postgres::type_name(range(TypeDef::Timestamp)), "tsrange");
+        assert_eq!(
+            Postgres::type_name(range(TypeDef::TimestampTz)),
+            "tstzrange"
+        );
+        assert_eq!(Postgres::type_name(range(TypeDef::Date)), "daterange");
+        // A subtype PostgreSQL has no built-in range for is stored as text, exactly as the
+        // fold says.
+        assert_eq!(Postgres::type_name(range(TypeDef::Text)), "TEXT");
+        assert_eq!(
+            Postgres::type_name(TypeDef::Array(TypeRef::owned(range(TypeDef::Int4)))),
+            "int4range[]"
+        );
+
+        assert_eq!(
+            Postgres::type_name(TypeDef::Geometry {
+                kind: GeometryKind::Point,
+                srid: Some(4326),
+            }),
+            "GEOMETRY(POINT,4326)"
+        );
+        assert_eq!(
+            Postgres::type_name(TypeDef::Geometry {
+                kind: GeometryKind::Geometry,
+                srid: None,
+            }),
+            "GEOMETRY"
+        );
+        assert_eq!(
+            Postgres::type_name(TypeDef::Geography {
+                kind: GeometryKind::MultiPolygon,
+                srid: Some(3857),
+            }),
+            "GEOGRAPHY(MULTIPOLYGON,3857)"
+        );
+        assert_eq!(
+            Postgres::type_name(TypeDef::Geometry {
+                kind: GeometryKind::Other("PointZ".into()),
+                srid: None,
+            }),
+            "GEOMETRY(PointZ)"
+        );
+
+        assert_eq!(Postgres::type_name(TypeDef::Vector(3)), "VECTOR(3)");
+        assert_eq!(Postgres::type_name(TypeDef::Vector(0)), "VECTOR");
+    }
+
+    #[test]
+    fn a_range_and_a_vector_declaration_fold_onto_what_introspection_reports() {
+        use besu_core::types::TypeRef;
+
+        let ddl = PostgresDdl;
+        // `numrange`'s subtype is an unconstrained numeric, so the marker's precision and
+        // scale cannot survive a push/pull and fold away.
+        assert_eq!(
+            Ddl::normalise_type(
+                &ddl,
+                &TypeDef::Range(TypeRef::owned(TypeDef::Decimal(10, 2)))
+            ),
+            TypeDef::Range(TypeRef::owned(TypeDef::Decimal(0, 0)))
+        );
+        // A range with no PostgreSQL spelling is stored as text.
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::Range(TypeRef::owned(TypeDef::Text))),
+            TypeDef::Text
+        );
+        // The unsigned markers fold inside the subtype, the same as they do in an array.
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::Range(TypeRef::owned(TypeDef::UInt(32)))),
+            TypeDef::Range(TypeRef::owned(TypeDef::Int8))
+        );
+        // PostGIS has no SRID zero: a column declared with one converges against the plain
+        // shape introspection reports.
+        assert_eq!(
+            Ddl::normalise_type(
+                &ddl,
+                &TypeDef::Geometry {
+                    kind: besu_core::GeometryKind::Point,
+                    srid: Some(0),
+                }
+            ),
+            TypeDef::Geometry {
+                kind: besu_core::GeometryKind::Point,
+                srid: None,
+            }
+        );
+        // A vector's dimension is part of its type, and both are already what is reported.
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::Vector(3)),
+            TypeDef::Vector(3)
+        );
+        assert_eq!(
+            Ddl::normalise_type(&ddl, &TypeDef::Vector(0)),
+            TypeDef::Vector(0)
         );
     }
 

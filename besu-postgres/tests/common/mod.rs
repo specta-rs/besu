@@ -40,9 +40,15 @@ pub async fn database() -> besu::Database<Sqlx> {
 pub async fn reset(db: &besu::Database<Sqlx>) {
     let tables: Vec<(String, String)> = db
         .execute(sql!(
-            "SELECT schemaname, tablename FROM pg_tables \
-             WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
-               AND schemaname NOT LIKE 'pg\\_%' ESCAPE '\\'"
+            "SELECT t.schemaname, t.tablename FROM pg_tables t \
+             WHERE t.schemaname NOT IN ('pg_catalog', 'information_schema') \
+               AND t.schemaname NOT LIKE 'pg\\_%' ESCAPE '\\' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   JOIN pg_class c ON c.oid = d.objid \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   WHERE d.deptype = 'e' \
+                     AND n.nspname = t.schemaname AND c.relname = t.tablename)"
         ))
         .all()
         .await
@@ -64,9 +70,15 @@ pub async fn reset(db: &besu::Database<Sqlx>) {
     // and a test that failed before its cleanup would leave it behind.
     let sequences: Vec<(String, String)> = db
         .execute(sql!(
-            "SELECT schemaname, sequencename FROM pg_sequences \
-             WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
-               AND schemaname NOT LIKE 'pg\\_%' ESCAPE '\\'"
+            "SELECT s.schemaname, s.sequencename FROM pg_sequences s \
+             WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema') \
+               AND s.schemaname NOT LIKE 'pg\\_%' ESCAPE '\\' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_depend d \
+                   JOIN pg_class c ON c.oid = d.objid \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   WHERE d.deptype = 'e' \
+                     AND n.nspname = s.schemaname AND c.relname = s.sequencename)"
         ))
         .all()
         .await

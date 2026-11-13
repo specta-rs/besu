@@ -32,6 +32,10 @@ timestamps are `DATETIME(6)` rather than `TIMESTAMP`.
 | `besu::SqlInterval` | the type itself | `Interval` | `TEXT` |
 | `besu::Inet` | the type itself | `Inet` | `TEXT` |
 | `besu::Cidr` | the type itself | `Cidr` | `TEXT` |
+| `besu::Range<T>` | `Range<T>` | `Range(T)` | `TEXT` |
+| `besu::Geometry` | the type itself | `Geometry { .. }` | `GEOMETRY` |
+| `#[besu(sql_type = "besu::Point<srid>")]` | `Point<srid>` and the other shapes | `Geometry { kind, srid }` | `POINT`, or `POINT SRID 4326` |
+| `besu::Vector` | the type itself | `Vector(_)` | `TEXT` |
 | `#[besu(sql_type = "besu::Bit<n>")]` | `Bit<n>` | `Bit(n)` | `BIT(n)` |
 | `#[besu(sql_type = "besu::VarBit<n>")]` | `VarBit<n>` | `Bit(n)` | `BIT(n)` |
 | a marker with `TypeDef::Set` | — | `Set(labels)` | `SET('a','b')` |
@@ -253,6 +257,49 @@ so `Schema::enums` stays empty and `push` never tries to create a type. A label 
 one `ALTER TABLE ... MODIFY COLUMN`, not a drop and re-add of the table, and the column converges
 again on the next push.
 
+## Spatial types
+
+MySQL has real spatial types, and they are modelled with the same `Geometry` value and markers
+PostGIS uses:
+
+```rust
+use besu::Geometry;
+
+pub any: Geometry,                                      // GEOMETRY
+#[besu(sql_type = "besu::Point")]
+pub point: Geometry,                                    // POINT
+#[besu(sql_type = "besu::Point<4326>")]
+pub located: Geometry,                                  // POINT SRID 4326
+#[besu(sql_type = "besu::Polygon")]
+pub area: Geometry,                                     // POLYGON
+#[besu(sql_type = "besu::GeometryCollection<4326>")]
+pub parts: Geometry,                                    // GEOMETRYCOLLECTION SRID 4326
+```
+
+The shape is the type name here, and the SRID is a column attribute: `POINT SRID 4326`, not
+`GEOMETRY(POINT,4326)`. Introspection reads the shape from `COLUMN_TYPE` and the SRID from
+`information_schema.ST_GEOMETRY_COLUMNS`, so a declared `Geometry { kind, srid }` converges on
+the next push. `SRID 0` means "no SRID" and folds away.
+
+MySQL has no `GEOGRAPHY`, so a PostGIS `GEOGRAPHY` declaration renders the equivalent `GEOMETRY`
+type and the fold treats the two as the same column.
+
+The value is EWKB in Rust and MySQL's internal geometry format on the wire: a four-byte
+little-endian SRID followed by plain WKB. The driver converts between the two in both directions,
+so a shape written here reads back as the same EWKB. MySQL validates the SRID against the
+column's, which is why a `POINT SRID 4326` column needs a value carrying SRID 4326.
+
+## Ranges and vectors
+
+MySQL has neither a range nor a vector type. A `Range<T>` is declared `TEXT` and stores the
+canonical `[a,b)` spelling, and a `Vector` stores `[1,2,3]`. Both values round-trip exactly as
+they were written, and introspection reports them as `Text`, so the declaration converges on the
+next push.
+
+Unlike PostgreSQL, MySQL applies no range canonicalisation: `[1,5]` stays `[1,5]`, because the
+database has no range semantics to normalise it. The value can be compared and ordered as text
+only.
+
 ## What introspection reports
 
 | Native type | `TypeDef` |
@@ -277,6 +324,7 @@ again on the next push.
 | `enum('a','b')` | `Enum(EnumDef { name: "", labels })` |
 | `set('a','b')` | `Set(labels)` |
 | `bit(n)` | `Bit(n)` |
+| `geometry`, `point`, `linestring`, `polygon`, `multipoint`, `multilinestring`, `multipolygon`, `geomcollection` | `Geometry { kind, srid }`, with the SRID read from `information_schema.ST_GEOMETRY_COLUMNS` |
 | `year` | `Custom("year")` |
 | a column whose collation differs from the table's | `Collated(inner, collation)` |
 | anything else | `Custom(column_type)` |
@@ -289,14 +337,11 @@ a declared `i8` or `String` still converges against them.
 
 ## Custom types
 
-Anything newer than the dialect knows about — `GEOMETRY`, a `VECTOR` column — is `Custom` and
-keeps its native spelling. The DDL round-trips; the value cannot be decoded into Rust, so read it
-through `sql!`.
+Anything newer than the dialect knows about is `Custom` and keeps its native spelling. The DDL
+round-trips; a value that Besu has no Rust type for is read through `sql!`.
 
-`SET` and `BIT` are no longer `Custom`: they are
-[`TypeDef::Set`](https://docs.rs/besu-core/latest/besu_core/enum.TypeDef.html) and
-[`TypeDef::Bit`](https://docs.rs/besu-core/latest/besu_core/enum.TypeDef.html) and round-trip as
-values. Inline enums are `TypeDef::Enum` and are declared with
+`SET`, `BIT`, spatial columns and inline enums are not `Custom`: they have their own `TypeDef`
+variants and values that round-trip. Inline enums are declared with
 [`#[derive(SqlEnum)]`](https://docs.rs/besu/latest/besu/derive.SqlEnum.html).
 
 ## Gotchas
