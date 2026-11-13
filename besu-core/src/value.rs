@@ -130,7 +130,7 @@ impl Value {
     /// Render a range in PostgreSQL's canonical text spelling.
     ///
     /// A dialect without a range type stores this text, and a value read back is parsed with
-    /// [`Range::parse_with`](crate::Range::parse_with), so the two directions agree. The
+    /// [`Range::parse_with`], so the two directions agree. The
     /// spelling uses each bound's diagnostic form, which quotes a text value exactly as the
     /// parser expects it.
     pub fn range_text(range: &Range<Value>) -> String {
@@ -504,7 +504,7 @@ from_range! {
     String => crate::TypeDef::Decimal(0, 0), Value::Decimal;
 }
 
-/// One range bound in a spelling [`Range::parse_with`](crate::Range::parse_with) reads back.
+/// One range bound in a spelling [`Range::parse_with`] reads back.
 ///
 /// A date, a timestamp and a decimal are written in a form their own `FromStr` accepts, which
 /// is what lets a dialect without ranges store the text and decode it again. Text is quoted

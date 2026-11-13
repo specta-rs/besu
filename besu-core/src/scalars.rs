@@ -1,7 +1,7 @@
 //! SQL values that are not a Rust primitive: intervals, network addresses, bit strings,
 //! ranges, spatial values and vectors.
 //!
-//! These live in `besu-core` because [`Value`](crate::Value) carries them. The
+//! These live in `besu-core` because [`Value`] carries them. The
 //! [`SqlType`](https://docs.rs/besu/latest/besu/trait.SqlType.html) implementations that name
 //! them as column types live in `besu`, next to every other marker.
 //!
