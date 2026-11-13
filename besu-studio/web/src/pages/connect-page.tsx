@@ -8,8 +8,9 @@ import {
   ShieldCheck,
   Terminal,
 } from "lucide-solid";
-import { targetFrom, targetLabel } from "../lib/connection";
+import { DEFAULT_HOST, composeTarget } from "../lib/connection";
 import { copy } from "../lib/format";
+import { navigate } from "../lib/router";
 import { useStudio } from "../lib/store";
 import { Spinner } from "../lib/ui";
 
@@ -20,7 +21,7 @@ const COMMANDS = [
 ];
 
 /**
- * What the hosted page shows until it has a database to talk to.
+ * What `/` shows until it has a database to talk to.
  *
  * The order is deliberate: run the CLI, connect, and only then — as a quiet
  * second choice — look at fixture data. The demo exists so the page is not a
@@ -28,6 +29,7 @@ const COMMANDS = [
  */
 export function ConnectPage(): JSX.Element {
   const studio = useStudio();
+  const [host, setHost] = createSignal(DEFAULT_HOST);
   const [port, setPort] = createSignal(String(studio.defaultPort));
   const [command, setCommand] = createSignal(0);
   const [copied, setCopied] = createSignal(false);
@@ -40,18 +42,29 @@ export function ConnectPage(): JSX.Element {
     return current.kind === "offline" ? current : null;
   };
 
-  const target = createMemo(() => targetFrom(port()));
+  const target = createMemo(() => composeTarget(host(), port()));
+  const pastedUrl = createMemo(() => /^https?:\/\//i.test(host().trim()));
 
   onMount(() => {
-    // Focus the port so a keyboard user can type and hit Enter immediately.
-    document.getElementById("besu-connect-port")?.focus();
+    // Focus the address so a keyboard user can type and hit Enter immediately.
+    const field = document.getElementById("besu-connect-host");
+    if (field instanceof HTMLInputElement) {
+      field.focus();
+      field.select();
+    }
   });
 
   const submit = async (event: Event) => {
     event.preventDefault();
     if (probing()) return;
     setAttempted(true);
-    await studio.connect(port());
+    await studio.connect(target());
+    if (studio.connected()) navigate("/overview");
+  };
+
+  const explore = () => {
+    studio.useDemo();
+    navigate("/overview");
   };
 
   const copyCommand = async () => {
@@ -63,6 +76,25 @@ export function ConnectPage(): JSX.Element {
   return (
     <div class="h-screen overflow-y-auto bg-bg text-ink">
       <div class="mx-auto flex min-h-full w-full max-w-[860px] flex-col justify-center px-6 py-10 sm:px-8">
+        <Show when={studio.connected()}>
+          <button
+            class="mb-5 flex w-full items-center gap-2 rounded-[9px] border border-line bg-panel px-3.5 py-2.5 text-left text-[12px] transition-colors hover:border-line-strong hover:bg-panel-2"
+            onClick={() => navigate("/overview")}
+          >
+            <span class="size-1.5 shrink-0 rounded-full bg-ok" aria-hidden="true" />
+            <span class="min-w-0 truncate">
+              Connected to{" "}
+              <span class="font-medium">
+                {studio.info()?.database ?? "a database"}
+              </span>
+            </span>
+            <span class="ml-auto flex shrink-0 items-center gap-1 text-ink-3">
+              Open overview
+              <ArrowRight size={12} aria-hidden="true" />
+            </span>
+          </button>
+        </Show>
+
         <header class="flex items-start gap-3.5">
           <div class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
             <Database size={19} aria-hidden="true" />
@@ -126,8 +158,9 @@ export function ConnectPage(): JSX.Element {
               It listens on{" "}
               <span class="font-mono text-ink-2">127.0.0.1:{studio.defaultPort}</span>{" "}
               by default. Add{" "}
-              <span class="font-mono text-ink-2">--port 5000</span> if that one
-              is taken, and read the line it prints on startup.
+              <span class="font-mono text-ink-2">--port 5000</span> for another
+              port, and <span class="font-mono text-ink-2">--allow-remote</span>{" "}
+              to reach it from another device.
             </p>
           </li>
 
@@ -145,28 +178,52 @@ export function ConnectPage(): JSX.Element {
               </Show>
             </div>
 
-            <form class="flex flex-wrap items-center gap-2 px-4 py-3" onSubmit={submit}>
-              <div class="flex h-8 min-w-0 flex-1 items-center rounded-[7px] border border-line bg-panel focus-within:border-accent focus-within:ring-3 focus-within:ring-accent-soft">
-                <span class="pl-2.5 font-mono text-[12px] text-ink-3 select-none">
-                  http://127.0.0.1:
-                </span>
-                <input
-                  id="besu-connect-port"
-                  class="h-full min-w-0 flex-1 bg-transparent pr-2.5 pl-0 font-mono text-[12px] outline-none"
-                  value={port()}
-                  spellcheck={false}
-                  autocomplete="off"
-                  inputmode="numeric"
-                  aria-label="Studio port or address"
-                  placeholder={String(studio.defaultPort)}
-                  onInput={(event) => setPort(event.currentTarget.value)}
-                />
+            <form class="px-4 py-3" onSubmit={submit}>
+              <div class="flex flex-wrap items-end gap-2">
+                <label class="grid min-w-0 flex-1 gap-1">
+                  <span class="text-[10px] font-medium tracking-[0.08em] text-ink-3 uppercase">
+                    Host
+                  </span>
+                  <input
+                    id="besu-connect-host"
+                    class="field w-full font-mono text-[12px]"
+                    value={host()}
+                    spellcheck={false}
+                    autocomplete="off"
+                    aria-label="Studio host or address"
+                    placeholder={DEFAULT_HOST}
+                    onInput={(event) => setHost(event.currentTarget.value)}
+                  />
+                </label>
+                <label class="grid w-[92px] shrink-0 gap-1">
+                  <span class="text-[10px] font-medium tracking-[0.08em] text-ink-3 uppercase">
+                    Port
+                  </span>
+                  <input
+                    class="field w-full font-mono text-[12px]"
+                    value={port()}
+                    spellcheck={false}
+                    autocomplete="off"
+                    inputmode="numeric"
+                    aria-label="Studio port"
+                    placeholder={String(studio.defaultPort)}
+                    disabled={pastedUrl()}
+                    onInput={(event) => setPort(event.currentTarget.value)}
+                  />
+                </label>
+                <button class="btn btn-primary" type="submit" disabled={probing()}>
+                  <Show when={probing()} fallback={<>Connect <ArrowRight size={13} /></>}>
+                    <Spinner size={12} label="Connecting" />
+                  </Show>
+                </button>
               </div>
-              <button class="btn btn-primary" type="submit" disabled={probing()}>
-                <Show when={probing()} fallback={<>Connect <ArrowRight size={13} /></>}>
-                  <Spinner size={12} label="Connecting" />
+
+              <p class="mt-2 flex flex-wrap items-center gap-x-1.5 font-mono text-[11px] text-ink-3">
+                <span class="text-ink-2">{target()}</span>
+                <Show when={pastedUrl()}>
+                  <span class="font-sans">— the port comes from the URL</span>
                 </Show>
-              </button>
+              </p>
             </form>
 
             <Show when={offline()}>
@@ -190,7 +247,7 @@ export function ConnectPage(): JSX.Element {
                         target="_blank"
                         rel="noreferrer"
                       >
-                        open {targetLabel(target())} directly
+                        open {target().replace(/^https?:\/\//, "")} directly
                       </a>
                       .
                     </p>
@@ -201,8 +258,9 @@ export function ConnectPage(): JSX.Element {
 
             <Show when={!offline()}>
               <p class="px-4 pb-3 text-[11.5px] leading-relaxed text-ink-3">
-                Any port works. The page talks to your machine directly; no data
-                leaves it.
+                A hostname or IP works too, for a studio running on another
+                machine or over a tailnet. The page talks to it directly; no data
+                passes through this site.
               </p>
             </Show>
           </li>
@@ -211,26 +269,28 @@ export function ConnectPage(): JSX.Element {
         <div class="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-ink-3">
           <span class="flex items-center gap-1.5">
             <ShieldCheck size={12} aria-hidden="true" />
-            Loopback only unless you pass{" "}
-            <span class="font-mono">--allow-remote</span>.
+            <span>
+              Loopback only unless you pass{" "}
+              <span class="font-mono">--allow-remote</span>.
+            </span>
           </span>
           <span class="flex items-center gap-1.5">
             <Database size={12} aria-hidden="true" />
-            SQLite, PostgreSQL and MySQL.
+            <span>SQLite, PostgreSQL and MySQL.</span>
           </span>
         </div>
 
         <div class="mt-10 border-t border-line pt-5">
-          <p class="text-[11.5px] leading-relaxed text-ink-3">
-            No database yet?{" "}
+          <p class="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11.5px] leading-none text-ink-3">
+            <span>No database yet?</span>
             <button
-              class="inline-flex items-center gap-1 text-ink-2 underline decoration-line-strong decoration-1 underline-offset-2 transition-colors hover:text-ink"
-              onClick={() => studio.useDemo()}
+              class="inline-flex items-center gap-1.5 text-ink-2 underline decoration-line-strong decoration-1 underline-offset-[3px] transition-colors hover:text-ink"
+              onClick={explore}
             >
-              <FlaskConical size={11} aria-hidden="true" />
-              Explore with demo data
-            </button>{" "}
-            — three sample tables, read-only, no SQL.
+              <FlaskConical size={11} class="shrink-0" aria-hidden="true" />
+              <span>Explore with demo data</span>
+            </button>
+            <span>— three sample tables, read-only, no SQL.</span>
           </p>
         </div>
       </div>

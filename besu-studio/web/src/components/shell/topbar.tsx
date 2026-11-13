@@ -67,8 +67,8 @@ export function TopBar(props: TopBarProps): JSX.Element {
           class={`max-w-[45%] truncate rounded px-1 py-0.5 text-ink-2 hover:text-ink ${
             compactCrumb() ? "max-[640px]:hidden" : ""
           }`}
-          href="/"
-          onClick={(event) => linkClick(event, "/")}
+          href="/overview"
+          onClick={(event) => linkClick(event, "/overview")}
           title={database()}
         >
           {database()}

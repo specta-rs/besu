@@ -31,7 +31,7 @@ use axum::{
 };
 use besu_any::AnyDatabase;
 use std::time::Duration;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
@@ -123,18 +123,20 @@ pub fn router(db: AnyDatabase, connection: impl Into<String>) -> Router {
 
 /// The origins allowed to read this server from a browser.
 ///
-/// The hosted frontend is a static page that connects to a local studio, which
-/// makes this a cross-origin request. Only those two origins are allowed;
-/// everything else keeps the default, which is to refuse. `Vary: Origin` comes
-/// with it, so a cache cannot serve one origin's headers to another.
+/// Two kinds qualify. The hosted frontend is a public page that connects to a
+/// local studio, so it is named exactly. Everything else has to look like a
+/// development origin itself — loopback, a private network address, or a name
+/// that only resolves locally — which is what lets a studio served from one
+/// machine drive a studio on another, without allowing an arbitrary website to
+/// read a database sitting on loopback.
+///
+/// `Vary: Origin` comes with the layer, so a cache cannot serve one origin's
+/// headers to another.
 fn cors() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin([
-            HeaderValue::from_static("https://studio.besu.specta.dev"),
-            // The Vite dev server, for working on the frontend itself.
-            HeaderValue::from_static("http://localhost:5173"),
-            HeaderValue::from_static("http://127.0.0.1:5173"),
-        ])
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin == "https://studio.besu.specta.dev" || is_local_origin(origin)
+        }))
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -144,6 +146,61 @@ fn cors() -> CorsLayer {
         ])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
         .max_age(Duration::from_secs(600))
+}
+
+/// Whether an `Origin` header names something only reachable on a local or
+/// private network.
+///
+/// The comparison is textual for names and numeric for addresses: `localhost`,
+/// `*.local`, `*.ts.net` (Tailscale's MagicDNS), `127.0.0.0/8`, `10.0.0.0/8`,
+/// `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10` and
+/// IPv6 loopback or unique-local addresses.
+fn is_local_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+
+    // An IPv6 literal keeps its brackets, and its own colons, out of the port.
+    let host = if let Some(stripped) = rest.strip_prefix('[') {
+        match stripped.split_once(']') {
+            Some((address, _)) => format!("[{address}]"),
+            None => return false,
+        }
+    } else {
+        rest.split(':').next().unwrap_or(rest).to_owned()
+    };
+
+    if matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") {
+        return true;
+    }
+    if host.ends_with(".local") || host.ends_with(".ts.net") {
+        return true;
+    }
+
+    match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(std::net::IpAddr::V4(address)) => {
+            address.is_loopback() || address.is_private() || address.is_link_local() || {
+                // Tailscale hands out addresses from 100.64.0.0/10, which the
+                // standard library calls shared rather than private.
+                let octets = address.octets();
+                octets[0] == 100 && (64..128).contains(&octets[1])
+            }
+        }
+        Ok(std::net::IpAddr::V6(address)) => {
+            address.is_loopback() || (address.segments()[0] & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    }
 }
 
 /// Answer Chrome's private-network preflight.
@@ -212,7 +269,46 @@ fn redact(connection: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::{HeaderValue, is_local_origin, redact};
+
+    fn origin(value: &str) -> HeaderValue {
+        HeaderValue::from_str(value).expect("a valid header value")
+    }
+
+    #[test]
+    fn only_local_origins_may_drive_a_studio() {
+        for allowed in [
+            "http://localhost:5173",
+            "http://127.0.0.1:4983",
+            "http://[::1]:4983",
+            "http://192.168.1.20:4983",
+            "http://10.0.0.5:4983",
+            "http://172.16.4.4:4983",
+            "http://100.101.102.103:4983",
+            "http://[fd7a:115c:a1e0::1]:4983",
+            "http://mrbeast.tail5261d.ts.net:4983",
+            "http://macbook.local:4983",
+        ] {
+            assert!(
+                is_local_origin(&origin(allowed)),
+                "{allowed} should be allowed"
+            );
+        }
+
+        for refused in [
+            "https://evil.example",
+            "https://studio.besu.specta.dev.evil.example",
+            "http://8.8.8.8:4983",
+            "http://172.32.0.1:4983",
+            "ftp://localhost",
+            "null",
+        ] {
+            assert!(
+                !is_local_origin(&origin(refused)),
+                "{refused} should be refused"
+            );
+        }
+    }
 
     #[test]
     fn a_password_never_reaches_the_ui() {

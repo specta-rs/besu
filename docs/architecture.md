@@ -326,7 +326,9 @@ The frontend is a Vite + SolidJS application in `besu-studio/web`. It is built t
 no Node toolchain and the published crate serves a working UI with no CDN and no asset
 directory to lose. The same bundle is deployed to Cloudflare, where it is a client for a local
 process rather than a server: the API allows that origin and answers Chrome's private-network
-preflight, which is what an HTTPS page needs before it may read `127.0.0.1`.
+preflight, which is what an HTTPS page needs before it may read `127.0.0.1`. Beyond that
+origin, CORS admits only origins that are themselves local or private, so one machine's studio
+can drive another's without letting a public page read a database.
 
 The SQL console reads a statement's result through two passes: a `LIMIT 1` probe, whose row
 gives the result column names through `Driver::column_names`, then the same statement wrapped

@@ -79,13 +79,18 @@ database behind it. It asks for the port `besu studio` is running on, probes
 is only the UI, and every row, write and query reaches the database through the process on your
 machine.
 
-The server allows that origin (and the Vite dev server) in its CORS layer, and answers Chrome's
-private-network preflight, which is what lets an HTTPS page reach loopback at all. Chrome also
-asks once per site whether the page may access devices on the local network; allow it, and the
-page connects from then on. Nothing else is allowed: a different site cannot read this studio,
-and the server is still loopback-only. If a browser will not permit the request, the connect
-screen links straight to the studio's own address, which is a plain navigation and always
-works.
+The connect screen takes a host and a port, so it also reaches a studio on another machine or
+over a tailnet — the defaults are `localhost` and 4983.
+
+The server allows that request in its CORS layer, and answers Chrome's private-network
+preflight, which is what lets an HTTPS page reach loopback at all. Chrome also asks once per
+site whether the page may access devices on the local network; allow it, and the page connects
+from then on. Beyond the hosted origin, only origins that are themselves local or private are
+allowed — `localhost`, `*.local`, `*.ts.net`, loopback, RFC 1918, link-local and Tailscale
+addresses — so a page on one of your machines can drive a studio on another, and an arbitrary
+website still cannot read a database sitting on loopback. If a browser will not permit the
+request, the connect screen links straight to the studio's own address, which is a plain
+navigation and always works.
 
 If no server answers, the page says so and shows the command to start one. "Explore with demo
 data" is a quiet second option: three fixture tables in memory, where browsing, filtering and

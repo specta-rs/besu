@@ -36,21 +36,39 @@ function store(value: Stored | null): void {
   else localStorage.removeItem(STORAGE_KEY);
 }
 
-/**
- * Turn what the user typed into an origin to fetch from.
- *
- * The common case is a bare port; a pasted URL, a `localhost:4983` or an empty
- * box all mean the same thing, and a port is enough to reach the loopback
- * address the CLI binds.
- */
-export function targetFrom(input: string): string {
-  const value = input.trim().replace(/\/+$/, "");
-  if (value === "") return `http://127.0.0.1:${DEFAULT_PORT}`;
+/** The host the connect form starts on. */
+export const DEFAULT_HOST = "localhost";
 
-  if (/^https?:\/\//i.test(value)) return value;
-  if (value.includes(":")) return `http://${value}`;
-  if (/^\d+$/.test(value)) return `http://127.0.0.1:${value}`;
-  return `http://${value}`;
+/**
+ * Build an origin from the two fields the connect form offers.
+ *
+ * A host may be a name, an IPv4 address, a bracketed IPv6 address, `host:port`,
+ * or a whole URL — the last one wins over the port field, because someone who
+ * pasted `https://db.internal:8443` has already answered the question. An empty
+ * host falls back to the loopback name.
+ */
+export function composeTarget(host: string, port: string): string {
+  const name = host.trim().replace(/\/+$/, "");
+  if (name === "") return `http://${DEFAULT_HOST}:${port || DEFAULT_PORT}`;
+  if (/^https?:\/\//i.test(name)) return name;
+  if (/^\[[^\]]+\](:\d+)?$/.test(name)) {
+    return name.includes("]") && /\]:\d+$/.test(name)
+      ? `http://${name}`
+      : `http://${name}:${port || DEFAULT_PORT}`;
+  }
+  // `host:port` with no scheme: the colon already carries the port.
+  if (/^[^:]+:\d+$/.test(name)) return `http://${name}`;
+  return `http://${name}:${port || DEFAULT_PORT}`;
+}
+
+/**
+ * Canonicalise an origin before it is stored or probed: a scheme is required
+ * and a trailing slash is noise.
+ */
+export function normalizeTarget(input: string): string {
+  const value = input.trim().replace(/\/+$/, "");
+  if (value === "") return `http://${DEFAULT_HOST}:${DEFAULT_PORT}`;
+  return /^https?:\/\//i.test(value) ? value : `http://${value}`;
 }
 
 /** A short, readable form of a target for the connection card. */
@@ -138,7 +156,7 @@ export function createConnection() {
   };
 
   const connect = async (input: string) => {
-    const target = targetFrom(input);
+    const target = normalizeTarget(input);
     setState({ kind: "probing", target });
     try {
       live(target, await probe(target));

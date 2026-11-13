@@ -381,7 +381,7 @@ function Studio(): JSX.Element {
           <Show when={schemaRoute()}>
             {(current) => <SchemaPage table={current().table} />}
           </Show>
-          <Show when={route().name === "welcome"}>
+          <Show when={route().name === "overview"}>
             <Welcome />
           </Show>
         </main>
@@ -392,12 +392,42 @@ function Studio(): JSX.Element {
   );
 }
 
-/** The connect screen until there is a database to show. */
+/**
+ * The connect screen until there is a database to show, and the redirects that
+ * keep `/` meaning "setup" once one is connected.
+ *
+ * Nothing is redirected while a probe is in flight: a deep link opened in a new
+ * tab should stay where it is if the stored connection turns out to work.
+ */
 function Shell(): JSX.Element {
   const studio = useStudio();
+  let settled = false;
+
+  createEffect(() => {
+    const current = route();
+    if (studio.connection().kind === "probing") return;
+
+    // The first settled state is a restored connection: land where the app is,
+    // without leaving the setup page in history. After that, `/` stays the
+    // setup page — it is where Back from the overview should go.
+    if (!settled) {
+      settled = true;
+      if (studio.connected() && current.name === "setup") {
+        navigate("/overview", true);
+      }
+      return;
+    }
+
+    if (!studio.connected() && current.name !== "setup") {
+      navigate("/", true);
+    }
+  });
 
   return (
-    <Show when={studio.connected()} fallback={<ConnectPage />}>
+    <Show
+      when={studio.connected() && route().name !== "setup"}
+      fallback={<ConnectPage />}
+    >
       <Studio />
     </Show>
   );

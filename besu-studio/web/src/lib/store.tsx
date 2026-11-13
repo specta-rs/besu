@@ -7,7 +7,7 @@ import {
 } from "solid-js";
 import type { Resource } from "solid-js";
 import type { ConnectionHandle, Connection } from "./connection";
-import { DEFAULT_PORT, probe, targetFrom } from "./connection";
+import { DEFAULT_PORT } from "./connection";
 import type { ConnectionInfo, DataSource, Schema } from "./types";
 
 export type ToastKind = "info" | "ok" | "error";
@@ -172,4 +172,3 @@ export function useStudio(): StudioState {
   return state;
 }
 
-export { probe, targetFrom };

@@ -1,7 +1,8 @@
 import { createSignal } from "solid-js";
 
 export type Route =
-  | { name: "welcome" }
+  | { name: "setup" }
+  | { name: "overview" }
   | { name: "data"; table: string }
   | { name: "sql" }
   | { name: "schema"; table: string };
@@ -10,6 +11,7 @@ export type Route =
 export function parse(path: string): Route {
   const parts = path.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
 
+  if (parts[0] === "overview") return { name: "overview" };
   if (parts[0] === "sql") return { name: "sql" };
   if (parts[0] === "schema" && parts[1]) {
     return { name: "schema", table: decodeURIComponent(parts[1]) };
@@ -17,7 +19,7 @@ export function parse(path: string): Route {
   if (parts[0] === "t" && parts[1]) {
     return { name: "data", table: decodeURIComponent(parts[1]) };
   }
-  return { name: "welcome" };
+  return { name: "setup" };
 }
 
 export function href(route: Route): string {
@@ -28,7 +30,9 @@ export function href(route: Route): string {
       return `/schema/${encodeURIComponent(route.table)}`;
     case "sql":
       return "/sql";
-    case "welcome":
+    case "overview":
+      return "/overview";
+    case "setup":
       return "/";
   }
 }
@@ -47,6 +51,7 @@ export const route = () => parse(path());
 /** Push a route without a full page load. */
 export function navigate(to: string | Route, replace = false): void {
   const target = typeof to === "string" ? to : href(to);
+  if (target === window.location.pathname) return;
   if (replace) window.history.replaceState(null, "", target);
   else window.history.pushState(null, "", target);
   setPath(window.location.pathname);
