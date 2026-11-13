@@ -8,7 +8,11 @@ import {
   ShieldCheck,
   Terminal,
 } from "lucide-solid";
-import { DEFAULT_HOST, composeTarget } from "../lib/connection";
+import {
+  DEFAULT_HOST,
+  composeTarget,
+  mixedContentBlocked,
+} from "../lib/connection";
 import { copy } from "../lib/format";
 import { navigate } from "../lib/router";
 import { useStudio } from "../lib/store";
@@ -44,6 +48,7 @@ export function ConnectPage(): JSX.Element {
 
   const target = createMemo(() => composeTarget(host(), port()));
   const pastedUrl = createMemo(() => /^https?:\/\//i.test(host().trim()));
+  const blocked = createMemo(() => mixedContentBlocked(target()));
 
   onMount(() => {
     // Focus the address so a keyboard user can type and hit Enter immediately.
@@ -211,11 +216,25 @@ export function ConnectPage(): JSX.Element {
                     onInput={(event) => setPort(event.currentTarget.value)}
                   />
                 </label>
-                <button class="btn btn-primary" type="submit" disabled={probing()}>
-                  <Show when={probing()} fallback={<>Connect <ArrowRight size={13} /></>}>
-                    <Spinner size={12} label="Connecting" />
-                  </Show>
-                </button>
+                <Show
+                  when={!blocked()}
+                  fallback={
+                    <a
+                      class="btn btn-primary"
+                      href={target()}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open <ArrowRight size={13} />
+                    </a>
+                  }
+                >
+                  <button class="btn btn-primary" type="submit" disabled={probing()}>
+                    <Show when={probing()} fallback={<>Connect <ArrowRight size={13} /></>}>
+                      <Spinner size={12} label="Connecting" />
+                    </Show>
+                  </button>
+                </Show>
               </div>
 
               <p class="mt-2 flex flex-wrap items-center gap-x-1.5 font-mono text-[11px] text-ink-3">
@@ -256,7 +275,23 @@ export function ConnectPage(): JSX.Element {
               )}
             </Show>
 
-            <Show when={!offline()}>
+            <Show when={blocked()}>
+              <div class="mx-4 mb-3 rounded-[7px] border border-warn/35 bg-warn/8 px-3 py-2">
+                <p class="text-[12px] font-medium text-warn">
+                  This page is HTTPS, so it cannot call a plain-HTTP studio on
+                  another machine.
+                </p>
+                <p class="mt-1 text-[11.5px] leading-relaxed text-ink-2">
+                  Your browser stops the request before it leaves. The CLI serves
+                  this same UI at{" "}
+                  <span class="font-mono text-ink">{target().replace(/^https?:\/\//, "")}</span>
+                  , so open it there. A studio behind HTTPS — a tunnel or a
+                  reverse proxy — connects from here as normal.
+                </p>
+              </div>
+            </Show>
+
+            <Show when={!offline() && !blocked()}>
               <p class="px-4 pb-3 text-[11.5px] leading-relaxed text-ink-3">
                 A hostname or IP works too, for a studio running on another
                 machine or over a tailnet. The page talks to it directly; no data

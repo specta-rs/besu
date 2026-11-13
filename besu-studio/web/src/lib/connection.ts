@@ -71,6 +71,31 @@ export function normalizeTarget(input: string): string {
   return /^https?:\/\//i.test(value) ? value : `http://${value}`;
 }
 
+/** Whether a hostname is one the browser treats as this machine. */
+export function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return value === "localhost" || value === "127.0.0.1" || value === "::1";
+}
+
+/**
+ * Whether the browser will refuse this target before a request is even made.
+ *
+ * An HTTPS page may not fetch plain HTTP from another host, and loopback is the
+ * one exemption. `besu studio` serves its own UI, so the answer is to open that
+ * address rather than to try harder from here.
+ */
+export function mixedContentBlocked(target: string): boolean {
+  if (typeof window === "undefined" || window.location.protocol !== "https:") {
+    return false;
+  }
+  try {
+    const url = new URL(target);
+    return url.protocol === "http:" && !isLoopbackHost(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** A short, readable form of a target for the connection card. */
 export function targetLabel(target: string): string {
   return target.replace(/^https?:\/\//, "");
