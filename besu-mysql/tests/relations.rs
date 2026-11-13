@@ -873,3 +873,28 @@ async fn many_to_many_order_without_a_limit_orders_children() {
         ["orm"]
     );
 }
+
+#[tokio::test]
+async fn insert_tree_reports_unsupported_before_running_anything() {
+    let db = setup("besu_test_relations_insert_tree").await;
+
+    let error = db
+        .insert_tree(
+            db.insert(users)
+                .value(users.insert("alice@example.com", "Alice", 30)),
+            has_many(users.id, posts.author_id),
+            [posts.insert("Hello", 0), posts.insert("World", 0)],
+        )
+        .await
+        .unwrap_err();
+
+    // MySQL has no `RETURNING`, and `insert_tree` refuses before it opens a transaction
+    // rather than guessing the generated key.
+    assert!(matches!(
+        error,
+        sqlx::Error::Protocol(message) if message.contains("insert_tree") && message.contains("RETURNING")
+    ));
+
+    assert!(db.select(users).await.unwrap().is_empty());
+    assert!(db.select(posts).await.unwrap().is_empty());
+}

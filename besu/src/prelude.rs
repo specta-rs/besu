@@ -47,7 +47,8 @@ pub use crate::query::{
     OnConflict, Select, SetOp, SetQuery, Update, alias, alias_as, derived,
 };
 pub use crate::relation::{
-    HasMany, ManyToMany, Nested, PerParent, Relation, WithRelation, has_many, many_to_many,
+    HasMany, InsertChildren, ManyToMany, Nested, PerParent, Relation, WithRelation, has_many,
+    many_to_many,
 };
 pub use crate::seed::{TableSeed, seed};
 pub use crate::selection::Selection;

@@ -133,15 +133,33 @@
 //! # What is not modelled
 //!
 //! A relation is described entirely by the columns it joins on, so the schema layer does not
-//! change: there is no relation list on [`TableDef`], and no lookup by name. The one relation
-//! feature still missing is writing: inserting a parent and its children together is not part
-//! of this API. Everything else — reusable relation values, many-to-many, nesting and
-//! per-parent limits/ordering — is supported. The insert builder is generic over an executor,
-//! which has no portable way to begin a transaction, and MySQL has no `RETURNING` to hand back
-//! the generated parent key. Write the two inserts inside
-//! [`Database::transaction`](crate::Database::transaction) instead. There is no `belongs_to`
-//! (a child does not load its parent), and a many-to-many yields the child models rather than
-//! the join rows, so a join table with data of its own is queried directly.
+//! change: there is no relation list on [`TableDef`], and no lookup by name. Writing a parent
+//! and its children together is [`Database::insert_tree`](crate::Database::insert_tree), which
+//! takes a plain [`has_many`] relation and runs both inserts in one transaction:
+//!
+//! ```ignore
+//! let (user, posts) = db
+//!     .insert_tree(
+//!         db.insert(users).value(users.insert("a@example.com", "Alice", 30)),
+//!         has_many(users.id, posts.author_id),
+//!         [posts.insert("Hello", 0), posts.insert("World", 0)],
+//!     )
+//!     .await?;
+//! ```
+//!
+//! The child foreign key is overwritten with the generated parent key, so the placeholder in
+//! each child value is not read. The parent insert must produce exactly one row, the parent
+//! `RETURNING` projection is supplied by `insert_tree` itself, and a failed child statement
+//! rolls back the parent. A nested relation, a relation with an order or limit, and a
+//! many-to-many have no [`InsertChildren`] implementation, so they cannot be passed to
+//! `insert_tree`; write those through [`Database::transaction`](crate::Database::transaction).
+//! MySQL has no `RETURNING`, so `insert_tree` reports
+//! [`Error::Unsupported`](besu_core::Error::Unsupported) before opening a transaction rather
+//! than emulating it.
+//!
+//! There is no `belongs_to` (a child does not load its parent), and a many-to-many yields the
+//! child models rather than the join rows, so a join table with data of its own is queried
+//! directly.
 //!
 //! An unconfigured child statement has no `ORDER BY`, so the order is the database's. Add
 //! [`HasMany::order_by`] or [`ManyToMany::order_by`] when it matters; the API does not invent
@@ -618,6 +636,64 @@ where
         children: (),
         config: (),
         phantom: PhantomData,
+    }
+}
+
+/// A relation whose children can be written with the parent in one transaction.
+///
+/// Implemented only for a plain [`HasMany`] built by [`has_many`] — no nested children, no
+/// per-parent order or limit, and no [`ManyToMany`]. Those relations describe reads; writing
+/// them needs decisions the read API does not make, so there is deliberately no
+/// implementation and passing one to [`Database::insert_tree`](crate::Database::insert_tree)
+/// is a compile error rather than a half-written tree.
+///
+/// The methods expose the two tables and the two column names the relation was built from.
+/// They are the seam the insert path needs; the relation's fields stay private. This trait is
+/// public because it appears in the bound of `insert_tree`, but it is not meant to be
+/// implemented outside this crate.
+pub trait InsertChildren: Sync + 'static {
+    /// The table the parent row is inserted into.
+    type Parent: Table;
+
+    /// The table the child rows are inserted into.
+    type Child: Table;
+
+    /// The parent table's metadata.
+    fn parent_table(&self) -> &'static TableDef;
+
+    /// The parent key column.
+    fn parent_key_column(&self) -> &'static str;
+
+    /// The child table's metadata.
+    fn child_table(&self) -> &'static TableDef;
+
+    /// The child foreign key column, which receives the generated parent key.
+    fn child_foreign_key(&self) -> &'static str;
+}
+
+impl<P, C, S> InsertChildren for HasMany<P, C, S, (), ()>
+where
+    P: Table,
+    C: Table,
+    S: SqlType,
+{
+    type Parent = P;
+    type Child = C;
+
+    fn parent_table(&self) -> &'static TableDef {
+        self.parent
+    }
+
+    fn parent_key_column(&self) -> &'static str {
+        self.parent_column
+    }
+
+    fn child_table(&self) -> &'static TableDef {
+        self.child
+    }
+
+    fn child_foreign_key(&self) -> &'static str {
+        self.child_column
     }
 }
 

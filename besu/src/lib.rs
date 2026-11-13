@@ -153,8 +153,8 @@ pub use query::{
     UpdateReturning, alias, alias_as, derived,
 };
 pub use relation::{
-    HasMany, ManyToMany, Nested, PerParent, Relation, RelationConfig, WithRelation, has_many,
-    many_to_many,
+    HasMany, InsertChildren, ManyToMany, Nested, PerParent, Relation, RelationConfig, WithRelation,
+    has_many, many_to_many,
 };
 pub use seed::{Seed, SeedError, SeedReport, TableSeed, seed};
 pub use selection::Selection;

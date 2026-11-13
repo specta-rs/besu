@@ -7,11 +7,14 @@ use core::{
 
 use alloc::vec::Vec;
 
-use besu_core::{Decode, Dialect, DialectOf, Driver, DryDriver, ErrorOf, Executor};
+use besu_core::{Decode, Dialect, DialectOf, Driver, DryDriver, Error, ErrorOf, Executor, Value};
 
+use crate::expr::ExprKind;
 use crate::macros::Fragment;
+use crate::query::insert::InsertQuery;
 use crate::query::{Delete, Insert, Select, Update};
-use crate::table::{Table, TableRef};
+use crate::relation::InsertChildren;
+use crate::table::{Insertable, Table, TableRef};
 
 /// A database you can run queries against.
 ///
@@ -415,6 +418,258 @@ impl<Dr: TransactionDriver> Database<Dr> {
     {
         let mut tx = self.begin().await?;
         match f(&mut tx).await {
+            Ok(value) => {
+                tx.commit().await?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = tx.rollback().await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Insert one parent row and its has-many children in one transaction.
+    ///
+    /// The parent is inserted first, with `RETURNING` every declared column, and decoded into
+    /// `P::Model`. The parent key is read out of that model, and every child's foreign key is
+    /// overwritten with it, so the value the caller put there is a placeholder and may be
+    /// anything the column accepts. The children then go into one multi-row
+    /// `INSERT ... RETURNING`, and both statements commit together:
+    ///
+    /// ```ignore
+    /// let (user, posts): (User, Vec<Post>) = db
+    ///     .insert_tree(
+    ///         db.insert(users).value(users.insert("a@example.com", "Alice", 30)),
+    ///         has_many(users.id, posts.author_id),
+    ///         [posts.insert("Hello", 0), posts.insert("World", 0)],
+    ///     )
+    ///     .await?;
+    /// ```
+    ///
+    /// ```sql
+    /// INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3)
+    ///   RETURNING "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio";
+    /// INSERT INTO "posts" ("title", "author_id") VALUES ($1, $2), ($3, $4)
+    ///   RETURNING "posts"."id", "posts"."title", "posts"."author_id";
+    /// ```
+    ///
+    /// The parent insert must carry exactly one row — `.value(..)` rather than
+    /// `.values(..)` — because its result is the single parent model. A parent with no
+    /// children returns `(parent, Vec::new())` after committing the parent insert.
+    ///
+    /// Each statement numbers its own placeholders from one, exactly as it would on its
+    /// own: the child insert binds the parent key again for every row.
+    ///
+    /// `insert_tree` supplies the parent's `RETURNING` projection itself, projecting every
+    /// declared column so the model decodes. An insert that already has a projection cannot
+    /// be passed: [`Insert::returning`] returns a different type, so it is a compile error
+    /// rather than a runtime surprise. Any `ON CONFLICT` clause is preserved; if it skips the
+    /// row, there is no parent to return and the call fails.
+    ///
+    /// The relation must be a plain [`has_many`](crate::has_many): a nested relation, a
+    /// relation with an order or limit, and a many-to-many have no
+    /// [`InsertChildren`](crate::relation::InsertChildren) implementation. Use
+    /// [`Database::transaction`](Self::transaction) for those.
+    ///
+    /// MySQL has no `RETURNING`, so this reports an
+    /// [`Error::Unsupported`](besu_core::Error::Unsupported) before opening a transaction
+    /// rather than guessing the parent key. A database without `RETURNING` cannot implement
+    /// the contract without a second, driver-specific mechanism such as MySQL's
+    /// `LAST_INSERT_ID()`.
+    pub async fn insert_tree<'a, Rel, P, C, I>(
+        &'a self,
+        parent: Insert<'a, &'a Self, (P,), I>,
+        relation: Rel,
+        children: impl IntoIterator<Item = C::Insert>,
+    ) -> Result<(P::Model, Vec<C::Model>), Dr::Error>
+    where
+        Rel: InsertChildren<Parent = P, Child = C>,
+        P: Table,
+        C: Table,
+        I: Insertable,
+        P::Model: Decode<Dr>,
+        C::Model: Decode<Dr>,
+    {
+        if !<Dr::Dialect as Dialect>::SUPPORTS_RETURNING {
+            return Err(<Dr as Driver>::error(Error::unsupported(alloc::format!(
+                "`insert_tree` needs `RETURNING` to read the generated parent key, and `{}` \
+                 does not support it; use `Database::transaction` and read the key from the \
+                 driver instead",
+                <Dr::Dialect as Dialect>::NAME
+            ))));
+        }
+
+        let parent_table = relation.parent_table();
+        let child_table = relation.child_table();
+        let parent_key_column = relation.parent_key_column();
+        let child_foreign_key = relation.child_foreign_key();
+
+        let Insert {
+            query: mut parent_query,
+            ..
+        } = parent;
+
+        let stride = parent_table.columns.len();
+        if stride == 0 {
+            return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                "`insert_tree` needs a parent table with at least one column, but `{}` has \
+                 none",
+                parent_table.name
+            ))));
+        }
+        if parent_query.values.len() != stride {
+            return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                "`insert_tree` inserts exactly one parent row, but this insert provides {}; \
+                 call `.value(..)` once, or use `Database::transaction` for several parents",
+                parent_query.values.len() / stride
+            ))));
+        }
+        if parent_query.returning.is_some() {
+            // Unreachable through the public API — `Insert::returning` consumes the insert and
+            // returns a different type — but kept so a future builder change cannot silently
+            // replace a caller's projection.
+            return Err(<Dr as Driver>::error(Error::invalid_query(
+                "`insert_tree` supplies the parent's `RETURNING` projection; pass the insert \
+                 before `.returning(..)`, or use `Database::transaction`",
+            )));
+        }
+
+        let parent_key_index = match parent_table
+            .columns
+            .iter()
+            .position(|column| column.name == parent_key_column)
+        {
+            Some(index) => index,
+            None => {
+                return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                    "`insert_tree` cannot find the parent key column `{}.{parent_key_column}`",
+                    parent_table.name
+                ))));
+            }
+        };
+        let child_foreign_key_index = match child_table
+            .columns
+            .iter()
+            .position(|column| column.name == child_foreign_key)
+        {
+            Some(index) => index,
+            None => {
+                return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                    "`insert_tree` cannot find the child foreign key column `{}.{child_foreign_key}`",
+                    child_table.name
+                ))));
+            }
+        };
+
+        // The caller's values cannot be decoded without every column, and the model's decode
+        // order is the declared column order. Replacing any projection with that order is
+        // what makes the return type `P::Model` rather than a caller-chosen subset.
+        parent_query.returning = Some(
+            parent_table
+                .columns
+                .iter()
+                .map(|column| ExprKind::Column {
+                    table: parent_table.name,
+                    column: column.name,
+                })
+                .collect(),
+        );
+
+        let prefix = self.prefix.clone();
+        let parent_sql = parent_query
+            .build::<Dr::Dialect>(prefix.clone())
+            .finish()
+            .map_err(<Dr as Driver>::error)?;
+
+        // Every build error above happens before the transaction opens. From here on, any
+        // failure rolls the transaction back rather than leaving a parent without its
+        // children.
+        let mut tx = self.begin().await?;
+        let result = async {
+            let rows = Dr::txn_query(&mut tx.inner, &parent_sql).await?;
+            let Some(row) = rows.first() else {
+                return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                    "`insert_tree` did not receive the inserted `{}` row; an `ON CONFLICT` \
+                     clause that skips the row leaves nothing to return",
+                    parent_table.name
+                ))));
+            };
+            let mut offset = 0;
+            let parent_model = P::Model::decode(row, &mut offset)?;
+            drop(rows);
+
+            let mut model_values = P::model_values(&parent_model);
+            if parent_key_index >= model_values.len() {
+                return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                    "`insert_tree` decoded a `{}` model with {} value(s) for {} column(s)",
+                    parent_table.name,
+                    model_values.len(),
+                    parent_table.columns.len()
+                ))));
+            }
+            let parent_key = model_values.swap_remove(parent_key_index);
+            if parent_key == Value::Null {
+                return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                    "`insert_tree` read a `NULL` from the parent key `{}.{parent_key_column}`",
+                    parent_table.name
+                ))));
+            }
+
+            // One flat buffer for the whole child statement, written a row at a time. The
+            // foreign key is overwritten in place immediately after each row lands, so there
+            // is no second pass and no per-row allocation.
+            let child_stride = child_table.columns.len();
+            let children = children.into_iter();
+            let (child_rows, _) = children.size_hint();
+            let mut child_values = Vec::with_capacity(child_rows.saturating_mul(child_stride));
+            for child in children {
+                let start = child_values.len();
+                child.write_values(&mut child_values);
+                if child_values.len() - start != child_stride {
+                    return Err(<Dr as Driver>::error(Error::invalid_query(alloc::format!(
+                        "an `Insertable` for `{}` wrote {} value(s) for {} column(s)",
+                        child_table.name,
+                        child_values.len() - start,
+                        child_stride
+                    ))));
+                }
+                child_values[start + child_foreign_key_index] = Some(parent_key.clone());
+            }
+
+            if child_values.is_empty() {
+                return Ok((parent_model, Vec::new()));
+            }
+
+            let mut child_query = InsertQuery::new(child_table);
+            child_query.values = child_values;
+            child_query.returning = Some(
+                child_table
+                    .columns
+                    .iter()
+                    .map(|column| ExprKind::Column {
+                        table: child_table.name,
+                        column: column.name,
+                    })
+                    .collect(),
+            );
+            let child_sql = child_query
+                .build::<Dr::Dialect>(prefix)
+                .finish()
+                .map_err(<Dr as Driver>::error)?;
+
+            let rows = Dr::txn_query(&mut tx.inner, &child_sql).await?;
+            let mut decoded = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut offset = 0;
+                decoded.push(C::Model::decode(row, &mut offset)?);
+            }
+
+            Ok((parent_model, decoded))
+        }
+        .await;
+
+        match result {
             Ok(value) => {
                 tx.commit().await?;
                 Ok(value)

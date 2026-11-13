@@ -107,6 +107,25 @@
 //!
 //! ```compile_fail
 //! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { #[besu(primary_key, auto_increment)] pub id: i64, pub name: String }
+//! # #[derive(Table)] #[besu(table = "posts")] struct Post { #[besu(primary_key, auto_increment)] pub id: i64, pub author_id: i64 }
+//! # async fn demo(db: &besu_sqlite::Database) {
+//! // `insert_tree` supplies the parent's `RETURNING` projection so the result is a
+//! // `User`. `.returning(..)` changes the builder's type, so it does not match.
+//! let _ = db
+//!     .insert_tree(
+//!         db.insert(users)
+//!             .value(users.insert("Alice"))
+//!             .returning(users),
+//!         has_many(users.id, posts.author_id),
+//!         [posts.insert(0)],
+//!     )
+//!     .await;
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
 //! // `sql!` counts its placeholders against its arguments at compile time.
 //! let _ = besu::sql!("SELECT * FROM users WHERE id = ?");
 //! ```

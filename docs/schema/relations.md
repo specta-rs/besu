@@ -229,6 +229,56 @@ let authors: Vec<(User, Vec<(Post, Vec<Comment>)>)> = db
     .await?;
 ```
 
+## Writing a parent and its children
+
+`Database::insert_tree` inserts one parent row and its has-many children in one transaction.
+The child insert value still carries a foreign key because it is the same insert struct a
+standalone insert uses; `insert_tree` overwrites it with the generated parent key, so the
+placeholder is never read:
+
+```rust
+let (user, children): (User, Vec<Post>) = db
+    .insert_tree(
+        db.insert(users).value(users.insert("a@example.com", "Alice", 30)),
+        has_many(users.id, posts.author_id),
+        [posts.insert("Hello", 0), posts.insert("World", 0)],
+    )
+    .await?;
+```
+
+On PostgreSQL that is two statements:
+
+```sql
+INSERT INTO "users" ("email", "name", "age") VALUES ($1, $2, $3)
+  RETURNING "users"."id", "users"."email", "users"."name", "users"."age", "users"."bio";
+
+INSERT INTO "posts" ("title", "author_id") VALUES ($1, $2), ($3, $4)
+  RETURNING "posts"."id", "posts"."title", "posts"."author_id";
+```
+
+The parent statement projects every declared column, so the result decodes into `User`; the
+key is read from that model. Both child rows are one statement, and each row's foreign key is
+the same parent key. A parent with no children returns `(user, Vec::new())` after committing
+the parent insert.
+
+The rest of the contract:
+
+- **One parent.** The insert must carry exactly one row — `.value(..)`, not `.values(..)` —
+  because the result is one parent model. A multi-row parent is rejected before a transaction
+  opens; use [`Database::transaction`] for several parents.
+- **`insert_tree` supplies the projection.** The parent insert is given its own
+  `RETURNING` list, so the result type is always `P::Model`. `Insert::returning` returns a
+  different type, so passing it does not compile. An `ON CONFLICT` clause is preserved; if it
+  skips the row there is no parent model, and the call fails instead of inventing one.
+- **Plain has-many only.** A nested relation, a relation with an order or limit, and a
+  many-to-many have no `InsertChildren` implementation, so `insert_tree` does not accept
+  them.
+- **All or nothing.** A failing child statement rolls the parent back with it. The children
+  are one statement, so a failure cannot leave half of them written either.
+- **No MySQL fallback.** MySQL has no `RETURNING`, so `insert_tree` reports
+  `Error::Unsupported` before opening a transaction. It does not guess the generated key with
+  `LAST_INSERT_ID()`; use [`Database::transaction`] and the driver there if you need that.
+
 ## Why it is not a join
 
 A join returns a tuple, `(User, Option<Post>)`, and repeats the same parent columns once per
@@ -308,21 +358,12 @@ the inspection methods still render it so the shape is visible.
 
 ## What is not modelled
 
-- **Writing a parent and its children together.** This is the one relation feature still
-  missing: relation values, many-to-many, nested eager loading and per-parent limits/ordering
-  are all supported, but the insert builder has no parent+children form. The insert builder is
-  generic over an executor, which has no portable way to begin a transaction, and MySQL has
-  no `RETURNING` to hand back a generated parent key. Write the two inserts inside
-  [`Database::transaction`], or make the foreign key deferrable and insert the children once
-  the parent key is known:
-  ```rust
-  db.transaction(async |tx| {
-      let user = tx.insert(users).value(users.insert(..)).returning(users).await?;
-      tx.insert(posts).value(posts.insert("Title", user[0].id)).await?;
-      Ok(())
-  })
-  .await?;
-  ```
+- **Writing anything other than a plain has-many.** `insert_tree` writes one parent and its
+  has-many children. Nested children, per-parent limits on a write, and many-to-many through
+  a join table are not part of it; use [`Database::transaction`] and write the statements
+  yourself. On MySQL, `insert_tree` reports `Error::Unsupported` because there is no
+  `RETURNING` to hand back the generated parent key; the same transaction pattern with
+  `LAST_INSERT_ID()` is the fallback there.
 - **The other direction.** There is no `belongs_to`: a child does not carry a loaded parent.
   Query the parent by key, or use a join.
 - **Relationships in the schema.** Nothing is stored on `TableDef`. The foreign key is a
