@@ -29,11 +29,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features --exclude besu-postgres --exclude besu-mysql
 
-  # The builder is the only part of Besu that can run in a browser, and it is only useful
-  # there if it keeps compiling for `wasm32-unknown-unknown`. Nothing is executed on this
-  # target: there is no runtime in the job, so `--all-targets` compiles the tests instead of
-  # running them. The SQL those queries produce is asserted by `besu/tests/dry.rs`, which
-  # runs on every native platform in the `test` job.
+  # The builder and the bridge client compile and run in a browser. The checks prove the
+  # `wasm32` build stays clean; the last step runs the bridge's browser tests in headless
+  # Chrome, which is what the native test cannot prove: that the module executes in a browser.
   wasm:
     name: wasm32-unknown-unknown
     runs-on: ubuntu-latest
@@ -61,6 +59,23 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown -p besu-postgres --no-default-features
       - name: Check the MySQL dialect without its driver
         run: cargo check --target wasm32-unknown-unknown -p besu-mysql --no-default-features
+      - name: Check the bridge client
+        run: cargo check --target wasm32-unknown-unknown -p besu-bridge --all-targets
+      # The runner and the `wasm-bindgen` crate must be the same version or the runner
+      # refuses the module. The lockfile is the single source of that version.
+      - name: Install wasm-bindgen-cli
+        run: |
+          version="$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version' \
+            | head -n 1)"
+          echo "Installing wasm-bindgen-cli $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      - name: Run the bridge browser tests
+        run: cargo test --target wasm32-unknown-unknown -p besu-bridge --test browser
+        env:
+          # The ubuntu-latest image ships Chrome and a matching ChromeDriver. The runner
+          # finds Chrome itself and uses this for the WebDriver process.
+          CHROMEDRIVER: chromedriver
 
   database:
     name: database / ${{ matrix.database }}

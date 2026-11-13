@@ -106,6 +106,7 @@ carries the column's name, type and nullability in the type system.
 | [`besu-macros`](besu-macros) | `#[derive(Table)]`. |
 | [`besu-sqlite`](besu-sqlite) · [`besu-postgres`](besu-postgres) · [`besu-mysql`](besu-mysql) | Dialects, drivers, DDL and introspection for each database. |
 | [`besu-any`](besu-any) | `AnyDatabase`: one type over all three backends, chosen from a connection string. |
+| [`besu-bridge`](besu-bridge) | A `Driver` that runs a query in a browser by posting it to a server, with the JSON wire format and both halves of the bridge. |
 | [`besu-cli`](cli) | `besu push`, `besu pull`, `besu generate` and `besu migrate`. |
 | [`besu-studio`](besu-studio) | The library behind `besu studio`, a development-only schema and data browser. |
 

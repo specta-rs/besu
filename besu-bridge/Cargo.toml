@@ -1,0 +1,54 @@
+[package]
+name = "besu-bridge"
+description = "A bridge driver that runs Besu queries from the browser against a server."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+categories = ["database", "wasm", "web-programming"]
+documentation = "https://docs.rs/besu-bridge/latest/besu-bridge"
+keywords = ["database", "query-builder", "wasm", "browser", "http"]
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+besu-core = { workspace = true }
+besu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
+
+# A browser has `fetch`; the client half of the bridge is built on it. None of this is
+# compiled on a native target, where a server provides the other end of the transport.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-channel = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Window",
+] }
+
+[dev-dependencies]
+besu = { workspace = true, features = ["derive"] }
+# Only the dialect: the server half of the tests runs Besu's own SQL against a fake driver,
+# so no database or sqlx is involved.
+besu-postgres = { workspace = true }
+besu-mysql = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }

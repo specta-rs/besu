@@ -17,6 +17,8 @@ same shape. Read one of them alongside this page.
 | `Decode<D>` | `besu-core` | Turning one column, or a whole row, into a Rust value |
 | `SchemaDriver` | `besu` | Introspection, plus an associated `Ddl` |
 | `Ddl` | `besu-schema` | Rendering a `Schema` or a list of `Change`s as SQL |
+| `Transport` | `besu-bridge` | Carrying a bridge request to a server and its response back |
+| `BridgeSource<D>` | `besu-bridge` | Reading one of a server driver's rows as wire values |
 
 `Driver`, `Dialect` and `Decode` have no dependency on the query builders. A driver crate
 depends on `besu-core`, on `besu-schema` for DDL, and on `besu` only to implement
@@ -452,6 +454,114 @@ where
 Type erasure is deliberately not offered: `Driver` has associated types and returns `impl
 Future`, so erasing it means boxed rows, boxed futures and a runtime decoder — an allocation
 per row to solve a problem the `match` already solves.
+
+## The bridge driver
+
+`besu-bridge` is a driver whose "database" is an HTTP endpoint. It exists because a browser
+cannot open a socket to PostgreSQL, but it can `fetch` a JSON body: the browser builds the
+same typed query, and a server runs the rendered SQL against a real driver.
+
+It is worth reading as a second kind of driver. The sqlx drivers hand bytes to a local
+database; the bridge hands values to another process, which means it owns its `Decode` impls
+and its parameter encoding, but not the SQL dialect.
+
+### `BridgeDialect<D>`
+
+A driver's `Dialect` is an associated type, and a bridge does not know which database is on
+the other end. `Bridge<T, D>` therefore uses `BridgeDialect<D>`, which forwards `D`'s
+`PLACEHOLDER`, quoting, capability constants, `function`, `type_name` and `cast_type_name`, and
+replaces only `bind`:
+
+```rust
+impl<D: Dialect> Dialect for BridgeDialect<D> {
+    type Value = BridgeValue; // not D::Value
+
+    const PLACEHOLDER: Placeholder = D::PLACEHOLDER;
+    // ... every other constant forwards to D ...
+
+    fn bind(value: Value) -> Result<BridgeValue, Error> {
+        BridgeValue::from_value(value)
+    }
+}
+```
+
+`D::bind` is never called, because nothing local needs the dialect's prepared-statement
+encoding; the value travels as JSON and the server binds it again with its own dialect. The
+one method that cannot be forwarded is `write_statement_suffix`: its argument is `&[D::Value]`
+and its purpose is a per-connection prepared-statement cache, which an HTTP request does not
+have.
+
+A `Bridge<_, Postgres>` therefore emits exactly what `besu-postgres` would emit, and a
+`Bridge<_, MySql>` emits MySQL's spelling, with no second implementation to drift.
+
+### The wire format
+
+Requests and responses are plain `serde` types in `besu_bridge::wire`:
+
+```json
+{"sql": "SELECT ... WHERE (\"users\".\"id\" = $1)", "params": [{"t":"int","v":7}], "kind": "query"}
+{"columns": ["id","name"], "rows": [[{"t":"int","v":7},{"t":"text","v":"Oscar"}]]}
+{"affected": 1}
+{"error": {"message": "duplicate key value violates unique constraint"}}
+```
+
+`kind` distinguishes `query` from `execute`, because the server has to call `Driver::query`
+for one and `Driver::execute` for the other. A value is a tagged object so its type survives
+JSON: `{"t":"decimal","v":"123.45"}` is not a float, and `{"t":"uint128","v":"...max..."}` is
+decimal text because a 128-bit integer does not fit a JavaScript number. `bytes` and
+`geometry` are base64; `json` is a nested JSON document rather than a string containing one;
+an `array` carries its element `TypeDef` so the server can bind it again exactly. The complete
+table is in the `besu-bridge` crate documentation.
+
+### `Transport` and the `Send` problem
+
+```rust
+pub trait Transport: Clone + Send + Sync + 'static {
+    fn send(&self, request: Request) -> impl Future<Output = Result<Response, BridgeError>> + Send;
+}
+```
+
+`Driver` requires a `Send` future. A `web_sys` fetch future holds JavaScript handles and is
+`!Send`, so `FetchTransport` does not await it in `send`. It moves the fetch onto
+`wasm_bindgen_futures::spawn_local` and returns a future that awaits a
+`futures_channel::oneshot::Receiver`. The receiver is `Send` because `Response` and
+`BridgeError` are, so the driver's future satisfies the trait without any `unsafe` and without
+claiming the handles are shareable — the wasm module is single-threaded, and `spawn_local` is
+where the JavaScript work lives.
+
+`MemoryTransport` is the other implementation: a closure plus a request log. It is how the
+crate's native and browser tests run a select and an insert with no server.
+
+### The server half
+
+`handle_request(driver, source, request)` is a real implementation, not a stub. It rebuilds a
+`Sql` from the request through `D::Dialect`, calls the driver, and serialises the result.
+`Driver::Row` is opaque, so the one thing it cannot do generically is read a row; that is
+`BridgeSource<D>`:
+
+```rust
+pub trait BridgeSource<D: Driver> {
+    fn encode_row(&self, row: &D::Row) -> Result<Vec<BridgeValue>, BridgeError>;
+    fn affected(&self, output: &D::Output) -> u64;
+}
+```
+
+A server implements it next to the driver it chose, where `D::Row` is a concrete type it can
+read. Nothing is faked: a row the source cannot encode becomes `Response::error`, and a
+driver error becomes the same. Column names come from `Driver::column_names` on the first row,
+so an empty result set has none; a server that knows its columns can fill
+`Response::columns` itself.
+
+### Limitations
+
+- No streaming: one HTTP response carries every row, so `query_stream` uses the default.
+- No `TransactionDriver`: a transaction across requests would be a server-side session the
+  bridge does not model.
+- The browser test uses `MemoryTransport`. `FetchTransport` is covered by compilation and by
+  a server that points it at an endpoint; running it end to end needs a server in the test
+  process, which the CI job does not start.
+- The endpoint runs SQL the client sends. Authenticate and authorise it like any SQL
+  execution endpoint; the bridge adds no policy layer of its own.
 
 ## Testing a new driver
 

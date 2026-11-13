@@ -67,6 +67,8 @@
 //! - [`besu-sqlite`](https://docs.rs/besu-sqlite) for [SQLite](https://www.sqlite.org).
 //! - [`besu-postgres`](https://docs.rs/besu-postgres) for [PostgreSQL](https://www.postgresql.org).
 //! - [`besu-mysql`](https://docs.rs/besu-mysql) for [MySQL](https://www.mysql.com).
+//! - [`besu-bridge`](https://docs.rs/besu-bridge) for running a query in a browser through a
+//!   server.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 // Builders carry `PhantomData<(&'a (), fn() -> T)>` to make their lifetimes and type

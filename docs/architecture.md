@@ -239,7 +239,15 @@ a pool can be cloned into as many tasks as you like.
 The query builder compiles and runs on `wasm32-unknown-unknown`. A web front end can build
 the same typed query the server would build and render the exact SQL it will send. Nothing
 in that path needs a socket, a filesystem, an async runtime or a clock: it is `alloc` and
-arithmetic. The intended use is generating SQL on the client for a server to execute.
+arithmetic.
+
+There are two ways to turn that SQL into rows:
+
+- `besu::dry::<D>()` renders a query and refuses to run it. It is the right executor when the
+  application only needs the SQL.
+- `besu_bridge::Bridge` is a real `Driver`. It posts the SQL and its bound parameters to an
+  HTTP endpoint and decodes the rows that come back, so the browser can run a typed query
+  against the server's database.
 
 ```toml
 [dependencies]
@@ -247,33 +255,52 @@ arithmetic. The intended use is generating SQL on the client for a server to exe
 besu = { version = "0.1", default-features = false, features = ["derive"] }
 # The dialect and DDL only. The default features are `sqlx` and `runtime-tokio`.
 besu-postgres = { version = "0.1", default-features = false }
+# The bridge driver: `fetch` on wasm, the wire format, and the server helper.
+besu-bridge = "0.1"
 ```
 
 ```rust
-// On the client.
-let db = besu::dry::<besu_postgres::Postgres>();
-let sql = db
-    .select(users)
-    .filter(users.age.gt(18))
-    .limit(50)
-    .to_sql()?;
+// On the client. `Postgres` is the dialect the server's database speaks, so the browser
+// writes `$1` and PostgreSQL's identifiers.
+use besu_bridge::{Bridge, FetchTransport};
+use besu_postgres::Postgres;
 
-// POST `sql.sql()` and `sql.args()` to the server, which runs the same builder with a
-// real database behind it and lets the driver do the actual work.
+let db = besu::Database::new(Bridge::<_, Postgres>::new(FetchTransport::new("/api/query")));
+let adults: Vec<User> = db.select(users).filter(users.age.gt(18)).await?;
 ```
+
+The endpoint runs the request against any driver and returns rows:
+
+```rust
+use besu_bridge::{BridgeSource, Request, Response, handle_request};
+
+async fn query(sqlx: &besu_postgres::Sqlx, body: String) -> Response {
+    match serde_json::from_str::<Request>(&body) {
+        Ok(request) => handle_request(sqlx, &PostgresRows, request).await,
+        Err(err) => Response::error(format!("not a bridge request: {err}")),
+    }
+}
+```
+
+`BridgeSource` is the server's answer to "how do I read this driver's rows?". It exists
+because `Driver::Row` is deliberately opaque: only the crate that chose the driver can read a
+column out of it, and inventing a generic one would either change `Driver` or lie about the
+values. The request, the response and the tagged value encoding are in the `besu-bridge` crate
+documentation.
 
 | Crate | On `wasm32-unknown-unknown` |
 | --- | --- |
 | `besu-core` | Works. It is `no_std`-shaped apart from the `std::error::Error` impl on `Error`, and `std` does exist on this target. `chrono`, `uuid` and `serde_json` are values, not services. |
 | `besu` | Works with every feature, including `derive`, `migrate` and `tracing`. Building, rendering, `sql!` and the schema IR never reach for the operating system. |
 | `besu-sqlite` / `-postgres` / `-mysql` with `default-features = false` | Works: the dialect and the DDL, which is what a client needs to spell `?`, `$1` and identifiers correctly. |
+| `besu-bridge` | Works. The client is `fetch`, `serde` and a channel; the server helper is a plain async function and runs on either target. |
 | Any driver feature (`sqlx`, `runtime-tokio`) | Does not build. sqlx reaches tokio, tokio reaches mio, and mio needs a socket API that this target does not have. |
-| Running a query, `push`, `introspect`, `Migrator` | Do not run. Every one of them needs a `SchemaDriver` or a `Driver`, which means a connection. `Database` itself is fine to hold; it just has nothing to talk to. |
+| Running a query through a database driver, `push`, `introspect`, `Migrator` | Do not run. Every one of them needs a `SchemaDriver` or a `Driver` backed by a connection. The bridge is the exception: its "connection" is an HTTP endpoint. |
 
-The boundary is enforced, not assumed: the `wasm` CI job checks `besu-core` and `besu` for
-this target and `besu/tests/dry.rs` asserts the rendered SQL on every platform. There is no
-`wasm` feature flag, because nothing in the builder needed one; a feature nobody has to
-enable cannot silently rot.
+The boundary is enforced, not assumed: the `wasm` CI job checks every crate for this target,
+and it now runs `besu-bridge`'s browser tests in headless Chrome. `besu/tests/dry.rs` keeps
+asserting the rendered SQL on every platform. There is no `wasm` feature flag, because nothing
+in the builder needed one; a feature nobody has to enable cannot silently rot.
 
 ### What still traps
 
@@ -289,12 +316,15 @@ run time rather than an error at build time:
   the SQL `CURRENT_TIMESTAMP` and the database evaluates it, and a timestamp that came from
   JavaScript is just a `Value::TimestampTz`.
 - `Send + Sync` bounds still compile. A wasm module is single-threaded, so the bounds are
-  vacuous on this target, not wrong.
+  vacuous on this target, not wrong. The bridge relies on that: `FetchTransport` moves the
+  `!Send` `fetch` future onto `spawn_local` and returns a future awaiting a `Send` channel
+  receiver, which satisfies `Driver` without pretending a JavaScript handle is shareable.
 
 Decoding is the other half of the boundary: `Decode` is implemented *by each driver*, because
-pulling a value out of a row is database-specific. A browser has no rows and no `Decode`, which
-is exactly why `dry::<D>()` is the honest executor there: it renders, and attempting to run the
-statement returns an error.
+pulling a value out of a row is database-specific. `besu-bridge` supplies the impls a browser
+needs, so a row that arrived as JSON decodes into the same `#[derive(Table)]` struct the
+server decodes natively. Where there is no server, `dry::<D>()` is still the honest executor:
+it renders, and attempting to run the statement returns an error.
 
 ## What each layer is allowed to know
 
@@ -304,6 +334,7 @@ statement returns an error.
 | `besu` | Builders, expressions, `Database`, transactions | sqlx, a specific database, DDL |
 | `besu-schema` | The IR, diffing, DDL, migrations | Query builders, drivers |
 | `besu-sqlite` / `-postgres` / `-mysql` | One database's SQL and wire protocol | The other databases |
+| `besu-bridge` | The JSON wire format, `fetch`, and row decoding for the wire values | A database, sqlx, or how a server reads its own rows |
 | `besu-cli` | URL schemes, snapshots, files | Application query code |
 | `besu-studio` | The schema IR, `AnyDatabase`, HTTP | Typed query builders, application models |
 

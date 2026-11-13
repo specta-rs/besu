@@ -1,0 +1,6 @@
+# `wasm-bindgen-test` needs a runner that packages the module and starts a browser or Node.
+# It is only consulted for `cargo test`/`cargo run` on the wasm target, so native commands are
+# unaffected. The runner must be the same version as the `wasm-bindgen` crate; CI installs the
+# version the lockfile resolves.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"
