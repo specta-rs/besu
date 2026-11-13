@@ -1,4 +1,12 @@
-//! [SQLite](https://www.sqlite.org) dialect and driver for [Besu](https://docs.rs/besu).
+//! [SQLite](https://www.sqlite.org) dialect and drivers for [Besu](https://docs.rs/besu).
+//!
+//! The dialect and the DDL are always available. Execution comes in two flavours:
+//!
+//! - [`Sqlx`], behind the default `sqlx` feature, is a `sqlx::SqlitePool`. It remains the
+//!   default driver.
+//! - `Native`, behind the additive `native` feature, is `rusqlite` on a dedicated
+//!   connection thread. It has no sqlx in its path, a single connection instead of a pool,
+//!   and `:memory:` works because that connection is the only one.
 //!
 //! ```no_run
 //! use besu::prelude::*;
@@ -9,6 +17,33 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "native")]
+//! # {
+//! use besu::prelude::*;
+//! use besu_sqlite::{NativeDatabase, Native};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // The constructors are synchronous: the connection is opened and moved to its thread.
+//! let db: NativeDatabase = Native::open("app.db")?.database();
+//! # Ok(())
+//! # }
+//! # }
+//! ```
+//!
+//! # The native driver's shape
+//!
+//! `rusqlite` is synchronous, so `Native` owns a thread with the `rusqlite::Connection` and
+//! sends requests to it over a channel. A query encodes its parameters once on the calling
+//! side, sends owned SQL and owned values, and awaits a oneshot for the rows. The thread
+//! shuts down when the last clone is dropped.
+//!
+//! Transactions work because every statement goes to that one connection: `begin`,
+//! `commit`, `rollback` and the statements inside a transaction carry the same transaction
+//! id. Nested `tx.transaction(..)` calls are savepoints, exactly as they are on the sqlx
+//! driver. The cost of one connection is no pool: statements are serialised, and a driver
+//! query issued while a transaction is open runs inside that transaction.
 //! # What the compiler stops you doing
 //!
 //! These doc tests fail to compile on purpose: they pin down the guarantees that make Besu
@@ -76,21 +111,39 @@
 
 mod ddl;
 mod dialect;
-#[cfg(feature = "sqlx")]
+#[cfg(any(feature = "sqlx", feature = "native"))]
 mod introspect;
+#[cfg(feature = "native")]
+mod native;
 #[cfg(feature = "sqlx")]
 mod sqlx;
 
 pub use ddl::SQLiteDdl;
 pub use dialect::SQLite;
-#[cfg(feature = "sqlx")]
+#[cfg(any(feature = "sqlx", feature = "native"))]
 pub use introspect::introspect;
+#[cfg(feature = "native")]
+pub use native::{Native, NativeError, NativeOutput, NativeRow, NativeTransaction};
 #[cfg(feature = "sqlx")]
 pub use sqlx::Sqlx;
 #[cfg(feature = "sqlx")]
 #[doc(hidden)]
 pub use sqlx::arguments_for_bench;
 
-/// A [`besu::Database`] backed by SQLite.
+/// A [`besu::Database`] backed by SQLite's sqlx driver.
+///
+/// This is the default whenever the `sqlx` feature is on, including when `native` is also
+/// enabled. Use `NativeDatabase` to name the native driver explicitly.
 #[cfg(feature = "sqlx")]
 pub type Database = besu::Database<Sqlx>;
+
+/// A [`besu::Database`] backed by SQLite's native driver.
+///
+/// This is `Database` only when `native` is enabled without `sqlx`; with both features on,
+/// `Database` is the sqlx driver and this alias is the way to name the native one.
+#[cfg(all(feature = "native", not(feature = "sqlx")))]
+pub type Database = besu::Database<Native>;
+
+/// A [`besu::Database`] backed by the native `rusqlite` driver.
+#[cfg(feature = "native")]
+pub type NativeDatabase = besu::Database<Native>;

@@ -5,7 +5,9 @@ which knows how to run it. Keeping them apart is what lets Besu render a complet
 with no database attached — the tests and the CLI depend on that.
 
 `besu-sqlite` is the smallest complete driver; `besu-postgres` and `besu-mysql` follow the
-same shape. Read one of them alongside this page.
+same shape. Read one of them alongside this page. `besu-sqlite` also carries a second
+implementation of the same dialect — a synchronous `rusqlite` driver behind the additive
+`native` feature — which is the worked example for the connection-thread design below.
 
 ## The traits
 
@@ -306,6 +308,55 @@ impl<'a, Dr: TransactionDriver> Executor for &mut Transaction<'a, Dr> { /* ... *
 A query builder is generic over `Executor`, so the same builder runs on a pool, on a
 transaction, or on nothing at all (`DryDriver`).
 
+### Synchronous drivers: the connection thread
+
+Not every database library is async. `rusqlite` is synchronous, and handing each statement to
+`spawn_blocking` pays a pool hand-off per statement. The alternative, and the one
+`besu-sqlite`'s `native` feature uses, is a thread per driver that owns the connection and
+executes requests in order:
+
+```rust
+enum Request {
+    Query { transaction: Option<u64>, sql: String, params: Vec<rusqlite::types::Value>,
+            reply: oneshot::Sender<Result<Vec<Row>, Error>> },
+    Execute { /* ... */ },
+    Begin { reply: oneshot::Sender<Result<u64, Error>> },
+    Commit { transaction: u64, reply: oneshot::Sender<Result<(), Error>> },
+    Rollback { transaction: u64, reply: oneshot::Sender<Result<(), Error>> },
+    Statements { statements: Vec<String>, reply: oneshot::Sender<Result<(), Error>> },
+}
+
+impl Driver for Native {
+    async fn query(&self, sql: &Sql<SQLite>) -> Result<Vec<Row>, Error> {
+        let params = encode(sql)?;             // exactly once, into owned values
+        let (reply, response) = oneshot::channel();
+        self.sender.send(Request::Query { transaction: None, sql: sql.sql().into(), params, reply })?;
+        response.await.unwrap_or(Err(Error::Closed))
+    }
+}
+```
+
+Four properties make this work:
+
+- **Parameters are encoded on the caller's side.** The worker receives owned
+  `rusqlite::types::Value`s and binds them with `params_from_iter`, so no conversion happens
+  twice and the request has no borrow.
+- **The reply is a `futures_channel::oneshot`.** The async side awaits a `Send` receiver, so
+  the driver future is `Send` without `unsafe` even though the connection is not.
+- **The last clone shuts the thread down.** The request sender is an `Option` in an `Arc`;
+  dropping the last `Native` takes it, the worker's `recv` returns an error, the loop ends, and
+  the drop joins the thread. There is no detached thread to leak.
+- **The connection is the transaction.** `Begin` returns an id; every statement inside the
+  transaction carries it and is rejected if it is no longer the open one. Nested transactions
+  are `SAVEPOINT` statements sent through the same connection, exactly as they are for sqlx.
+  The cost is that there is no pool: statements are serialised, and a query sent through the
+  `Database` while a transaction is open runs inside that transaction.
+
+A cursor cannot leave the worker thread, because it borrows the connection and holding it
+across an `await` would block every other statement. A synchronous driver's `query_stream`
+therefore collects the rows and returns a stream over them. The `RowStream` contract is still
+met: the rows are owned, and the lifetime only ties the stream to the `Sql` the caller passed.
+
 ## `SchemaDriver` and `Ddl`
 
 Migrations and the CLI need two more things: a way to read the live schema, and a way to
@@ -328,6 +379,20 @@ impl SchemaDriver for Sqlx {
     }
 }
 ```
+
+That call is generic:
+
+```rust
+pub async fn introspect<Dr>(db: &besu::Database<Dr>) -> Result<Schema, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+```
+
+so one implementation reads `sqlite_master` and the pragmas for both the sqlx and native
+drivers, and the error type is whichever the driver chose. Every `besu-sqlite` driver that
+implements `SchemaDriver` delegates to it; a second copy would be a second thing to drift.
 
 `Ddl` has working defaults for everything except `name`, `quote`, `type_name` and
 `column_sql`:
@@ -411,10 +476,12 @@ smallest way to see what a driver actually has to provide, and the cost design (
 
 `SchemaDriver` has one method beyond `introspect`: `execute_statements`, which runs a list of
 schema statements. The default runs them one at a time and is right for almost every database.
-SQLite overrides it because its table rebuild toggles `PRAGMA foreign_keys`, a *per-connection*
-setting — through a pool the `DROP TABLE` would land on a connection that still enforces
-foreign keys and cascade into child rows. Override it when your statements only make sense
-together.
+Both SQLite drivers override it because the table rebuild toggles `PRAGMA foreign_keys`, a
+*per-connection* setting. Through the sqlx pool the `DROP TABLE` would land on a connection
+that still enforces foreign keys and cascade into child rows, so all statements have to reach
+one connection; the native driver sends the whole list as one request for the same reason, and
+to keep anything else from interleaving with a rebuild. Override it when your statements only
+make sense together.
 
 ## Choosing a driver at runtime
 
@@ -565,6 +632,10 @@ so an empty result set has none; a server that knows its columns can fill
 
 ## Testing a new driver
 
+0. **If the library is synchronous, test the seam first.** The connection thread is where a
+   query can hang, lose its transaction or leak, and none of that needs a database server.
+   `besu-sqlite/tests/native.rs` is the template: `:memory:`, a commit and a rollback, a
+   savepoint, a stream and a reopen of a file.
 1. **SQL without a database.** `besu::dry::<MyDialect>()` builds every query and never
    executes it. Assert on `sql.sql()` and `sql.args()`. This catches placeholder and quoting
    mistakes before a server exists.

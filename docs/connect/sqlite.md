@@ -1,10 +1,17 @@
 # Connect to SQLite
 
-`besu_sqlite::Sqlx` wraps a sqlx `SqlitePool` behind Besu's `Driver` trait. The constructors
-differ only in what they do to the connection options, and the defaults are chosen so that a
-local application does not have to think about pragmas.
+`besu-sqlite` ships two drivers for the same dialect:
 
-## A file
+| Driver | Feature | Connection | Default |
+| --- | --- | --- | --- |
+| `Sqlx` | `sqlx` (on by default) | a `sqlx::SqlitePool` | yes |
+| `Native` | `native` | one `rusqlite::Connection` on its own thread | no |
+
+The dialect, the DDL and introspection are shared. The choice is only about how a statement
+reaches the database, so the same typed query runs on either. `native` is additive: enabling it
+does not change what `Database` or `Sqlx` mean.
+
+## A file, with sqlx
 
 ```rust
 use besu_sqlite::Sqlx;
@@ -16,7 +23,7 @@ let db = besu::Database::new(Sqlx::new("app.db").await?);
 keys and switches the journal to WAL. The path is a path, not a URL: `"app.db"`, not
 `"sqlite://app.db"`.
 
-## A connection string
+## A connection string, with sqlx
 
 ```rust
 let db = besu::Database::new(Sqlx::connect("sqlite://app.db").await?);
@@ -26,7 +33,7 @@ let db = besu::Database::new(Sqlx::connect("sqlite://app.db").await?);
 on top of whatever the URL said. It does not change the journal mode, so WAL is only on when
 you asked for it in the URL or used `Sqlx::new`.
 
-## In memory
+## In memory, with sqlx
 
 ```rust
 let db = besu::Database::new(Sqlx::memory().await?);
@@ -79,7 +86,69 @@ let pool = db.driver().pool();
 a connection to a library that wants one. `db.driver()` is the `Sqlx`, so `pool()` is one
 method call away.
 
-## Transactions
+## The native driver
+
+Enable the feature; it does not replace the sqlx driver.
+
+```toml
+[dependencies]
+besu-sqlite = { version = "0.1", features = ["native"] }
+```
+
+```rust
+use besu_sqlite::Native;
+
+let db = Native::open("app.db")?.database();
+let db: besu_sqlite::NativeDatabase = Native::in_memory()?.database();
+```
+
+There are three constructors and they are synchronous, because opening a file is synchronous:
+
+- `Native::open(path)` (or its alias `Native::new(path)`) creates the file if it does not
+  exist, enables foreign keys, sets a five-second busy timeout and switches a file database to
+  WAL.
+- `Native::in_memory()` opens `:memory:`. One connection means one database, so every clone of
+  the driver sees the same tables; this is the driver to use in tests.
+- `Native::from_connection(connection)` takes a `rusqlite::Connection` you configured
+  yourself. It is moved to the driver's thread and cannot be used afterwards.
+
+`Native::database()` is a convenience for `besu::Database::new(Native::open(path)?)`.
+
+### How it works
+
+`rusqlite` is synchronous, so `Native` owns a thread with the `Connection` on it. A query
+encodes its parameters once, sends the SQL text, those owned values and a oneshot response
+channel to the thread, and awaits the reply. The thread executes requests in order. This is one
+thread per driver and a channel round trip per statement, not a blocking-pool task per
+statement.
+
+The thread shuts down when the last clone of `Native` is dropped: the request channel closes,
+the worker leaves its loop, and the drop waits for it to finish.
+
+Because there is one connection, there is one transaction context. `begin` sends `BEGIN` and
+gets a transaction id; every query inside the transaction carries that id so the worker can
+check it is still the open transaction. `commit` and `rollback` consume the handle, and a
+handle dropped without either rolls back. Nested `tx.transaction(..)` calls are savepoints,
+the same as on sqlx.
+
+### Limitations
+
+- **No pool.** Every clone shares the one connection, so statements are serialised. A second
+  `BEGIN` while a transaction is open fails, because SQLite does not nest transactions on one
+  connection.
+- **One transaction at a time.** A query sent through the `Database` while a transaction is
+  open runs on the same connection, inside that transaction. A pool would have given it a
+  different connection; this driver does not pretend otherwise.
+- **Streaming collects.** `query_stream` returns the rows of one response rather than holding
+  a cursor open across awaits. A cursor would borrow the connection and block every other
+  statement, so the rows are collected and then streamed from memory. The `RowStream` contract
+  is still met because the rows are owned.
+- **`push` has one connection, not atomicity.** SQLite's table rebuild toggles
+  `PRAGMA foreign_keys`, which is per-connection state; the native driver runs every schema
+  statement on its one connection, in order. A failure part-way still leaves the earlier
+  statements applied, exactly as with sqlx. Only migrations run in a transaction.
+
+## Transactions (either driver)
 
 ```rust
 let mut tx = db.begin().await?;
@@ -110,16 +179,24 @@ with no file, no pool and no runtime. Executing one returns an error that says t
 ## Gotchas
 
 - SQLite itself leaves foreign-key enforcement off. sqlx turns it on for every connection it
-  opens and Besu sets the pragma explicitly, but a connection made outside the driver — the
-  `sqlite3` shell, for instance — does not inherit either.
-- `Sqlx::new` creates the file, so a typo in the path creates a new empty database rather than
-  failing. A missing table is the first symptom.
+  opens, the native driver sets the pragma on its connection, and Besu sets it explicitly —
+  but a connection made outside either driver (the `sqlite3` shell, for instance) does not
+  inherit it.
+- `Sqlx::new` and `Native::open` create the file, so a typo in the path creates a new empty
+  database rather than failing. A missing table is the first symptom.
 - `Sqlx::memory()` gives each `Database` its own private database; there is no way to share one
   between connections. Two `Sqlx::memory()` calls are two unrelated databases.
+- `Native::in_memory()` is one database per `Native`, but every clone of that `Native` shares
+  it. Two calls are still two databases.
 - A pool over a file and a pool over `:memory:` are not interchangeable: with `:memory:` every
-  connection would be empty, which is why the constructor forces one connection and ignores
-  `max_connections`.
-- WAL is a property of `Sqlx::new`, not of the dialect. `connect("sqlite://app.db")` leaves
-  the journal mode at SQLite's default (rollback journal).
+  connection would be empty, which is why the sqlx constructor forces one connection and
+  ignores `max_connections`.
+- WAL is a property of `Sqlx::new` and `Native::open`, not of the dialect.
+  `Sqlx::connect("sqlite://app.db")` leaves the journal mode at SQLite's default (rollback
+  journal), and `Native::from_connection` leaves it as you configured it.
 - `push` executes each statement separately, so a failure part-way leaves the earlier
   statements applied. Only migration files run inside a transaction.
+- The `native` feature compiles SQLite from source (rusqlite's `bundled` feature), so the
+  first build is slower and the binary does not depend on a system SQLite. It is also why
+  rusqlite is pinned to the release that shares `libsqlite3-sys` 0.30 with sqlx 0.8: the two
+  drivers can be enabled together in one build.

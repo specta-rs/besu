@@ -20,6 +20,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["sqlx", "runtime-tokio"]
 sqlx = ["dep:sqlx"]
 runtime-tokio = ["sqlx/runtime-tokio"]
+# The `rusqlite`-backed driver. Additive: it does not replace the sqlx driver, which stays
+# the default until the native one has proven itself.
+native = ["dep:rusqlite", "dep:futures-channel"]
 
 [lints]
 workspace = true
@@ -42,6 +45,10 @@ besu-core = { workspace = true }
 besu-schema = { workspace = true }
 besu = { workspace = true, features = ["derive", "migrate"] }
 sqlx = { workspace = true, optional = true, features = ["sqlite", "chrono", "uuid", "json"] }
+# `bundled` compiles SQLite from source, so a native build does not need a system library
+# and does not change meaning with the machine it is built on.
+rusqlite = { workspace = true, optional = true, features = ["bundled"] }
+futures-channel = { workspace = true, optional = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }

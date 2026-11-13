@@ -73,6 +73,13 @@ let sql = db.select(users).filter(users.age.gt(18)).to_sql()?;
 No pool, no connection string, no server — and the SQL is the real SQL, not an approximation
 produced by a second implementation.
 
+A dialect can have more than one driver, and `besu-sqlite` does. `Sqlx` is the default and
+wraps a sqlx pool; `Native`, behind the additive `native` feature, is `rusqlite` on a
+dedicated connection thread. They share the dialect, the DDL and one generic introspection
+implementation, so a query renders identically and decodes the same values on either. The
+`native` feature does not become the default by accident: when both features are on,
+`besu_sqlite::Database` is still the sqlx driver, and `NativeDatabase` names the other.
+
 ### `Executor` versus `Driver`
 
 A builder is generic over an `Executor`, not over a driver. `&Database<Dr>` and
@@ -192,6 +199,7 @@ row of *result*, and nothing per row of *work*.
 | Execution | `query` collects `Vec<Row>`; `stream` yields one row at a time instead |
 | Decoding | One `Vec<R>` sized to the row count, and one `try_get` per column |
 | Awaiting | One boxed future per `IntoFuture`, which is how an `async` body gets a nameable type |
+| Native driver request | One owned SQL string and one owned parameter vector per statement, plus one oneshot; a row is an owned value per column, with its column names shared by the whole result set |
 | Driverless build | No database, no connection, no I/O |
 
 `cargo bench -p besu` measures the builder. It uses a dry database and a hand-written
@@ -233,6 +241,20 @@ outlive the database it will run on, and a transaction cannot outlive the borrow
 database. `IntoFuture` boxes a future with a `Send` bound when the executor is `Send`, which
 is what lets queries run on a multi-threaded runtime. `Driver` is `Send + Sync + 'static`, so
 a pool can be cloned into as many tasks as you like.
+
+A synchronous library is adapted with a connection thread, not with `spawn_blocking` per
+statement. `besu-sqlite`'s `native` driver is the model: `Native` is an `Arc` around a request
+sender and the worker's join handle, the worker owns the `rusqlite::Connection` and executes
+requests in order, and each request carries a `futures_channel::oneshot` for its reply. The
+async side only ever awaits a `Send` receiver, so the driver future is `Send` without `unsafe`.
+The last clone drops the sender, the worker's loop ends and the drop joins the thread. The
+transaction is an id handed out by `Begin` and carried by every statement inside it, which is
+what keeps a commit from applying to a transaction that has already been replaced.
+
+The trade is explicit: one connection means no pool, so statements are serialised and a cursor
+cannot be held open across an `await`. `query_stream` collects its rows and streams them from
+memory. That is a real limitation, not a hidden one, and the sqlx driver remains the default
+for code that wants a pool.
 
 ## Compiling for wasm32
 
@@ -294,7 +316,7 @@ documentation.
 | `besu` | Works with every feature, including `derive`, `migrate` and `tracing`. Building, rendering, `sql!` and the schema IR never reach for the operating system. |
 | `besu-sqlite` / `-postgres` / `-mysql` with `default-features = false` | Works: the dialect and the DDL, which is what a client needs to spell `?`, `$1` and identifiers correctly. |
 | `besu-bridge` | Works. The client is `fetch`, `serde` and a channel; the server helper is a plain async function and runs on either target. |
-| Any driver feature (`sqlx`, `runtime-tokio`) | Does not build. sqlx reaches tokio, tokio reaches mio, and mio needs a socket API that this target does not have. |
+| Any driver feature (`sqlx`, `runtime-tokio`, `native`) | Does not build. sqlx reaches tokio, tokio reaches mio, and mio needs a socket API that this target does not have; `native` pulls in `rusqlite` and `libsqlite3-sys`, which need a C toolchain and a filesystem. |
 | Running a query through a database driver, `push`, `introspect`, `Migrator` | Do not run. Every one of them needs a `SchemaDriver` or a `Driver` backed by a connection. The bridge is the exception: its "connection" is an HTTP endpoint. |
 
 The boundary is enforced, not assumed: the `wasm` CI job checks every crate for this target,

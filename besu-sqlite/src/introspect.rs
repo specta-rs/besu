@@ -2,7 +2,7 @@ use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
 use besu_schema::{Check, Column, ForeignKey, Index, IndexColumn, Schema, Table, Unique, View};
 
-use crate::Sqlx;
+use crate::SQLite;
 
 /// Read the database's schema from SQLite's own catalogue.
 ///
@@ -23,7 +23,12 @@ use crate::Sqlx;
 ///
 /// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
 /// ignores that list, so they never appear as tables and `push` never touches them.
-pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error> {
+pub async fn introspect<Dr>(db: &besu::Database<Dr>) -> Result<Schema, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+{
     let tables = db
         .execute(besu::sql!(
             "SELECT name, sql FROM sqlite_master \
@@ -44,7 +49,12 @@ pub async fn introspect(db: &besu::Database<Sqlx>) -> Result<Schema, sqlx::Error
     Ok(schema)
 }
 
-async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::Error> {
+async fn introspect_views<Dr>(db: &besu::Database<Dr>) -> Result<Vec<View>, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+{
     let rows = db
         .execute(besu::sql!(
             "SELECT name, sql FROM sqlite_master \
@@ -66,11 +76,16 @@ async fn introspect_views(db: &besu::Database<Sqlx>) -> Result<Vec<View>, sqlx::
         .collect())
 }
 
-async fn introspect_table(
-    db: &besu::Database<Sqlx>,
+async fn introspect_table<Dr>(
+    db: &besu::Database<Dr>,
     name: String,
     create_sql: Option<String>,
-) -> Result<Table, sqlx::Error> {
+) -> Result<Table, Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+{
     // `table_xinfo` is `table_info` plus the `hidden` column, which is the only way to see
     // a generated column: `table_info` omits them entirely, exactly as if they did not
     // exist.
@@ -470,10 +485,12 @@ fn generated_expression(create_sql: &str, column: &str) -> Option<String> {
     None
 }
 
-async fn introspect_indexes(
-    db: &besu::Database<Sqlx>,
-    table: &mut Table,
-) -> Result<(), sqlx::Error> {
+async fn introspect_indexes<Dr>(db: &besu::Database<Dr>, table: &mut Table) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+{
     let pragma = format!("PRAGMA index_list({})", quote_literal(&table.name));
     // (seq, name, unique, origin, partial)
     let indexes = db
@@ -690,10 +707,15 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
-async fn introspect_foreign_keys(
-    db: &besu::Database<Sqlx>,
+async fn introspect_foreign_keys<Dr>(
+    db: &besu::Database<Dr>,
     table: &mut Table,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Dr::Error>
+where
+    Dr: besu::Driver<Dialect = SQLite>,
+    String: besu_core::Decode<Dr>,
+    i64: besu_core::Decode<Dr>,
+{
     let pragma = format!("PRAGMA foreign_key_list({})", quote_literal(&table.name));
     // (id, seq, table, from, to, on_update, on_delete, match)
     let rows = db
