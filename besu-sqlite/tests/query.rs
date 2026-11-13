@@ -1816,3 +1816,51 @@ async fn self_join_with_an_alias() {
     names.sort_unstable();
     assert_eq!(names, ["Alice", "Bob", "Carol"]);
 }
+
+/// Two aliases of one table in one statement: `report` is the employee and `manager` is the
+/// same table under a different tag. Each side of the join condition is qualified by its own
+/// alias, and both rows decode as `Employee`.
+#[tokio::test]
+async fn self_join_with_two_aliases() {
+    let db = setup().await;
+
+    let alice = db
+        .insert(employees)
+        .value(employees.insert("Alice"))
+        .returning(employees)
+        .await
+        .unwrap()
+        .remove(0);
+    let bob = db
+        .insert(employees)
+        .value(employees.insert("Bob").manager_id(alice.id))
+        .returning(employees)
+        .await
+        .unwrap()
+        .remove(0);
+    db.insert(employees)
+        .value(employees.insert("Carol").manager_id(bob.id))
+        .await
+        .unwrap();
+
+    let report = alias(employees, "report");
+    let manager = alias_as::<_, 1>(employees, "manager");
+    let mut rows: Vec<(Employee, Employee)> = db
+        .select(report)
+        .inner_join(
+            &manager,
+            manager
+                .column(employees.id)
+                .eq(report.column(employees.manager_id)),
+        )
+        .all()
+        .await
+        .unwrap();
+
+    rows.sort_by(|left, right| left.0.name.cmp(&right.0.name));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0.name, "Bob");
+    assert_eq!(rows[0].1.name, "Alice");
+    assert_eq!(rows[1].0.name, "Carol");
+    assert_eq!(rows[1].1.name, "Bob");
+}

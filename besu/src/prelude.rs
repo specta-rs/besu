@@ -43,7 +43,7 @@ pub use crate::expr::{
 pub use crate::macros::Fragment;
 pub use crate::query::{
     Alias, Cte, Delete, Derived, Insert, JoinKind, OnConflict, Select, SetOp, SetQuery, Update,
-    alias, derived,
+    alias, alias_as, derived,
 };
 pub use crate::relation::{HasMany, WithRelation, has_many};
 pub use crate::seed::{TableSeed, seed};

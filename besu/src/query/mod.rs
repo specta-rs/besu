@@ -9,7 +9,7 @@ pub(crate) mod select;
 pub(crate) mod set;
 pub(crate) mod update;
 
-pub use alias::{Alias, alias};
+pub use alias::{Alias, alias, alias_as};
 pub use cte::Cte;
 pub use delete::{Delete, DeleteReturning};
 pub use derived::{Derived, derived};

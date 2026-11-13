@@ -826,6 +826,62 @@ fn an_alias_reads_a_table_under_a_second_name() {
     );
 }
 
+/// Two aliases of one table are distinct types, so both may appear in one statement and each
+/// column is checked against the alias that was actually joined. `alias` keeps its tag-0
+/// meaning; `alias_as` picks another tag. Neither tag reaches the SQL.
+#[test]
+fn two_aliases_of_one_table_are_distinct() {
+    let db = dry::<TestDialect>();
+    let manager = alias(employees, "manager");
+    let report = alias_as::<_, 1>(employees, "report");
+
+    // The employee row is the `report` alias; the manager row is the same table under a
+    // different tag. Both aliases are in the row set, and the condition names both.
+    let sql = db
+        .select(report)
+        .inner_join(
+            manager,
+            manager
+                .column(employees.id)
+                .eq(report.column(employees.manager_id)),
+        )
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "report"."id", "report"."name", "report"."manager_id", "manager"."id", "manager"."name", "manager"."manager_id" FROM "employees" AS "report" INNER JOIN "employees" AS "manager" ON ("manager"."id" = "report"."manager_id")"#
+    );
+
+    // A column of each alias stays distinct in the projection and the filter, even though
+    // the two columns have the same base-table handle.
+    let report_name = report.column(employees.name);
+    let manager_name = manager.column(employees.name);
+    let sql = db
+        .select(report)
+        .inner_join(
+            &manager,
+            manager
+                .column(employees.id)
+                .eq(report.column(employees.manager_id)),
+        )
+        .pick((report_name.clone(), manager_name.clone()))
+        .filter(report_name.eq(manager_name))
+        .to_sql()
+        .unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "report"."name", "manager"."name" FROM "employees" AS "report" INNER JOIN "employees" AS "manager" ON ("manager"."id" = "report"."manager_id") WHERE ("report"."name" = "manager"."name")"#
+    );
+
+    // Retagging a handle keeps the name and makes it a third distinct alias in the row set.
+    let boss = alias(employees, "boss").tag::<2>();
+    let sql = db.select(&boss).to_sql().unwrap();
+    assert_eq!(
+        sql.sql(),
+        r#"SELECT "boss"."id", "boss"."name", "boss"."manager_id" FROM "employees" AS "boss""#
+    );
+}
+
 #[test]
 fn a_built_statement_can_be_wrapped_in_raw_sql() {
     // `EXPLAIN`, `INSERT ... SELECT` and `CREATE TABLE ... AS` have no builder, but they do

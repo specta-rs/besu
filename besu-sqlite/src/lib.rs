@@ -45,6 +45,20 @@
 //!
 //! ```compile_fail
 //! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "employees")] struct Employee { pub id: i64, pub manager_id: Option<i64> }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // Two aliases of one table are distinct types: only `report` was joined, so the
+//! // tag-0 `manager` alias has no path in this row set even though both rename the table.
+//! let manager = alias(employees, "manager");
+//! let report = alias_as::<_, 1>(employees, "report");
+//! let _ = db
+//!     .select(report)
+//!     .filter(manager.column(employees.manager_id).eq(report.column(employees.manager_id)));
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
 //! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64, pub age: i32 }
 //! # async fn demo(db: &besu_sqlite::Database) {
 //! // A delete with no filter would remove every row, so it does not compile.

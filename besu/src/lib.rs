@@ -145,7 +145,7 @@ pub use macros::Fragment;
 pub use migrate::{PushResult, SchemaDriver, SchemaError};
 pub use query::{
     Alias, Cte, Delete, DeleteReturning, Derived, Insert, InsertReturning, JoinKind, OnConflict,
-    Select, SetOp, SetQuery, Update, UpdateReturning, alias, derived,
+    Select, SetOp, SetQuery, Update, UpdateReturning, alias, alias_as, derived,
 };
 pub use relation::{HasMany, WithRelation, has_many};
 pub use seed::{Seed, SeedError, SeedReport, TableSeed, seed};

@@ -62,32 +62,62 @@ ones the schema declares and a column of another table is rejected. The result i
 expression, qualified by the alias; it can be compared, filtered, ordered, grouped and
 projected like any other expression.
 
-The row set carries `Alias<Employee>` rather than `Employee`, so `manager.column(...)` only
-compiles in a query that actually joined the alias — and `employees.email` and
-`manager.column(employees.email)` are different columns even though they are one column of
-one table.
+The row set carries `Alias<Employee, 0>` (or the tag you passed to `alias_as`) rather than
+`Employee`, so `manager.column(...)` only compiles in a query that actually joined that alias
+— and `employees.email` and `manager.column(employees.email)` are different columns even
+though they are one column of one table.
 
-## One alias per table
+## Two aliases of one table
 
-Two aliases of the *same* table in one statement do not compile. Both `alias(employees,
-"manager")` and `alias(employees, "boss")` are `Alias<Employee>`, so the row set cannot tell
-them apart: when both are joined, `manager.column(...)` finds two matching paths and the
-compiler reports `E0283: type annotations needed` instead of choosing one.
+A self-join can need the table more than twice: employees, their manager, and the manager's
+manager. [`alias`] always produces tag `0`, so a second alias uses [`alias_as`] with another
+tag:
 
-That is a limit of the type, not of the SQL. The fix is a second type parameter carrying the
-name — `Alias<T, Name>` — with a phantom tag, so `Alias<Employee, Manager>` and
-`Alias<Employee, Boss>` are different types and each can be found at exactly one path. The
-call site would name the tag, as in `alias_as::<Employee, Manager>(employees, "manager")`.
-Nothing else in the query layer would change: `TableRef::Marker` is already the alias type,
-and `Contains` already searches by type. The function `alias` cannot supply a tag by itself,
-which is why it is not part of this API yet.
+```rust
+let report = alias(employees, "report");              // Alias<Employee, 0>
+let manager = alias_as::<_, 1>(employees, "manager"); // Alias<Employee, 1>
 
-Until then, the second name has to come from somewhere else:
+let rows: Vec<(Employee, Employee)> = db
+    .select(report)
+    .inner_join(
+        &manager,
+        manager.column(employees.id).eq(report.column(employees.manager_id)),
+    )
+    .all()
+    .await?;
+```
 
-- a different table or a view — `managers` over `employees` — which keeps the join typed but
-  is a schema change;
-- a [derived table](select.md) for the second side, which is typed and executes, but is a
-  second query shape rather than the same table twice.
+```sql
+SELECT "report"."id", "report"."name", "report"."manager_id",
+       "manager"."id", "manager"."name", "manager"."manager_id"
+FROM "employees" AS "report"
+INNER JOIN "employees" AS "manager" ON ("manager"."id" = "report"."manager_id")
+```
+
+The tag is a type-level marker and nothing else: it is not written to the SQL, and both
+aliases could even share a tag if they were never in the same statement. What it buys is that
+the row set holds two entries instead of one, so `Contains` finds exactly one path for each
+alias. `manager.column(...)` then only compiles in a query that joined the tag-`1` handle;
+using it where the report's column was meant is a compile error rather than a query that
+silently compares the wrong side.
+
+The tag cannot be inferred, so name it at the call site — `alias_as::<_, 1>(employees,
+"manager")`. The `_` is the table handle, which the argument supplies.
+
+Any `u64` works, and the tags only have to differ within one statement. A named constant
+reads better than a literal when the handle crosses a function boundary:
+
+```rust
+const MANAGER: u64 = 1;
+let manager = alias_as::<_, MANAGER>(employees, "manager");
+```
+
+An existing handle can be re-tagged with `alias(..).tag::<N>()`; the name stays the same and
+the result is a different alias as far as the row set is concerned, so choose the tag before
+joining it.
+
+[`alias`]: https://docs.rs/besu/latest/besu/fn.alias.html
+[`alias_as`]: https://docs.rs/besu/latest/besu/fn.alias_as.html
 
 ## Gotchas
 
