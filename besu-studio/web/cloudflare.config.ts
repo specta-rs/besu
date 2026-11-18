@@ -2,8 +2,8 @@ import { defineConfig } from "cf/config";
 
 /**
  * The hosted copy of the studio: the same bundle the binary embeds, with no
- * Rust server behind it. `wrangler.config.ts` keeps that bundle in `dist`, and
- * this Worker serves it as static assets only.
+ * Rust server behind it. `cf deploy ./dist` publishes that prebuilt bundle as
+ * static assets, using the settings here.
  */
 export default defineConfig({
   worker: {

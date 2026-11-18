@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "deploy": "vite build && cf deploy"
+    "deploy": "vite build && cf deploy ./dist"
   },
   "dependencies": {
     "lucide-solid": "^1.72.0",
@@ -20,7 +20,6 @@
     "typescript": "^5.9.3",
     "vite": "^7.2.2",
     "vite-plugin-solid": "^2.11.10",
-    "wrangler": "^4.163.0",
     "cf": "1.0.0-rc.0"
   }
 }
