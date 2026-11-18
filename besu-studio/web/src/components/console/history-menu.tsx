@@ -1,5 +1,5 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
-import { ChevronDown, History } from "lucide-solid";
+import { For, Show, createSignal, onSettled } from "solid-js";
+import { ChevronDown, History } from "../../lib/icons";
 
 /**
  * The console's recent statements: a small dropdown beside the run controls,
@@ -13,7 +13,7 @@ export function HistoryMenu(props: {
   const [open, setOpen] = createSignal(false);
   let root: HTMLDivElement | undefined;
 
-  onMount(() => {
+  onSettled(() => {
     const onPointer = (event: MouseEvent) => {
       if (!open()) return;
       if (root && event.target instanceof Node && !root.contains(event.target)) {
@@ -25,20 +25,20 @@ export function HistoryMenu(props: {
     };
     document.addEventListener("mousedown", onPointer);
     document.addEventListener("keydown", onKey);
-    onCleanup(() => {
+    return () => {
       document.removeEventListener("mousedown", onPointer);
       document.removeEventListener("keydown", onKey);
-    });
+    };
   });
 
   return (
-    <div class="relative" ref={root}>
+    <div class="relative" ref={(el) => (root = el)}>
       <button
         class="btn btn-ghost"
         onClick={() => setOpen((current) => !current)}
         aria-label="Query history"
         aria-haspopup="menu"
-        aria-expanded={open()}
+        aria-expanded={open() ? "true" : "false"}
         title="Query history"
       >
         <History size={13} />

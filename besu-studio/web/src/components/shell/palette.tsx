@@ -1,16 +1,14 @@
 import {
   For,
   Match,
-  type JSX,
   Show,
   Switch,
   createEffect,
   createMemo,
   createSignal,
-  onCleanup,
-  onMount,
+  onSettled,
 } from "solid-js";
-import { Portal } from "solid-js/web";
+import { Portal, type JSX } from "@solidjs/web";
 import {
   Eye,
   RefreshCw,
@@ -19,7 +17,7 @@ import {
   Table2,
   Terminal,
   X,
-} from "lucide-solid";
+} from "../../lib/icons";
 import { navigate } from "../../lib/router";
 import { useStudio } from "../../lib/store";
 
@@ -244,24 +242,29 @@ export function CommandPalette(): JSX.Element {
   };
 
   // Every open starts clean, with fresh recents and focus in the search box.
-  createEffect(() => {
-    if (!studio.paletteOpen()) return;
-    setRecent(readRecent());
-    setQuery("");
-    setIndex(0);
-    queueMicrotask(() => inputEl?.focus());
-  });
+  createEffect(
+    () => studio.paletteOpen(),
+    (open) => {
+      if (!open) return;
+      setRecent(readRecent());
+      setQuery("");
+      setIndex(0);
+      queueMicrotask(() => inputEl?.focus());
+    },
+  );
 
   // Keep the arrow-key selection inside the scroll viewport.
-  createEffect(() => {
-    const current = index();
-    if (!studio.paletteOpen() || !listEl) return;
-    listEl
-      .querySelector<HTMLElement>(`[data-index="${current}"]`)
-      ?.scrollIntoView({ block: "nearest" });
-  });
+  createEffect(
+    () => [index(), studio.paletteOpen()] as const,
+    ([current, open]) => {
+      if (!open || !listEl) return;
+      listEl
+        .querySelector<HTMLElement>(`[data-index="${current}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    },
+  );
 
-  onMount(() => {
+  onSettled(() => {
     const onKey = (event: KeyboardEvent) => {
       if (studio.paletteOpen() && event.key === "Escape") {
         event.preventDefault();
@@ -269,7 +272,7 @@ export function CommandPalette(): JSX.Element {
       }
     };
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    return () => window.removeEventListener("keydown", onKey);
   });
 
   return (
@@ -295,7 +298,7 @@ export function CommandPalette(): JSX.Element {
                 aria-hidden="true"
               />
               <input
-                ref={inputEl}
+                ref={(el) => (inputEl = el)}
                 class="h-11 w-full min-w-0 bg-transparent text-[13px] text-ink placeholder:text-ink-3"
                 style={{ outline: "none" }}
                 type="text"
@@ -327,7 +330,7 @@ export function CommandPalette(): JSX.Element {
             </div>
 
             <div
-              ref={listEl}
+              ref={(el) => (listEl = el)}
               id="besu-palette-list"
               class="max-h-[46vh] min-h-[200px] overflow-y-auto overscroll-contain px-1.5 py-1.5"
               role="listbox"
@@ -358,7 +361,7 @@ export function CommandPalette(): JSX.Element {
                         id={`besu-palette-option-${position()}`}
                         data-index={position()}
                         role="option"
-                        aria-selected={index() === position()}
+                        aria-selected={index() === position() ? "true" : "false"}
                         class={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-1.5 text-left ${
                           index() === position()
                             ? "bg-accent-soft text-ink"

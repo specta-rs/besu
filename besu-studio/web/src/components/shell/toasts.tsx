@@ -1,6 +1,6 @@
-import { For, type JSX, Show } from "solid-js";
-import { Portal } from "solid-js/web";
-import { CircleAlert, CircleCheck, Info, X } from "lucide-solid";
+import { For, Show } from "solid-js";
+import { Portal, type JSX } from "@solidjs/web";
+import { CircleAlert, CircleCheck, Info, X } from "../../lib/icons";
 import type { ToastKind } from "../../lib/store";
 import { useStudio } from "../../lib/store";
 

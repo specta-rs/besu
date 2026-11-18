@@ -1,4 +1,5 @@
-import { type JSX, Show, createMemo } from "solid-js";
+import { Show, createMemo } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import {
   ChevronRight,
   Menu,
@@ -6,7 +7,7 @@ import {
   RefreshCw,
   Search,
   Sun,
-} from "lucide-solid";
+} from "../../lib/icons";
 import { href, linkClick, route } from "../../lib/router";
 import { useStudio } from "../../lib/store";
 import { Spinner } from "../../lib/ui";
@@ -107,7 +108,7 @@ export function TopBar(props: TopBarProps): JSX.Element {
           role="status"
           aria-live="polite"
         >
-          <Show when={studio.schema.loading}>
+          <Show when={studio.schemaPending()}>
             <Spinner size={12} />
             <span class="sr-only">Loading schema</span>
           </Show>
@@ -152,7 +153,7 @@ export function TopBar(props: TopBarProps): JSX.Element {
         >
           <RefreshCw
             size={14}
-            class={studio.schema.loading ? "animate-spin" : undefined}
+            class={studio.schemaPending() ? "animate-spin" : undefined}
             aria-hidden="true"
           />
         </button>

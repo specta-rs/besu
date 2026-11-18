@@ -1,13 +1,12 @@
 import {
   For,
-  type JSX,
   Show,
   createEffect,
   createMemo,
   createSignal,
-  onCleanup,
-  onMount,
+  onSettled,
 } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import {
   Database,
   Eye,
@@ -17,7 +16,7 @@ import {
   Table2,
   Terminal,
   Unplug,
-} from "lucide-solid";
+} from "../../lib/icons";
 import { href, linkClick, navigate, route } from "../../lib/router";
 import type { Route } from "../../lib/router";
 import { useStudio } from "../../lib/store";
@@ -157,22 +156,26 @@ export function Sidebar(props: SidebarProps): JSX.Element {
   };
 
   // Keep the active object visible as the route changes or the filter narrows.
-  createEffect(() => {
-    const name = activeName();
-    const kind = activeKind();
-    if (!name || !kind || !listEl) return;
-    const active = listEl.querySelector<HTMLElement>(
-      `[data-name="${CSS.escape(name)}"][data-kind="${kind}"]`,
-    );
-    active?.scrollIntoView({ block: "nearest" });
-  });
+  createEffect(
+    () => [activeName(), activeKind()] as const,
+    ([name, kind]) => {
+      if (!name || !kind || !listEl) return;
+      const active = listEl.querySelector<HTMLElement>(
+        `[data-name="${CSS.escape(name)}"][data-kind="${kind}"]`,
+      );
+      active?.scrollIntoView({ block: "nearest" });
+    },
+  );
 
   // Off-screen drawers must not hold keyboard focus.
-  createEffect(() => {
-    asideEl?.toggleAttribute("inert", narrow() && !props.open);
-  });
+  createEffect(
+    () => [narrow(), props.open] as const,
+    ([isNarrow, open]) => {
+      asideEl?.toggleAttribute("inert", isNarrow && !open);
+    },
+  );
 
-  onMount(() => {
+  onSettled(() => {
     const media = window.matchMedia("(max-width: 899px)");
     setNarrow(media.matches);
 
@@ -185,10 +188,10 @@ export function Sidebar(props: SidebarProps): JSX.Element {
 
     media.addEventListener("change", onChange);
     window.addEventListener("keydown", onKey);
-    onCleanup(() => {
+    return () => {
       media.removeEventListener("change", onChange);
       window.removeEventListener("keydown", onKey);
-    });
+    };
   });
 
   const rowClass = (active: boolean) =>
@@ -209,7 +212,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
       </Show>
 
       <aside
-        ref={asideEl}
+        ref={(el) => (asideEl = el)}
         class={`flex h-full w-[248px] shrink-0 flex-col border-r border-line bg-panel max-[900px]:fixed max-[900px]:inset-y-0 max-[900px]:left-0 max-[900px]:z-40 max-[900px]:w-[272px] max-[900px]:shadow-[var(--sp-shadow)] max-[900px]:transition-transform max-[900px]:duration-200 ${
           props.open
             ? "max-[900px]:translate-x-0"
@@ -284,16 +287,16 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         </div>
 
         <div
-          ref={listEl}
+          ref={(el) => (listEl = el)}
           class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2"
           role="navigation"
           aria-label="Tables and views"
-          tabIndex={0}
+          tabindex={0}
           onKeyDown={onListKey}
         >
           <Show when={entries().length === 0}>
             <p class="px-2 py-3 text-[11.5px] leading-relaxed text-ink-3">
-              {studio.schema.loading
+              {studio.schemaPending()
                 ? "Loading schema…"
                 : needle()
                   ? "No matches."

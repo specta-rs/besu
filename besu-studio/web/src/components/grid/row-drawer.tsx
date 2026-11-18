@@ -1,5 +1,6 @@
-import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
-import { KeyRound, Trash2, TriangleAlert } from "lucide-solid";
+import { For, Show, createMemo, createSignal, untrack } from "solid-js";
+import type { JSX } from "@solidjs/web";
+import { KeyRound, Trash2, TriangleAlert } from "../../lib/icons";
 import { cellText } from "../../lib/format";
 import { useStudio } from "../../lib/store";
 import type { Column, Json } from "../../lib/types";
@@ -51,8 +52,9 @@ export function RowDrawer(props: RowDrawerProps): JSX.Element {
     return next;
   };
 
+  // One-shot: the drafts start from the row the drawer was opened with.
   const [drafts, setDrafts] = createSignal<Record<string, Draft>>(
-    initialDrafts(),
+    untrack(initialDrafts),
   );
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const [message, setMessage] = createSignal<string | null>(null);

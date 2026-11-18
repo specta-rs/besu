@@ -1,5 +1,6 @@
-import { For, Show, createEffect, createMemo, type JSX } from "solid-js";
-import { ArrowDown, ArrowUp, KeyRound } from "lucide-solid";
+import { For, Show, createEffect, createMemo } from "solid-js";
+import type { JSX } from "@solidjs/web";
+import { ArrowDown, ArrowUp, KeyRound } from "../../lib/icons";
 import {
   cellText,
   displayType,
@@ -47,14 +48,16 @@ export function DataGrid(props: DataGridProps): JSX.Element {
   const sortPosition = (name: string) =>
     props.sorts.findIndex((sort) => sort.column === name) + 1;
 
-  createEffect(() => {
-    const index = props.selected;
-    if (index < 0) return;
-    const row = scroller?.querySelector<HTMLTableRowElement>(
-      `tr[data-row="${index}"]`,
-    );
-    row?.scrollIntoView({ block: "nearest" });
-  });
+  createEffect(
+    () => props.selected,
+    (index) => {
+      if (index < 0) return;
+      const row = scroller?.querySelector<HTMLTableRowElement>(
+        `tr[data-row="${index}"]`,
+      );
+      row?.scrollIntoView({ block: "nearest" });
+    },
+  );
 
   const cellBackground = (
     rowIndex: number,
@@ -74,9 +77,9 @@ export function DataGrid(props: DataGridProps): JSX.Element {
 
   return (
     <div
-      ref={scroller}
+      ref={(el) => (scroller = el)}
       class="relative min-h-0 flex-1 overflow-auto bg-panel"
-      tabIndex={0}
+      tabindex={0}
       role="region"
       aria-label="Table rows"
     >

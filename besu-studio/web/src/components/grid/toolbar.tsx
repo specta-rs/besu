@@ -1,11 +1,12 @@
-import { For, Show, createSignal, type JSX } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import {
   Check,
   Columns3,
   Download,
   Plus,
   RefreshCw,
-} from "lucide-solid";
+} from "../../lib/icons";
 import { compactNumber, displayType, duration } from "../../lib/format";
 import type { Column } from "../../lib/types";
 import { Popover } from "./popover";
@@ -72,7 +73,7 @@ export function GridToolbar(props: GridToolbarProps): JSX.Element {
         </button>
 
         <button
-          ref={exportButton}
+          ref={(el) => (exportButton = el)}
           type="button"
           class="btn"
           onClick={() =>
@@ -80,7 +81,7 @@ export function GridToolbar(props: GridToolbarProps): JSX.Element {
           }
           disabled={props.columns.length === 0}
           aria-haspopup="menu"
-          aria-expanded={menu() === "export"}
+          aria-expanded={menu() === "export" ? "true" : "false"}
           title="Export the current page"
         >
           <Download size={12} />
@@ -120,7 +121,7 @@ export function GridToolbar(props: GridToolbarProps): JSX.Element {
         </Popover>
 
         <button
-          ref={columnsButton}
+          ref={(el) => (columnsButton = el)}
           type="button"
           class="btn"
           onClick={() =>
@@ -128,7 +129,7 @@ export function GridToolbar(props: GridToolbarProps): JSX.Element {
           }
           disabled={props.columns.length === 0}
           aria-haspopup="menu"
-          aria-expanded={menu() === "columns"}
+          aria-expanded={menu() === "columns" ? "true" : "false"}
           title="Show and hide columns"
         >
           <Columns3 size={12} />

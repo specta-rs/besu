@@ -1,13 +1,14 @@
 import {
   For,
-  type JSX,
+  Loading,
   Show,
   createEffect,
   createMemo,
   createSignal,
-  onCleanup,
-  onMount,
+  onSettled,
+  untrack,
 } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import {
   ChevronRight,
   Database,
@@ -16,7 +17,7 @@ import {
   Play,
   RefreshCw,
   Table2,
-} from "lucide-solid";
+} from "./lib/icons";
 import { ConnectPage } from "./pages/connect-page";
 import { CommandPalette, rememberRecent } from "./components/shell/palette";
 import { Sidebar } from "./components/shell/sidebar";
@@ -116,7 +117,7 @@ function Welcome(): JSX.Element {
             <button class="btn" onClick={() => studio.refresh()}>
               <RefreshCw
                 size={13}
-                class={studio.schema.loading ? "animate-spin" : undefined}
+                class={studio.schemaPending() ? "animate-spin" : undefined}
                 aria-hidden="true"
               />
               Refresh
@@ -135,14 +136,7 @@ function Welcome(): JSX.Element {
           <Stat label="Columns" value={String(totalColumns())} />
         </div>
 
-        <Show when={studio.schema.loading && !studio.schema()}>
-          <div class="mt-6 flex items-center gap-2.5 rounded-[10px] border border-line bg-panel px-4 py-6">
-            <Spinner size={14} />
-            <p class="text-[12px] text-ink-2">Reading the schema…</p>
-          </div>
-        </Show>
-
-        <Show when={!studio.schema.loading && studio.schema() === null}>
+        <Show when={studio.schema() === null}>
           <div class="mt-6 rounded-[10px] border border-line bg-panel px-4 py-5">
             <p class="text-[12.5px] font-medium">No schema loaded</p>
             <p class="mt-1 max-w-[580px] text-[12px] leading-relaxed text-ink-2">
@@ -305,7 +299,7 @@ function Studio(): JSX.Element {
 
   // ⌘K opens the palette from anywhere, including inside an editor; `/` jumps
   // to the object filter when nothing editable has focus.
-  onMount(() => {
+  onSettled(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -339,20 +333,21 @@ function Studio(): JSX.Element {
     };
 
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    return () => window.removeEventListener("keydown", onKey);
   });
 
-  createEffect(() => {
-    const current = route();
+  createEffect(
+    () => route(),
+    (current) => {
+      if (current.name === "data" || current.name === "schema") {
+        studio.selectTable(current.table);
+        rememberRecent(current.table);
+      }
 
-    if (current.name === "data" || current.name === "schema") {
-      studio.selectTable(current.table);
-      rememberRecent(current.table);
-    }
-
-    // A navigation always reveals the destination, even from the drawer.
-    setSidebarOpen(false);
-  });
+      // A navigation always reveals the destination, even from the drawer.
+      setSidebarOpen(false);
+    },
+  );
 
   const dataRoute = createMemo(() => {
     const current = route();
@@ -364,31 +359,39 @@ function Studio(): JSX.Element {
   });
 
   return (
-    <div class="flex h-screen overflow-hidden bg-bg text-ink">
-      <Sidebar
-        open={sidebarOpen()}
-        onClose={() => setSidebarOpen(false)}
-      />
-      <div class="flex min-w-0 flex-1 flex-col">
-        <TopBar onToggleSidebar={() => setSidebarOpen((open) => !open)} />
-        <main class="min-h-0 flex-1 overflow-hidden">
-          <Show when={route().name === "sql"}>
-            <SqlPage />
-          </Show>
-          <Show when={dataRoute()}>
-            {(current) => <DataPage table={current().table} />}
-          </Show>
-          <Show when={schemaRoute()}>
-            {(current) => <SchemaPage table={current().table} />}
-          </Show>
-          <Show when={route().name === "overview"}>
-            <Welcome />
-          </Show>
-        </main>
+    <Loading
+      fallback={
+        <div class="flex h-screen items-center justify-center bg-bg text-ink">
+          <Spinner size={16} label="Reading the schema…" />
+        </div>
+      }
+    >
+      <div class="flex h-screen overflow-hidden bg-bg text-ink">
+        <Sidebar
+          open={sidebarOpen()}
+          onClose={() => setSidebarOpen(false)}
+        />
+        <div class="flex min-w-0 flex-1 flex-col">
+          <TopBar onToggleSidebar={() => setSidebarOpen((open) => !open)} />
+          <main class="min-h-0 flex-1 overflow-hidden">
+            <Show when={route().name === "sql"}>
+              <SqlPage />
+            </Show>
+            <Show when={dataRoute()}>
+              {(current) => <DataPage table={current().table} />}
+            </Show>
+            <Show when={schemaRoute()}>
+              {(current) => <SchemaPage table={current().table} />}
+            </Show>
+            <Show when={route().name === "overview"}>
+              <Welcome />
+            </Show>
+          </main>
+        </div>
+        <CommandPalette />
+        <Toasts />
       </div>
-      <CommandPalette />
-      <Toasts />
-    </div>
+    </Loading>
   );
 }
 
@@ -401,27 +404,40 @@ function Studio(): JSX.Element {
  */
 function Shell(): JSX.Element {
   const studio = useStudio();
+
   let settled = false;
+  // `start()` writes a state before it can ever be `idle` again, so an idle
+  // seen before that is "nothing has answered yet", not "disconnected".
+  let started = false;
 
-  createEffect(() => {
-    const current = route();
-    if (studio.connection().kind === "probing") return;
+  createEffect(
+    // Only the connection drives this: the route is read untracked, so the
+    // navigation this effect performs cannot feed back into its own inputs.
+    () => studio.connection().kind,
+    (kind) => {
+      if (kind !== "idle") started = true;
+      if (kind === "probing") return;
+      if (kind === "idle" && !started) return;
 
-    // The first settled state is a restored connection: land where the app is,
-    // without leaving the setup page in history. After that, `/` stays the
-    // setup page — it is where Back from the overview should go.
-    if (!settled) {
-      settled = true;
-      if (studio.connected() && current.name === "setup") {
-        navigate("/overview", true);
+      const current = untrack(route);
+      const connected = kind === "live" || kind === "demo";
+
+      // The first settled state is a restored connection: land where the app is,
+      // without leaving the setup page in history. After that, `/` stays the
+      // setup page — it is where Back from the overview should go.
+      if (!settled) {
+        settled = true;
+        if (connected && current.name === "setup") {
+          navigate("/overview", true);
+        }
+        return;
       }
-      return;
-    }
 
-    if (!studio.connected() && current.name !== "setup") {
-      navigate("/", true);
-    }
-  });
+      if (!connected && current.name !== "setup") {
+        navigate("/", true);
+      }
+    },
+  );
 
   return (
     <Show
@@ -437,7 +453,7 @@ export function App() {
   const connection = createConnection();
   const studio = createStudioState(connection);
 
-  onMount(() => {
+  onSettled(() => {
     void connection.start();
   });
 

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onMount } from "solid-js";
+import { createEffect, createSignal, onSettled, untrack } from "solid-js";
 
 /**
  * A plain textarea dressed as a code surface. Monospace, soft-wrapped, grows
@@ -17,7 +17,8 @@ export function SqlEditor(props: {
 
   const [index, setIndex] = createSignal(-1);
   let draft = "";
-  let recalled = props.value;
+  // One-shot: the walk starts from the statement the editor was opened with.
+  let recalled = untrack(() => props.value);
 
   const autosize = () => {
     if (!area) return;
@@ -27,16 +28,19 @@ export function SqlEditor(props: {
   };
 
   // Any value that did not come from history recall resets the walk.
-  createEffect(() => {
-    if (props.value !== recalled) {
-      recalled = props.value;
-      setIndex(-1);
-      draft = "";
-    }
-    autosize();
-  });
+  createEffect(
+    () => props.value,
+    (value) => {
+      if (value !== recalled) {
+        recalled = value;
+        setIndex(-1);
+        draft = "";
+      }
+      autosize();
+    },
+  );
 
-  onMount(() => {
+  onSettled(() => {
     autosize();
     area?.focus();
   });
@@ -97,7 +101,7 @@ export function SqlEditor(props: {
       }}
     >
       <textarea
-        ref={area}
+        ref={(el) => (area = el)}
         value={props.value}
         onInput={(event) => props.onInput(event.currentTarget.value)}
         onKeyDown={(event) => {

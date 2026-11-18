@@ -1,5 +1,12 @@
-import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
-import type { JSX } from "solid-js";
+import {
+  For,
+  Show,
+  createMemo,
+  createSignal,
+  onSettled,
+  untrack,
+} from "solid-js";
+import type { JSX } from "@solidjs/web";
 import {
   CircleAlert,
   CircleCheck,
@@ -8,7 +15,7 @@ import {
   Square,
   Terminal,
   Trash2,
-} from "lucide-solid";
+} from "../lib/icons";
 import { HistoryMenu } from "../components/console/history-menu";
 import { SqlEditor } from "../components/console/editor";
 import { ResultGrid } from "../components/console/result-grid";
@@ -106,7 +113,9 @@ function Affected(props: { result: QueryResult }) {
 export function SqlPage(): JSX.Element {
   const studio = useStudio();
 
-  const [sql, setSql] = createSignal(studio.isDemo() ? (DEMO_EXAMPLES[0]?.sql ?? "") : "");
+  const [sql, setSql] = createSignal(
+    untrack(() => (studio.isDemo() ? (DEMO_EXAMPLES[0]?.sql ?? "") : "")),
+  );
   const [result, setResult] = createSignal<QueryResult | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [running, setRunning] = createSignal(false);
@@ -122,8 +131,10 @@ export function SqlPage(): JSX.Element {
       [statement, ...current.filter((entry) => entry !== statement)].slice(0, 20),
     );
 
-  const run = async () => {
-    const statement = sql().trim();
+  const run = async (input?: string) => {
+    // The setter stages writes, so a caller that just replaced the text hands
+    // the statement in rather than reading `sql()` back in the same frame.
+    const statement = (input ?? sql()).trim();
     if (statement === "" || running()) return;
 
     const id = ++ticket;
@@ -194,7 +205,7 @@ export function SqlPage(): JSX.Element {
     window.addEventListener("pointerup", finish);
   };
 
-  onCleanup(() => release?.());
+  onSettled(() => () => release?.());
 
   const nudge = (delta: number) =>
     setSplit((current) => Math.min(0.78, Math.max(0.16, current + delta)));
@@ -284,7 +295,7 @@ export function SqlPage(): JSX.Element {
                   title={example.sql}
                   onClick={() => {
                     setSql(example.sql);
-                    void run();
+                    void run(example.sql);
                   }}
                 >
                   {example.label}
@@ -295,7 +306,7 @@ export function SqlPage(): JSX.Element {
         </div>
       </Show>
 
-      <div ref={surface} class="flex min-h-0 flex-1 flex-col">
+      <div ref={(el) => (surface = el)} class="flex min-h-0 flex-1 flex-col">
         <div
           class="min-h-0 shrink-0 overflow-hidden"
           style={{ height: `${split() * 100}%` }}
@@ -309,8 +320,10 @@ export function SqlPage(): JSX.Element {
         </div>
 
         <div
-          class="group flex h-2 shrink-0 cursor-row-resize items-center justify-center border-y border-line"
-          classList={{ "bg-accent-soft": dragging(), "bg-panel-2": !dragging() }}
+          class={[
+            "group flex h-2 shrink-0 cursor-row-resize items-center justify-center border-y border-line",
+            dragging() ? "bg-accent-soft" : "bg-panel-2",
+          ]}
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize editor and results"

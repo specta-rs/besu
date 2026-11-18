@@ -1,4 +1,5 @@
-import { For, Show, createSignal, type JSX } from "solid-js";
+import { For, Show, createSignal, untrack } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { useStudio } from "../../lib/store";
 import type { Column, Json } from "../../lib/types";
 import { Modal, Spinner } from "../../lib/ui";
@@ -38,8 +39,9 @@ export function AddRowModal(props: AddRowModalProps): JSX.Element {
     return next;
   };
 
+  // One-shot: every field starts blank.
   const [drafts, setDrafts] = createSignal<Record<string, Draft>>(
-    initialDrafts(),
+    untrack(initialDrafts),
   );
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   const [message, setMessage] = createSignal<string | null>(null);

@@ -11,15 +11,16 @@
     "deploy": "vite build && cf deploy ./dist"
   },
   "dependencies": {
-    "lucide-solid": "^1.72.0",
-    "solid-js": "^1.9.9"
+    "lucide": "^1.74.0",
+    "solid-js": "^2.0.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.18",
-    "tailwindcss": "^4.1.18",
-    "typescript": "^5.9.3",
-    "vite": "^7.2.2",
-    "vite-plugin-solid": "^2.11.10",
-    "cf": "1.0.0-rc.0"
+    "@solidjs/vite-plugin": "^3.0.1",
+    "@solidjs/web": "^2.0.0",
+    "@tailwindcss/vite": "^4.3.5",
+    "cf": "^1.0.0-rc.1",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
   }
 }
