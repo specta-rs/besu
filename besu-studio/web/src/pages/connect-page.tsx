@@ -1,4 +1,5 @@
-import { type JSX, Show, createMemo, createSignal, onMount } from "solid-js";
+import { Show, createMemo, createSignal, onSettled } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import {
   ArrowRight,
   Check,
@@ -7,7 +8,7 @@ import {
   FlaskConical,
   ShieldCheck,
   Terminal,
-} from "lucide-solid";
+} from "../lib/icons";
 import {
   DEFAULT_HOST,
   composeTarget,
@@ -50,7 +51,7 @@ export function ConnectPage(): JSX.Element {
   const pastedUrl = createMemo(() => /^https?:\/\//i.test(host().trim()));
   const blocked = createMemo(() => mixedContentBlocked(target()));
 
-  onMount(() => {
+  onSettled(() => {
     // Focus the address so a keyboard user can type and hit Enter immediately.
     const field = document.getElementById("besu-connect-host");
     if (field instanceof HTMLInputElement) {
@@ -129,13 +130,14 @@ export function ConnectPage(): JSX.Element {
               <div class="ml-auto flex items-center gap-1" role="tablist" aria-label="Database">
                 {COMMANDS.map((entry, index) => (
                   <button
-                    class="rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors"
-                    classList={{
-                      "bg-panel text-ink": command() === index,
-                      "text-ink-3 hover:text-ink": command() !== index,
-                    }}
+                    class={[
+                      "rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors",
+                      command() === index
+                        ? "bg-panel text-ink"
+                        : "text-ink-3 hover:text-ink",
+                    ]}
                     role="tab"
-                    aria-selected={command() === index}
+                    aria-selected={command() === index ? "true" : "false"}
                     onClick={() => setCommand(index)}
                   >
                     {entry.label}

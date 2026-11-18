@@ -1,14 +1,16 @@
 import {
+  Errored,
+  Loading,
   Show,
   createEffect,
   createMemo,
-  createResource,
   createSignal,
-  onCleanup,
-  onMount,
-  type JSX,
+  isPending,
+  onSettled,
+  refresh,
 } from "solid-js";
-import { AlertTriangle, Plus } from "lucide-solid";
+import type { JSX } from "@solidjs/web";
+import { AlertTriangle, Plus } from "../lib/icons";
 import { AddRowModal } from "../components/grid/add-row";
 import { FilterBar } from "../components/grid/filters";
 import { DataGrid } from "../components/grid/grid";
@@ -42,7 +44,45 @@ export function DataPage(props: { table: string }): JSX.Element {
   );
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The page's async window: the rows are an async memo, so the first read of a
+ * table sits inside `<Loading>` and a failed read inside `<Errored>`. Every
+ * reader of `page()` lives below both boundaries, which is what lets the
+ * fallbacks show: an outside reader would hold the frame instead.
+ */
 function TableBrowser(props: { table: string }): JSX.Element {
+  return (
+    <Errored
+      fallback={(error, reset) => (
+        <div class="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+          <AlertTriangle size={18} class="text-err" />
+          <p class="max-w-[420px] text-[12.5px] leading-relaxed text-ink">
+            {errorText(error())}
+          </p>
+          <button type="button" class="btn" onClick={reset}>
+            Retry
+          </button>
+        </div>
+      )}
+    >
+      <Loading
+        fallback={
+          <div class="flex h-full items-center justify-center">
+            <Spinner label="Loading rows…" />
+          </div>
+        }
+      >
+        <TableRows table={props.table} />
+      </Loading>
+    </Errored>
+  );
+}
+
+function TableRows(props: { table: string }): JSX.Element {
   const studio = useStudio();
   const session = readSession(props.table);
 
@@ -58,37 +98,36 @@ function TableBrowser(props: { table: string }): JSX.Element {
   const [adding, setAdding] = createSignal(false);
 
   // Session-only memory, so coming back to this table restores the view.
-  createEffect(() => {
-    writeSession(props.table, {
-      filters: filters(),
-      sorts: sorts(),
-      offset: offset(),
+  createEffect(
+    () => [props.table, filters(), sorts(), offset(), limit(), hidden()] as const,
+    ([table, current, order, start, size, columns]) => {
+      writeSession(table, {
+        filters: current,
+        sorts: order,
+        offset: start,
+        limit: size,
+        hidden: columns,
+      });
+    },
+  );
+
+  const page = createMemo(() => {
+    // A write bumps the revision; every table view re-asks when it changes.
+    studio.revision();
+    return studio.client().rows(props.table, {
       limit: limit(),
-      hidden: hidden(),
+      offset: offset(),
+      sort: sorts().length > 0 ? sorts() : undefined,
+      filters: filters().length > 0 ? filters() : undefined,
     });
   });
 
-  const [page, { refetch }] = createResource(
-    () => ({
-      table: props.table,
-      limit: limit(),
-      offset: offset(),
-      sort: sorts(),
-      filters: filters(),
-      revision: studio.revision(),
-    }),
-    (input) =>
-      studio.client().rows(input.table, {
-        limit: input.limit,
-        offset: input.offset,
-        sort: input.sort.length > 0 ? input.sort : undefined,
-        filters: input.filters.length > 0 ? input.filters : undefined,
-      }),
-  );
+  // A reload keeps the previous rows on screen; this is what says it is stale.
+  const reloading = createMemo(() => isPending(() => page()));
 
-  // During a refetch the resource keeps the previous value; on an error it
-  // throws, so check the error first and let the error state own the pane.
-  const data = createMemo(() => (page.error ? undefined : page()));
+  const refetch = () => {
+    void refresh(page);
+  };
 
   const tableDef = createMemo(() =>
     (studio.schema()?.tables ?? []).find(
@@ -114,14 +153,14 @@ function TableBrowser(props: { table: string }): JSX.Element {
   });
 
   const columns = (): Column[] =>
-    data()?.columns ?? tableDef()?.columns ?? [];
+    page().columns ?? tableDef()?.columns ?? [];
   const primaryKey = (): string[] =>
-    data()?.primary_key ??
+    page().primary_key ??
     (tableDef()?.columns ?? [])
       .filter((column) => column.primary_key)
       .map((column) => column.name);
-  const rows = () => data()?.rows ?? [];
-  const total = () => data()?.total ?? 0;
+  const rows = () => page().rows ?? [];
+  const total = () => page().total ?? 0;
 
   const readOnly = () => Boolean(studio.info()?.read_only);
   const canAdd = () =>
@@ -131,11 +170,6 @@ function TableBrowser(props: { table: string }): JSX.Element {
     );
   const visibleColumnCount = () =>
     columns().filter((column) => !hidden().includes(column.name)).length;
-
-  const errorMessage = () =>
-    page.error instanceof Error
-      ? page.error.message
-      : String(page.error ?? "The rows could not be loaded.");
 
   const updateFilters = (next: Filter[]) => {
     setFilters(next);
@@ -173,25 +207,27 @@ function TableBrowser(props: { table: string }): JSX.Element {
 
   // If filtering or deleting shrinks the result set, do not strand the user on
   // a page that no longer exists.
-  createEffect(() => {
-    const current = data();
-    if (!current) return;
-    const start = offset();
-    if (current.total === 0) {
-      if (start !== 0) setOffset(0);
-      return;
-    }
-    if (start >= current.total) {
-      setOffset(Math.max(0, Math.floor((current.total - 1) / limit()) * limit()));
-    }
-  });
+  createEffect(
+    () => [page().total, offset(), limit()] as const,
+    ([count, start, size]) => {
+      if (count === 0) {
+        if (start !== 0) setOffset(0);
+        return;
+      }
+      if (start >= count) {
+        setOffset(Math.max(0, Math.floor((count - 1) / size) * size));
+      }
+    },
+  );
 
-  createEffect(() => {
-    const count = rows().length;
-    setSelected((current) =>
-      current >= count ? count - 1 : current < -1 ? -1 : current,
-    );
-  });
+  createEffect(
+    () => rows().length,
+    (count) => {
+      setSelected((current) =>
+        current >= count ? count - 1 : current < -1 ? -1 : current,
+      );
+    },
+  );
 
   const openAt = (index: number) => {
     const row = rows()[index];
@@ -209,7 +245,7 @@ function TableBrowser(props: { table: string }): JSX.Element {
     });
   };
 
-  onMount(() => {
+  onSettled(() => {
     const onKey = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
@@ -246,12 +282,11 @@ function TableBrowser(props: { table: string }): JSX.Element {
     };
 
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    return () => window.removeEventListener("keydown", onKey);
   });
 
   const exportPage = (format: "csv" | "json") => {
-    const current = data();
-    if (!current) return;
+    const current = page();
 
     const visible = current.columns
       .map((column, index) => ({ column, index }))
@@ -287,13 +322,13 @@ function TableBrowser(props: { table: string }): JSX.Element {
         name={identity().name}
         schemaName={identity().schema}
         total={total()}
-        durationMs={data()?.duration_ms}
+        durationMs={page().duration_ms}
         columnCount={columns().length}
-        loading={page.loading}
+        loading={reloading()}
         columns={columns()}
         hidden={hidden()}
         canAdd={canAdd()}
-        onRefresh={() => void refetch()}
+        onRefresh={refetch}
         onExport={exportPage}
         onToggleColumn={toggleColumn}
         onShowAllColumns={() => setHidden([])}
@@ -307,101 +342,77 @@ function TableBrowser(props: { table: string }): JSX.Element {
       />
 
       <div class="relative flex min-h-0 flex-1 flex-col">
-        <Show when={page.error}>
-          <div class="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-            <AlertTriangle size={18} class="text-err" />
-            <p class="max-w-[420px] text-[12.5px] leading-relaxed text-ink">
-              {errorMessage()}
-            </p>
-            <button
-              type="button"
-              class="btn"
-              onClick={() => void refetch()}
+        <Show
+          when={rows().length > 0}
+          fallback={
+            <EmptyState
+              title={
+                filters().length > 0
+                  ? "No rows match these filters"
+                  : "This table is empty"
+              }
+              detail={
+                filters().length > 0
+                  ? "Adjust or clear the filters to see the rest of the table."
+                  : "Add the first row and it will show up here."
+              }
             >
-              Retry
-            </button>
-          </div>
-        </Show>
-
-        <Show when={!page.error && !data()}>
-          <div class="flex flex-1 items-center justify-center">
-            <Spinner label="Loading rows…" />
-          </div>
-        </Show>
-
-        <Show when={!page.error && data()}>
+              <div class="mt-1 flex items-center gap-2">
+                <Show when={filters().length > 0}>
+                  <button
+                    type="button"
+                    class="btn"
+                    onClick={() => updateFilters([])}
+                  >
+                    Clear filters
+                  </button>
+                </Show>
+                <Show when={canAdd()}>
+                  <button
+                    type="button"
+                    class="btn btn-primary"
+                    onClick={() => setAdding(true)}
+                  >
+                    <Plus size={12} />
+                    Add row
+                  </button>
+                </Show>
+              </div>
+            </EmptyState>
+          }
+        >
           <Show
-            when={rows().length > 0}
+            when={visibleColumnCount() > 0}
             fallback={
               <EmptyState
-                title={
-                  filters().length > 0
-                    ? "No rows match these filters"
-                    : "This table is empty"
-                }
-                detail={
-                  filters().length > 0
-                    ? "Adjust or clear the filters to see the rest of the table."
-                    : "Add the first row and it will show up here."
-                }
+                title="All columns are hidden"
+                detail="The rows are still here; bring a column back to see them."
               >
-                <div class="mt-1 flex items-center gap-2">
-                  <Show when={filters().length > 0}>
-                    <button
-                      type="button"
-                      class="btn"
-                      onClick={() => updateFilters([])}
-                    >
-                      Clear filters
-                    </button>
-                  </Show>
-                  <Show when={canAdd()}>
-                    <button
-                      type="button"
-                      class="btn btn-primary"
-                      onClick={() => setAdding(true)}
-                    >
-                      <Plus size={12} />
-                      Add row
-                    </button>
-                  </Show>
-                </div>
+                <button
+                  type="button"
+                  class="btn mt-1"
+                  onClick={() => setHidden([])}
+                >
+                  Show all columns
+                </button>
               </EmptyState>
             }
           >
-            <Show
-              when={visibleColumnCount() > 0}
-              fallback={
-                <EmptyState
-                  title="All columns are hidden"
-                  detail="The rows are still here; bring a column back to see them."
-                >
-                  <button
-                    type="button"
-                    class="btn mt-1"
-                    onClick={() => setHidden([])}
-                  >
-                    Show all columns
-                  </button>
-                </EmptyState>
-              }
-            >
-              <DataGrid
-                columns={columns()}
-                rows={rows()}
-                sorts={sorts()}
-                primaryKey={primaryKey()}
-                hidden={hidden()}
-                selected={selected()}
-                onSort={toggleSort}
-                onSelect={setSelected}
-                onOpen={openAt}
-              />
-            </Show>
+            <DataGrid
+              columns={columns()}
+              rows={rows()}
+              sorts={sorts()}
+              primaryKey={primaryKey()}
+              hidden={hidden()}
+              selected={selected()}
+              onSort={toggleSort}
+              onSelect={setSelected}
+              onOpen={openAt}
+            />
           </Show>
         </Show>
 
-        <Show when={page.loading && data()}>
+        <Show when={reloading()}>
           <div class="pointer-events-none absolute inset-0 z-40 flex items-start justify-center bg-bg/40 pt-4">
             <div class="panel flex items-center gap-2 px-2.5 py-1 text-[11px] text-ink-2">
               <Spinner size={12} label="Refreshing…" />

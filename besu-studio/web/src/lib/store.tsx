@@ -1,11 +1,15 @@
 import {
   type Accessor,
+  affects,
   createContext,
-  createResource,
+  createMemo,
   createSignal,
+  isPending,
+  refresh as refreshMemo,
+  untrack,
   useContext,
 } from "solid-js";
-import type { Resource } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import type { ConnectionHandle, Connection } from "./connection";
 import { DEFAULT_PORT } from "./connection";
 import type { ConnectionInfo, DataSource, Schema } from "./types";
@@ -19,7 +23,14 @@ export interface Toast {
 }
 
 export interface StudioState {
-  schema: Resource<Schema | null>;
+  /**
+   * The connection's schema. Pending while it is first read; the studio's
+   * `<Loading>` boundary owns that window, and `schemaPending` reports the
+   * reloads that keep the previous value on screen.
+   */
+  schema: Accessor<Schema | null>;
+  /** True while a schema reload is in flight and the previous one still shows. */
+  schemaPending: Accessor<boolean>;
   info: Accessor<ConnectionInfo | null>;
   connecting: Accessor<boolean>;
   connection: Accessor<Connection>;
@@ -57,17 +68,15 @@ const initialTheme = (): "dark" | "light" => {
 };
 
 export function createStudioState(connection: ConnectionHandle): StudioState {
-  const [schema, { refetch: refetchSchema }] = createResource(
-    connection.source,
-    async (source) => {
-      if (!source) return null;
-      try {
-        return await source.schema();
-      } catch {
-        return null;
-      }
-    },
-  );
+  const schema = createMemo(async (): Promise<Schema | null> => {
+    const source = connection.source();
+    if (!source) return null;
+    try {
+      return await source.schema();
+    } catch {
+      return null;
+    }
+  });
 
   const [selectedTable, setSelectedTable] = createSignal<string | null>(null);
   const [revision, setRevision] = createSignal(0);
@@ -77,7 +86,7 @@ export function createStudioState(connection: ConnectionHandle): StudioState {
 
   let nextToast = 1;
 
-  document.documentElement.classList.toggle("dark", theme() === "dark");
+  document.documentElement.classList.toggle("dark", untrack(theme) === "dark");
 
   const current = connection.state;
 
@@ -90,6 +99,7 @@ export function createStudioState(connection: ConnectionHandle): StudioState {
 
   const state: StudioState = {
     schema,
+    schemaPending: () => isPending(() => schema()),
     info,
     connecting: () =>
       current().kind === "probing" || current().kind === "idle",
@@ -129,7 +139,10 @@ export function createStudioState(connection: ConnectionHandle): StudioState {
     revision,
     refresh: () => {
       setRevision((n) => n + 1);
-      void refetchSchema();
+      // The read is an action, not a pure read: declaring it makes the reload
+      // visible through `schemaPending` instead of swapping silently.
+      affects(schema);
+      void refreshMemo(schema);
     },
     toasts,
     toast: (message, kind = "info") => {
@@ -156,19 +169,12 @@ export function createStudioState(connection: ConnectionHandle): StudioState {
 
 export function StudioProvider(props: {
   value: StudioState;
-  children: unknown;
+  children: JSX.Element;
 }) {
-  return (
-    <StudioContext.Provider value={props.value}>
-      {props.children as never}
-    </StudioContext.Provider>
-  );
+  return <StudioContext value={props.value}>{props.children}</StudioContext>;
 }
 
 /** The studio's shared state. Only valid inside `<App>`. */
 export function useStudio(): StudioState {
-  const state = useContext(StudioContext);
-  if (!state) throw new Error("useStudio must be used inside the studio app");
-  return state;
+  return useContext(StudioContext);
 }
-

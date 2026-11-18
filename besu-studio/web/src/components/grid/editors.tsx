@@ -1,5 +1,6 @@
-import { Show, type JSX } from "solid-js";
-import { KeyRound } from "lucide-solid";
+import { Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
+import { KeyRound } from "../../lib/icons";
 import {
   displayType,
   isBoolean,

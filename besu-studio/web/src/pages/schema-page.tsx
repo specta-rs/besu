@@ -1,13 +1,13 @@
-import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
-import type { JSX } from "solid-js";
-import { Check, Copy, Eye, Key, Table2 } from "lucide-solid";
+import { For, Show, createMemo, createSignal, onSettled } from "solid-js";
+import type { JSX } from "@solidjs/web";
+import { Check, Copy, Eye, Key, Table2 } from "../lib/icons";
 import { createTableSql } from "../components/console/create-table";
 import { copy, displayType } from "../lib/format";
 import { href, linkClick } from "../lib/router";
 import { useStudio } from "../lib/store";
 import { indexColumnLabel } from "../lib/types";
 import type { Column, Table, View } from "../lib/types";
-import { EmptyState, Spinner } from "../lib/ui";
+import { EmptyState } from "../lib/ui";
 
 /** An inline pill for a column or constraint attribute. */
 function Badge(props: {
@@ -18,11 +18,12 @@ function Badge(props: {
   return (
     <span
       title={props.title}
-      class="inline-flex h-[18px] items-center rounded border px-1.5 font-mono text-[10px] tracking-wide uppercase"
-      classList={{
-        "border-transparent bg-accent-soft text-accent": props.tone === "accent",
-        "border-line bg-panel-2 text-ink-2": props.tone !== "accent",
-      }}
+      class={[
+        "inline-flex h-[18px] items-center rounded border px-1.5 font-mono text-[10px] tracking-wide uppercase",
+        props.tone === "accent"
+          ? "border-transparent bg-accent-soft text-accent"
+          : "border-line bg-panel-2 text-ink-2",
+      ]}
     >
       {props.children}
     </span>
@@ -75,8 +76,10 @@ function CopyButton(props: { text: string; label: string }) {
   const [copied, setCopied] = createSignal(false);
   let timer: number | undefined;
 
-  onCleanup(() => {
-    if (timer !== undefined) window.clearTimeout(timer);
+  onSettled(() => {
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   });
 
   return (
@@ -196,7 +199,7 @@ function ColumnsSection(props: { table: Table }) {
               when={props.table.columns.length > 0}
               fallback={
                 <tr>
-                  <td class="px-3 py-3 text-[12px] text-ink-3" colSpan={6}>
+                  <td class="px-3 py-3 text-[12px] text-ink-3" colspan={6}>
                     This table has no columns.
                   </td>
                 </tr>
@@ -450,19 +453,10 @@ export function SchemaPage(props: { table: string }): JSX.Element {
         <Show
           when={studio.schema()}
           fallback={
-            <Show
-              when={studio.schema.loading}
-              fallback={
-                <EmptyState
-                  title="Schema unavailable"
-                  detail="The studio could not read the schema from the server. Check the connection and try again."
-                />
-              }
-            >
-              <div class="flex h-full items-center justify-center">
-                <Spinner label="Loading schema…" />
-              </div>
-            </Show>
+            <EmptyState
+              title="Schema unavailable"
+              detail="The studio could not read the schema from the server. Check the connection and try again."
+            />
           }
         >
           <Show

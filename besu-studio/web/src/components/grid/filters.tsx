@@ -1,5 +1,6 @@
-import { For, Show, createSignal, type JSX } from "solid-js";
-import { Filter as FilterIcon, Plus, X } from "lucide-solid";
+import { For, Show, createSignal, untrack } from "solid-js";
+import type { JSX } from "@solidjs/web";
+import { Filter as FilterIcon, Plus, X } from "../../lib/icons";
 import type { Column, Filter, FilterOp } from "../../lib/types";
 import { FILTER_OPS, needsValue, opLabel } from "./session";
 import { Popover } from "./popover";
@@ -65,12 +66,12 @@ function FilterChip(props: {
     <>
       <div class="inline-flex h-7 items-center rounded-md border border-line bg-panel-2 px-0.5 text-[11.5px]">
         <button
-          ref={trigger}
+          ref={(el) => (trigger = el)}
           type="button"
           class="flex h-6 max-w-[280px] items-center gap-1 rounded-[5px] px-1.5 hover:bg-panel-3"
           onClick={() => setOpen((current) => !current)}
           aria-label={`Edit filter on ${props.filter.column}`}
-          aria-expanded={open()}
+          aria-expanded={open() ? "true" : "false"}
         >
           <span class="truncate font-mono text-ink">{props.filter.column}</span>
           <span class="shrink-0 text-ink-3">·</span>
@@ -125,12 +126,12 @@ function AddFilter(props: {
   return (
     <>
       <button
-        ref={trigger}
+        ref={(el) => (trigger = el)}
         type="button"
         class="btn btn-ghost h-7 border border-dashed border-line px-2 text-[11.5px] text-ink-2"
         onClick={() => setOpen(true)}
         disabled={props.columns.length === 0}
-        aria-expanded={open()}
+        aria-expanded={open() ? "true" : "false"}
       >
         <Plus size={11} />
         Add filter
@@ -164,9 +165,12 @@ function FilterEditor(props: {
   onApply: (filter: Filter) => void;
   onRemove?: () => void;
 }): JSX.Element {
-  const [column, setColumn] = createSignal(props.filter.column);
-  const [op, setOp] = createSignal<FilterOp>(props.filter.op);
-  const [value, setValue] = createSignal(props.filter.value ?? "");
+  // One-shot: the editor opens on the filter it was handed.
+  const [column, setColumn] = createSignal(untrack(() => props.filter.column));
+  const [op, setOp] = createSignal<FilterOp>(untrack(() => props.filter.op));
+  const [value, setValue] = createSignal(
+    untrack(() => props.filter.value) ?? "",
+  );
 
   const apply = () => {
     if (!column()) return;

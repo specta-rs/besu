@@ -1,12 +1,5 @@
-import {
-  Show,
-  createEffect,
-  createSignal,
-  onCleanup,
-  onMount,
-  type JSX,
-} from "solid-js";
-import { Portal } from "solid-js/web";
+import { Show, createEffect, createSignal, onSettled } from "solid-js";
+import { Portal, type JSX } from "@solidjs/web";
 
 export interface PopoverProps {
   open: boolean;
@@ -27,17 +20,16 @@ export function Popover(props: PopoverProps) {
   let panel: HTMLDivElement | undefined;
   const [position, setPosition] = createSignal({ top: 0, left: 0 });
 
-  const place = () => {
+  const place = (width: number, align: "start" | "end" | undefined) => {
     const anchor = props.anchor;
     if (!anchor) return;
 
     const rect = anchor.getBoundingClientRect();
-    const width = props.width ?? 280;
     const spaceBelow = window.innerHeight - rect.bottom;
     const height = panel?.offsetHeight ?? 0;
     const below = spaceBelow < height + 16 && rect.top > height + 16;
     const left = Math.min(
-      Math.max(8, props.align === "end" ? rect.right - width : rect.left),
+      Math.max(8, align === "end" ? rect.right - width : rect.left),
       Math.max(8, window.innerWidth - width - 8),
     );
     const top = below
@@ -47,17 +39,18 @@ export function Popover(props: PopoverProps) {
     setPosition({ top, left });
   };
 
-  createEffect(() => {
-    if (!props.open) return;
-    // Reading the anchor keeps this in sync when a ref is (re)assigned.
-    const anchor = props.anchor;
-    if (!anchor) return;
-    place();
-    const frame = requestAnimationFrame(place);
-    onCleanup(() => cancelAnimationFrame(frame));
-  });
+  createEffect(
+    () => [props.open, props.anchor, props.width, props.align] as const,
+    ([open, anchor, width, align]) => {
+      if (!open || !anchor) return;
+      const measure = () => place(width ?? 280, align);
+      measure();
+      const frame = requestAnimationFrame(measure);
+      return () => cancelAnimationFrame(frame);
+    },
+  );
 
-  onMount(() => {
+  onSettled(() => {
     const onPointerDown = (event: MouseEvent) => {
       if (!props.open) return;
       const target = event.target as Node | null;
@@ -71,26 +64,26 @@ export function Popover(props: PopoverProps) {
       props.onClose();
     };
     const reposition = () => {
-      if (props.open) place();
+      if (props.open) place(props.width ?? 280, props.align);
     };
 
     window.addEventListener("mousedown", onPointerDown, true);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", reposition);
     window.addEventListener("scroll", reposition, true);
-    onCleanup(() => {
+    return () => {
       window.removeEventListener("mousedown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", reposition);
       window.removeEventListener("scroll", reposition, true);
-    });
+    };
   });
 
   return (
     <Show when={props.open}>
       <Portal>
         <div
-          ref={panel}
+          ref={(el) => (panel = el)}
           class="panel fixed z-[60] p-2 shadow-[var(--sp-shadow)]"
           style={{
             top: `${position().top}px`,

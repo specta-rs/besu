@@ -1,5 +1,5 @@
-import type { JSX } from "solid-js";
-import { ChevronLeft, ChevronRight } from "lucide-solid";
+import type { JSX } from "@solidjs/web";
+import { ChevronLeft, ChevronRight } from "../../lib/icons";
 
 export interface PaginationProps {
   total: number;

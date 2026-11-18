@@ -1,9 +1,9 @@
-import { For, type JSX, Show, onCleanup, onMount } from "solid-js";
-import { Portal } from "solid-js/web";
-import { X } from "lucide-solid";
+import { For, Show, onSettled } from "solid-js";
+import { Portal, type JSX } from "@solidjs/web";
+import { X } from "./icons";
 
 function useEscape(onClose: () => void) {
-  onMount(() => {
+  onSettled(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopPropagation();
@@ -11,7 +11,7 @@ function useEscape(onClose: () => void) {
       }
     };
     window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
+    return () => window.removeEventListener("keydown", onKey);
   });
 }
 

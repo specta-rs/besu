@@ -1,4 +1,4 @@
-import { For, Index, Show, createMemo } from "solid-js";
+import { For, Show, createMemo } from "solid-js";
 import { cellText } from "../../lib/format";
 import type { Json } from "../../lib/types";
 
@@ -10,33 +10,36 @@ import type { Json } from "../../lib/types";
  */
 
 function CellValue(props: { value: Json }) {
-  const value = props.value;
-
-  if (value === null) {
-    return <span class="text-[12px] text-ink-3 italic">NULL</span>;
-  }
-  if (typeof value === "boolean") {
-    return (
-      <span class="inline-flex h-[17px] items-center rounded border border-line bg-panel-2 px-1.5 font-mono text-[10px] text-ink-2">
-        {value ? "true" : "false"}
-      </span>
-    );
-  }
-  if (typeof value === "object") {
-    return (
-      <span
-        class="block max-w-[560px] truncate text-ink-2"
-        title={JSON.stringify(value)}
-      >
-        {cellText(value)}
-      </span>
-    );
-  }
-
   return (
-    <span class="block max-w-[560px] truncate" title={String(value)}>
-      {String(value)}
-    </span>
+    <Show
+      when={props.value !== null}
+      fallback={<span class="text-[12px] text-ink-3 italic">NULL</span>}
+    >
+      <Show
+        when={typeof props.value === "boolean"}
+        fallback={
+          <Show
+            when={typeof props.value === "object"}
+            fallback={
+              <span class="block max-w-[560px] truncate" title={String(props.value)}>
+                {String(props.value)}
+              </span>
+            }
+          >
+            <span
+              class="block max-w-[560px] truncate text-ink-2"
+              title={JSON.stringify(props.value)}
+            >
+              {cellText(props.value)}
+            </span>
+          </Show>
+        }
+      >
+        <span class="inline-flex h-[17px] items-center rounded border border-line bg-panel-2 px-1.5 font-mono text-[10px] text-ink-2">
+          {props.value ? "true" : "false"}
+        </span>
+      </Show>
+    </Show>
   );
 }
 
@@ -68,17 +71,19 @@ export function ResultGrid(props: { columns: string[]; rows: Json[][] }) {
             >
               #
             </th>
-            <Index each={props.columns}>
+            <For each={props.columns} keyed={false}>
               {(column, columnIndex) => (
                 <th
                   scope="col"
-                  class="h-8 border-b border-line px-2.5 text-left text-[11px] font-medium whitespace-nowrap text-ink-2"
-                  classList={{ "text-right": numeric()[columnIndex] === true }}
+                  class={[
+                    "h-8 border-b border-line px-2.5 text-left text-[11px] font-medium whitespace-nowrap text-ink-2",
+                    { "text-right": numeric()[columnIndex] === true },
+                  ]}
                 >
                   {column()}
                 </th>
               )}
-            </Index>
+            </For>
             <th scope="col" class="h-8 w-full border-b border-line" aria-hidden="true" />
           </tr>
         </thead>
@@ -89,7 +94,7 @@ export function ResultGrid(props: { columns: string[]; rows: Json[][] }) {
               <tr>
                 <td
                   class="px-3 py-6 text-center text-[12px] text-ink-3"
-                  colSpan={props.columns.length + 2}
+                  colspan={props.columns.length + 2}
                 >
                   No rows returned.
                 </td>
@@ -102,18 +107,21 @@ export function ResultGrid(props: { columns: string[]; rows: Json[][] }) {
                   <td class="h-7 border-b border-line/60 px-2 text-right align-middle text-[10px] text-ink-3 tabular-nums">
                     {rowIndex() + 1}
                   </td>
-                  <Index each={props.columns}>
+                  <For each={props.columns} keyed={false}>
                     {(_, columnIndex) => (
                       <td
-                        class="h-7 border-b border-line/60 px-2.5 align-middle"
-                        classList={{
-                          "text-right tabular-nums": numeric()[columnIndex] === true,
-                        }}
+                        class={[
+                          "h-7 border-b border-line/60 px-2.5 align-middle",
+                          {
+                            "text-right tabular-nums":
+                              numeric()[columnIndex] === true,
+                          },
+                        ]}
                       >
                         <CellValue value={row[columnIndex] ?? null} />
                       </td>
                     )}
-                  </Index>
+                  </For>
                   <td class="border-b border-line/60" aria-hidden="true" />
                 </tr>
               )}
