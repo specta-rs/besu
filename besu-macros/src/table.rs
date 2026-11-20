@@ -1391,30 +1391,39 @@ impl Codegen {
             quote!(pub #ident: #besu::Set<#ty>)
         });
 
-        let required: Vec<&&Column> = writable
+        let insert_bindings: Vec<_> = writable
             .iter()
-            .filter(|column| !column.nullable && !column.auto_increment && column.default.is_none())
+            .enumerate()
+            .map(|(index, column)| {
+                (!column.nullable && !column.auto_increment && column.default.is_none())
+                    .then(|| format_ident!("__besu_insert_arg_{index}", span = Span::mixed_site()))
+            })
             .collect();
 
         // Required arguments accept anything convertible into the column's type, so
         // `users.insert("a@example.com", "Oscar", 21)` works without `.into()` noise.
-        let required_args = required.iter().map(|column| {
-            let ident = &column.ident;
-            let ty = &column.ty;
-            quote!(#ident: impl ::core::convert::Into<#ty>)
-        });
-
-        let insert_initialisers = writable.iter().map(|column| {
-            let ident = &column.ident;
-            if required
+        // Use separate bindings so a column named like the table handle is not parsed as
+        // a constant pattern.
+        let required_args =
+            writable
                 .iter()
-                .any(|required| required.ident == column.ident)
-            {
-                quote!(#ident: #besu::Set::Value(#ident.into()))
-            } else {
-                quote!(#ident: #besu::Set::Unset)
-            }
-        });
+                .zip(&insert_bindings)
+                .filter_map(|(column, binding)| {
+                    let binding = binding.as_ref()?;
+                    let ty = &column.ty;
+                    Some(quote!(#binding: impl ::core::convert::Into<#ty>))
+                });
+
+        let insert_initialisers = writable
+            .iter()
+            .zip(&insert_bindings)
+            .map(|(column, binding)| {
+                let ident = &column.ident;
+                match binding {
+                    Some(binding) => quote!(#ident: #besu::Set::Value(#binding.into())),
+                    None => quote!(#ident: #besu::Set::Unset),
+                }
+            });
 
         let setters = writable.iter().map(|column| {
             let ident = &column.ident;
