@@ -588,8 +588,10 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         }
     }
 
-    /// Insert many rows, splitting them across statements so no single statement exceeds the
-    /// database's parameter limit.
+    /// Insert many rows, splitting them across statements of at most `rows_per_statement`
+    /// rows (or one row if it is zero). Choose a size within the database's parameter limit.
+    ///
+    /// Rows already added with `value` or `values` are inserted before the supplied rows.
     ///
     /// Returns what each statement reported. The batches are **not** atomic — wrap the call in
     /// [`Database::transaction`](crate::Database::transaction) if all of them must succeed or
@@ -601,14 +603,15 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         rows_per_statement: usize,
     ) -> Result<Vec<E::Output>, ErrorOf<E>> {
         let prefix = self.exec.table_prefix();
-        let mut exec = self.exec;
-        let stride = self.query.stride();
+        let (mut exec, mut base) = self.into_parts();
+        let stride = base.stride();
         // One flat buffer for the whole iterator, drained one statement at a time. Building
         // a row at a time and pushing it into a `VecDeque` allocated per row for no reason:
         // nothing here needs to revisit a value.
         let values = values.into_iter();
         let (rows, _) = values.size_hint();
-        let mut pending = Vec::with_capacity(rows.saturating_mul(stride));
+        let mut pending = core::mem::take(&mut base.values);
+        pending.reserve(rows.saturating_mul(stride));
         for value in values {
             value.write_values(&mut pending);
         }
@@ -617,10 +620,10 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
         let per_statement = rows_per_statement.max(1).saturating_mul(stride.max(1));
         let mut outputs = Vec::new();
         loop {
-            let mut query = InsertQuery::new(self.query.table, self.query.columns);
-            query.conflict = self.query.conflict.clone();
-            query.row_alias = self.query.row_alias;
-            query.comment = self.query.comment.clone();
+            let mut query = InsertQuery::new(base.table, base.columns);
+            query.conflict = base.conflict.clone();
+            query.row_alias = base.row_alias;
+            query.comment = base.comment.clone();
             query.values.reserve(per_statement);
             for _ in 0..per_statement {
                 match pending.next() {
