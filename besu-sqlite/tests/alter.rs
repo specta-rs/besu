@@ -491,6 +491,133 @@ async fn rebuilding_a_parent_table_does_not_disturb_its_children() {
 }
 
 #[tokio::test]
+async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_rebuild_parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_rebuild_parent VALUES (1, 'Ada')"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE VIEW sqlx_rebuild_parent_view AS SELECT name FROM sqlx_rebuild_parent"
+    ))
+    .await
+    .unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired.table_mut("sqlx_rebuild_parent").unwrap().columns[1].nullable = true;
+    let err = db.push_schema(&desired).await.unwrap_err();
+    assert!(err.to_string().contains("error in view"), "{err}");
+
+    let table_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM sqlx_rebuild_parent"))
+        .all()
+        .await
+        .unwrap();
+    let view_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM sqlx_rebuild_parent_view"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(table_rows, ["Ada"]);
+    assert_eq!(view_rows, ["Ada"]);
+    let current = db.introspect().await.unwrap();
+    assert!(
+        !current
+            .table("sqlx_rebuild_parent")
+            .unwrap()
+            .column("name")
+            .unwrap()
+            .nullable
+    );
+    assert!(current.table("sqlx_rebuild_parent__besu_tmp").is_none());
+}
+
+#[tokio::test]
+async fn cancelling_a_rebuild_cannot_return_a_connection_with_foreign_keys_off() {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let dir = tempfile::tempdir().unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(dir.path().join("cancel-rebuild.db"))
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    let db = besu::Database::new(Sqlx::from_pool(pool.clone()));
+    db.execute(sql!("CREATE TABLE cancel_rebuild (name TEXT NOT NULL)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO cancel_rebuild VALUES ('Ada')"))
+        .await
+        .unwrap();
+    let mut desired = db.introspect().await.unwrap();
+    desired.table_mut("cancel_rebuild").unwrap().columns[0].nullable = true;
+
+    let (copying, started) = tokio::sync::oneshot::channel();
+    let (release, waiting) = std::sync::mpsc::channel();
+    {
+        let mut copying = Some(copying);
+        let mut connection = pool.acquire().await.unwrap();
+        connection
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(move |update| {
+                if update.table == "cancel_rebuild__besu_tmp"
+                    && let Some(copying) = copying.take()
+                {
+                    let _ = copying.send(());
+                    let _ = waiting.recv_timeout(std::time::Duration::from_secs(5));
+                }
+            });
+    }
+
+    let task = tokio::spawn(async move { db.push_schema(&desired).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    release.send(()).unwrap();
+
+    let db = besu::Database::new(Sqlx::from_pool(pool));
+    let foreign_keys: Vec<i64> = db.execute(sql!("PRAGMA foreign_keys")).all().await.unwrap();
+    assert_eq!(foreign_keys, [1]);
+    let rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM cancel_rebuild"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, ["Ada"]);
+    let current = db.introspect().await.unwrap();
+    assert!(
+        !current
+            .table("cancel_rebuild")
+            .unwrap()
+            .column("name")
+            .unwrap()
+            .nullable
+    );
+    let scratch = db
+        .execute(sql!(
+            "SELECT name FROM sqlite_master WHERE name = 'cancel_rebuild__besu_tmp'"
+        ))
+        .first::<String>()
+        .await
+        .unwrap();
+    assert_eq!(scratch, None);
+}
+
+#[tokio::test]
 async fn a_rebuild_keeps_its_foreign_key_toggle_on_one_connection() {
     // A file database pools several connections, which is how the foreign-key pragma could
     // end up applied to a different connection than the `DROP TABLE` it is meant to protect.

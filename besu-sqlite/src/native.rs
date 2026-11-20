@@ -40,6 +40,7 @@ use rusqlite::{
 };
 
 use crate::SQLite;
+use crate::ddl::split_rebuild;
 
 /// Everything the native SQLite driver can fail with.
 ///
@@ -394,27 +395,51 @@ fn worker(connection: Connection, receiver: mpsc::Receiver<Request>) {
                 let _ = reply.send(result);
             }
             Request::Statements { statements, reply } => {
-                let mut result = Ok(());
-                for statement in &statements {
-                    // `execute_batch` is the API that leaves a `PRAGMA` free to change the
-                    // connection state the next statement sees, which is why the table
-                    // rebuild can turn foreign keys off and back on in one request.
-                    if let Err(err) = connection.execute_batch(statement) {
-                        // A rebuild switches enforcement off at its start and on at its end.
-                        // A statement that fails in between would leave the connection with
-                        // foreign keys off for the rest of its life, silently accepting
-                        // every violation, so restore the state every connection opens with
-                        // before replying. The two statements are independent, so the
-                        // original error is the one worth reporting.
-                        let _ = connection.execute_batch("PRAGMA foreign_keys = ON");
-                        result = Err(err.into());
-                        break;
-                    }
-                }
-                let _ = reply.send(result);
+                let _ = reply.send(run_schema_statements(
+                    &connection,
+                    &statements,
+                    open.is_some(),
+                ));
             }
         }
     }
+}
+
+fn run_schema_statements(
+    connection: &Connection,
+    mut statements: &[String],
+    transaction_open: bool,
+) -> Result<(), NativeError> {
+    while let Some((statement, rest)) = statements.split_first() {
+        if let Some((body, rest)) = split_rebuild(statements) {
+            if transaction_open || !connection.is_autocommit() {
+                return Err(NativeError::Core(Error::invalid_query(
+                    "a SQLite schema rebuild cannot run inside an open transaction",
+                )));
+            }
+            let foreign_keys: bool =
+                connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            connection.pragma_update(None, "foreign_keys", false)?;
+            let result = (|| {
+                let transaction = rusqlite::Transaction::new_unchecked(
+                    connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )?;
+                for statement in body {
+                    transaction.execute_batch(statement)?;
+                }
+                transaction.commit()
+            })();
+            // The transaction has committed or dropped (and rolled back) before this PRAGMA.
+            let restore = connection.pragma_update(None, "foreign_keys", foreign_keys);
+            result.and(restore)?;
+            statements = rest;
+        } else {
+            connection.execute_batch(statement)?;
+            statements = rest;
+        }
+    }
+    Ok(())
 }
 
 fn stale_transaction() -> NativeError {

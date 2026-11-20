@@ -985,6 +985,89 @@ async fn a_failed_rebuild_restores_foreign_keys_and_can_be_retried() {
     assert!(leftover.is_empty(), "{leftover:?}");
 }
 
+#[tokio::test]
+async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_rebuild_parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO native_rebuild_parent VALUES (1, 'Ada')"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "CREATE VIEW native_rebuild_parent_view AS SELECT name FROM native_rebuild_parent"
+    ))
+    .await
+    .unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired.table_mut("native_rebuild_parent").unwrap().columns[1].nullable = true;
+    let err = db.push_schema(&desired).await.unwrap_err();
+    assert!(err.to_string().contains("error in view"), "{err}");
+
+    let table_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM native_rebuild_parent"))
+        .all()
+        .await
+        .unwrap();
+    let view_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM native_rebuild_parent_view"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(table_rows, ["Ada"]);
+    assert_eq!(view_rows, ["Ada"]);
+    let current = db.introspect().await.unwrap();
+    assert!(
+        !current
+            .table("native_rebuild_parent")
+            .unwrap()
+            .column("name")
+            .unwrap()
+            .nullable
+    );
+    assert!(current.table("native_rebuild_parent__besu_tmp").is_none());
+}
+
+#[tokio::test]
+async fn a_rebuild_refuses_to_run_inside_a_callers_transaction() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE rebuild_in_transaction (name TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired.table_mut("rebuild_in_transaction").unwrap().columns[0].nullable = true;
+    db.transaction(async |tx| {
+        tx.execute(sql!("INSERT INTO rebuild_in_transaction VALUES ('Ada')"))
+            .await?;
+        assert!(db.push_schema(&desired).await.is_err());
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM rebuild_in_transaction"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, ["Ada"]);
+    let current = db.introspect().await.unwrap();
+    assert!(
+        !current
+            .table("rebuild_in_transaction")
+            .unwrap()
+            .column("name")
+            .unwrap()
+            .nullable
+    );
+}
+
 /// A rebuild performs a declared rename by copying the old column into the new one. Selecting
 /// the new name from the old table dropped the column from the copy, so its values became the
 /// new column's default instead of the data.
