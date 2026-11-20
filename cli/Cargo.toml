@@ -17,6 +17,8 @@ workspace = true
 [[bin]]
 name = "besu"
 path = "src/main.rs"
+# The library already owns target/doc/besu; the CLI is documented in its README.
+doc = false
 
 [dependencies]
 besu = { workspace = true, features = ["derive", "migrate"] }
