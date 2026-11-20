@@ -1597,14 +1597,13 @@ fn default_to_sql(value: DefaultValue) -> String {
 /// — that would make adding or removing `DEFAULT ''` invisible to the differ.
 pub fn normalise_default(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
-    let unquoted = value
+    if let Some(inner) = value
         .strip_prefix('\'')
-        .and_then(|value| value.strip_suffix('\''));
-    let value = match unquoted {
-        Some(inner) => inner.replace("''", "'"),
-        None => value.to_owned(),
-    };
-    let lowered = value.to_ascii_lowercase();
+        .and_then(|value| value.strip_suffix('\''))
+        .filter(|inner| inner.split("''").all(|part| !part.contains('\'')))
+    {
+        return Some(inner.replace("''", "'"));
+    }
     // MySQL reports the precision the column's type gives a keyword default
     // (`CURRENT_TIMESTAMP(6)` on a `DATETIME(6)`), while a declaration cannot spell one. The
     // precision is already compared as part of the type, so folding it here is what keeps
@@ -1623,10 +1622,11 @@ pub fn normalise_default(value: Option<&str>) -> Option<String> {
         }
         None
     }
-    if let Some(keyword) = keyword(&lowered) {
+    if let Some(keyword) = keyword(&value.to_ascii_lowercase()) {
         return Some(keyword.into());
     }
-    Some(lowered)
+    // Other defaults can contain literal data, including within an expression.
+    Some(value.to_owned())
 }
 
 /// Fold a default against the column's type.
@@ -1639,7 +1639,7 @@ fn normalise_default_for(ty: &TypeDef, value: Option<&str>) -> Option<String> {
     if !matches!(ty, TypeDef::Bool) {
         return Some(normalised);
     }
-    Some(match normalised.as_str() {
+    Some(match normalised.to_ascii_lowercase().as_str() {
         "true" | "1" | "t" => "1".to_owned(),
         "false" | "0" | "f" => "0".to_owned(),
         _ => normalised,
