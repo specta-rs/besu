@@ -21,6 +21,7 @@ pub struct Fragment {
     sql: Cow<'static, str>,
     args: Vec<Value>,
     placeholders: Placeholders,
+    error: Option<Error>,
 }
 
 /// Where a fragment's placeholders came from.
@@ -46,6 +47,7 @@ impl Fragment {
             sql: sql.into(),
             args: Vec::new(),
             placeholders: Placeholders::Rewrite,
+            error: None,
         }
     }
 
@@ -55,6 +57,7 @@ impl Fragment {
             sql: sql.into(),
             args,
             placeholders: Placeholders::Rewrite,
+            error: None,
         }
     }
 
@@ -99,6 +102,7 @@ impl Fragment {
         };
         self.sql.to_mut().push_str(&other.sql);
         self.args.extend(other.args);
+        self.error = self.error.take().or(other.error);
     }
 
     /// The raw SQL text, with the source dialect's `?` placeholders.
@@ -114,6 +118,11 @@ impl Fragment {
     /// Render for a specific dialect.
     #[track_caller]
     pub fn render<D: Dialect>(&self) -> Sql<D> {
+        if let Some(error) = &self.error {
+            let mut out = Sql::<D>::raw(self.sql.clone());
+            out.set_error(error.clone());
+            return out;
+        }
         // A statement a builder already rendered has its placeholders numbered, so rewriting
         // them would corrupt the text. It is valid only for the dialect that produced it.
         match self.placeholders {
@@ -202,18 +211,20 @@ impl<D: Dialect> From<Sql<D>> for Fragment
 where
     D::Value: Into<Value>,
 {
-    /// Keep a finished statement as a fragment, placeholders and all.
+    /// Keep a statement as a fragment, including placeholders and any build error.
     ///
     /// Every shipped dialect uses [`Value`] as its parameter type, so this is lossless. The
     /// text is *not* re-rendered: it already carries the dialect's placeholders and the
     /// driver's statement suffix, and [`Fragment::render`] refuses to hand it to another
     /// dialect.
     fn from(sql: Sql<D>) -> Self {
+        let error = sql.error().cloned();
         let (text, args) = sql.into_parts();
         Self {
             sql: Cow::Owned(text),
             args: args.into_iter().map(Into::into).collect(),
             placeholders: Placeholders::Rendered(D::NAME),
+            error,
         }
     }
 }
