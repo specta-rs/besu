@@ -42,19 +42,15 @@ impl SQLiteDdl {
         // A column the declaration renamed is copied from its old name: the rebuild is what
         // performs the rename, so selecting the new name from the old table would fail to
         // find it and lose the column's values.
-        let columns: Vec<(String, String)> = desired
+        let columns: Vec<(&Column, &Column)> = desired
             .columns
             .iter()
             .filter(|column| column.generated.is_none())
             .filter_map(|column| {
-                if current.column(&column.name).is_some() {
-                    return Some((self.quote(&column.name), self.quote(&column.name)));
-                }
-                let previous = column.renamed_from.as_deref()?;
                 current
-                    .column(previous)
-                    .is_some()
-                    .then(|| (self.quote(&column.name), self.quote(previous)))
+                    .column(&column.name)
+                    .or_else(|| current.column(column.renamed_from.as_deref()?))
+                    .map(|source| (column, source))
             })
             .collect();
 
@@ -64,18 +60,46 @@ impl SQLiteDdl {
         if !columns.is_empty() {
             let target = columns
                 .iter()
-                .map(|(target, _)| target.as_str())
+                .map(|(target, _)| self.quote(&target.name))
                 .collect::<Vec<_>>()
                 .join(", ");
             let source = columns
                 .iter()
-                .map(|(_, source)| source.as_str())
+                .map(|(_, source)| self.quote(&source.name))
                 .collect::<Vec<_>>()
                 .join(", ");
             statements.push(format!(
                 "INSERT INTO {} ({target}) SELECT {source} FROM {}",
                 self.quote_table(&temporary.qualified_name()),
                 self.quote_table(&desired.qualified_name()),
+            ));
+        }
+
+        if columns.iter().any(|(target, source)| {
+            target.primary_key
+                && target.auto_increment
+                && source.primary_key
+                && source.auto_increment
+        }) {
+            // Copying rows only records the largest surviving ID. Transfer any higher
+            // sequence before DROP deletes the old entry; RENAME will carry it forward.
+            let schema = self.quote(temporary.schema.as_deref().unwrap_or("main"));
+            let sequence = format!("{schema}.sqlite_sequence");
+            // sqlite_sequence stores unqualified table names as text, not identifiers.
+            let quote_name = |name: &str| format!("'{}'", name.replace('\'', "''"));
+            let old_name = quote_name(&current.name);
+            let temporary_name = quote_name(&temporary.name);
+            statements.push(format!(
+                "UPDATE {sequence} SET seq = max(seq, coalesce(\
+                 (SELECT seq FROM {sequence} WHERE name = {old_name}), seq)) \
+                 WHERE name = {temporary_name}"
+            ));
+            // An empty copy may not have made a sequence entry. No UNIQUE constraint on
+            // sqlite_sequence.name means this cannot be expressed as an upsert.
+            statements.push(format!(
+                "INSERT INTO {sequence} (name, seq) \
+                 SELECT {temporary_name}, seq FROM {sequence} WHERE name = {old_name} \
+                 AND NOT EXISTS (SELECT 1 FROM {sequence} WHERE name = {temporary_name})"
             ));
         }
 
@@ -537,6 +561,32 @@ mod tests {
         assert_eq!(
             SQLiteDdl.create_table(&table()),
             r#"CREATE TABLE "memberships" ("user_id" INTEGER NOT NULL, CONSTRAINT "memberships_user_key" UNIQUE ("user_id"))"#
+        );
+    }
+
+    #[test]
+    fn a_rebuild_does_not_transfer_the_sequence_to_a_different_key() {
+        let mut current = table();
+        current.columns[0].primary_key = true;
+        current.columns[0].auto_increment = true;
+        let mut other = current.columns[0].clone();
+        other.name = "other_id".into();
+        other.primary_key = false;
+        other.auto_increment = false;
+        current.columns.push(other);
+
+        let mut desired = current.clone();
+        desired.columns[0].primary_key = false;
+        desired.columns[0].auto_increment = false;
+        desired.columns[1].primary_key = true;
+        desired.columns[1].auto_increment = true;
+
+        let statements = SQLiteDdl.rebuild_table(&current, &desired);
+        assert!(
+            !statements
+                .iter()
+                .any(|statement| statement.contains("sqlite_sequence")),
+            "{statements:?}"
         );
     }
 

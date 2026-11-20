@@ -220,6 +220,94 @@ async fn rebuilding_an_empty_table_copies_nothing() {
 }
 
 #[tokio::test]
+async fn rebuilding_preserves_autoincrement_after_deleting_the_highest_id() {
+    for (before_rebuild, expected) in [
+        ("DELETE FROM users WHERE id = 2", 3),
+        ("DELETE FROM users", 3),
+        // UPDATE can raise a rowid without advancing sqlite_sequence; copying it does.
+        ("UPDATE users SET id = 10 WHERE id = 2", 11),
+    ] {
+        let db = besu::Database::new(Sqlx::memory().await.unwrap());
+        db.push([v1::users.def()]).await.unwrap();
+        db.execute(sql!(
+            "INSERT INTO users (name, email, age, bio) VALUES ('Alice', 'a', 30, ''), ('Bob', 'b', 31, '')"
+        ))
+        .await
+        .unwrap();
+        db.execute(besu::Fragment::new(before_rebuild))
+            .await
+            .unwrap();
+
+        db.push([v2::users.def()]).await.unwrap();
+        let sequence = db
+            .execute(sql!("SELECT seq FROM sqlite_sequence WHERE name = 'users'"))
+            .first::<i64>()
+            .await
+            .unwrap();
+        assert_eq!(sequence, Some(expected - 1), "{before_rebuild}");
+
+        let id = db
+            .execute(sql!(
+                "INSERT INTO users (name, email, age) VALUES ('Charlie', 'c', '32') RETURNING id"
+            ))
+            .first::<i64>()
+            .await
+            .unwrap();
+        assert_eq!(id, Some(expected), "{before_rebuild}");
+    }
+}
+
+#[tokio::test]
+async fn rebuilding_preserves_the_sequence_of_a_qualified_renamed_key() {
+    use besu::SchemaDriver;
+    use besu::schema::{Ddl, Schema, Table, diff_with};
+    use besu_sqlite::SQLiteDdl;
+
+    let driver = Sqlx::memory().await.unwrap();
+    let db = besu::Database::new(driver.clone());
+    let mut old = Table::from_def(v1::users.def());
+    let mut new = Table::from_def(v2::users.def());
+    for table in [&mut old, &mut new] {
+        table.schema = Some("a\"ux".into());
+        table.name = "user's\"rows".into();
+        table.indexes.clear();
+    }
+    let key = new.columns.iter_mut().find(|c| c.primary_key).unwrap();
+    key.name = "new_id".into();
+    key.renamed_from = Some("id".into());
+
+    driver
+        .execute_statements(&[
+            r#"ATTACH DATABASE ':memory:' AS "a""ux""#.into(),
+            r#"CREATE TABLE "user's""rows" (id INTEGER PRIMARY KEY AUTOINCREMENT)"#.into(),
+            r#"INSERT INTO "user's""rows" (id) VALUES (99)"#.into(),
+            SQLiteDdl.create_table(&old),
+            r#"INSERT INTO "a""ux"."user's""rows" (id, name, email, age, bio) VALUES (4, 'Alice', 'a', 30, '')"#.into(),
+            r#"DELETE FROM "a""ux"."user's""rows""#.into(),
+        ])
+        .await
+        .unwrap();
+
+    // SQLite introspection only discovers tables in main, so supply the two schemas to DDL.
+    let mut current = Schema::new();
+    current.tables.push(old);
+    let mut desired = Schema::new();
+    desired.tables.push(new);
+    let changes = diff_with(&current, &desired, &|ty| SQLiteDdl.normalise_type(ty));
+    let statements = SQLiteDdl.apply_with(&changes, &current, &desired);
+    driver.execute_statements(&statements).await.unwrap();
+
+    let id = db
+        .execute(sql!(
+            r#"INSERT INTO "a""ux"."user's""rows" (name, email, age) VALUES ('Bob', 'b', '31') RETURNING new_id"#
+        ))
+        .first::<i64>()
+        .await
+        .unwrap();
+    assert_eq!(id, Some(5));
+}
+
+#[tokio::test]
 async fn a_rebuild_absorbs_the_other_changes_for_the_same_table() {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
     db.push([v1::users.def()]).await.unwrap();
