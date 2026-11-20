@@ -42,7 +42,7 @@
 use core::marker::PhantomData;
 
 use alloc::borrow::Cow;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use besu_core::{ColumnDef, Error, Executor};
 
@@ -66,6 +66,8 @@ use crate::types::{Column, ColumnWitness, Nullability, SqlType, TypeWitness};
 pub struct Cte<R> {
     /// The name the `WITH` clause gives the expression.
     name: &'static str,
+    /// Clones share an identity; a separately built expression does not.
+    identity: Arc<()>,
     /// The expression's definition: a `SELECT` or a compound query.
     body: QueryBody,
     /// The columns the expression produces, in order.
@@ -86,6 +88,7 @@ impl<R> Clone for Cte<R> {
     fn clone(&self) -> Self {
         Self {
             name: self.name,
+            identity: self.identity.clone(),
             body: self.body.clone(),
             columns: self.columns.clone(),
             named_columns: self.named_columns,
@@ -116,6 +119,7 @@ impl<R: 'static> Cte<R> {
     ) -> Self {
         Self {
             name,
+            identity: Arc::new(()),
             body,
             columns,
             named_columns,
@@ -156,16 +160,16 @@ impl<R: 'static> Cte<R> {
         let mut with = self.prerequisites.clone().unwrap_or(WithClause {
             recursive: false,
             entries: Vec::new(),
+            error: None,
         });
-        if with.entries.iter().all(|entry| entry.name != self.name) {
-            with.entries.push(CteEntry {
-                name: self.name,
-                columns: self.columns.clone(),
-                named_columns: self.named_columns,
-                body: self.body.clone(),
-                error: self.error.clone(),
-            });
-        }
+        with.push_entry(CteEntry {
+            name: self.name,
+            identity: self.identity.clone(),
+            columns: self.columns.clone(),
+            named_columns: self.named_columns,
+            body: self.body.clone(),
+            error: self.error.clone(),
+        });
         with
     }
 
@@ -270,6 +274,7 @@ impl<R: 'static> Cte<R> {
     ) -> SetQuery<'a, E, (Cte<R>,), R> {
         let Self {
             name,
+            identity,
             body,
             columns,
             named_columns,
@@ -288,6 +293,7 @@ impl<R: 'static> Cte<R> {
         // statement reads the definition back out and every branch sees the name.
         body.set_root(CteRoot {
             name,
+            identity,
             columns,
             named_columns,
         });

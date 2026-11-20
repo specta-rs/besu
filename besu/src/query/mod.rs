@@ -22,7 +22,7 @@ pub use update::{Update, UpdateReturning};
 
 pub(crate) use cte::validate_cte;
 
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 
 use besu_core::{ColumnDef, Dialect, Sql, TableDef};
 
@@ -364,27 +364,64 @@ pub struct WithClause {
     /// the statement means is worth the flag.
     pub(crate) recursive: bool,
     pub(crate) entries: Vec<CteEntry>,
+    pub(crate) error: Option<besu_core::Error>,
 }
 
 impl WithClause {
-    fn push(&mut self, mut other: WithClause) {
+    fn push(&mut self, other: WithClause) {
         self.recursive |= other.recursive;
-        for entry in other.entries.drain(..) {
-            if self
-                .entries
-                .iter()
-                .all(|existing| existing.name != entry.name)
-            {
-                self.entries.push(entry);
+        self.error = self.error.take().or(other.error);
+        for entry in other.entries {
+            self.push_entry(entry);
+        }
+    }
+
+    fn push_entry(&mut self, entry: CteEntry) {
+        match self
+            .entries
+            .iter()
+            .find(|existing| existing.name == entry.name)
+        {
+            None => self.entries.push(entry),
+            Some(existing) if Arc::ptr_eq(&existing.identity, &entry.identity) => {}
+            Some(_) => {
+                self.error
+                    .get_or_insert_with(|| cte_name_conflict(entry.name));
             }
         }
     }
+
+    fn remove_root_reference(&mut self, root: &CteRoot) {
+        self.entries.retain(|entry| {
+            if entry.name != root.name {
+                return true;
+            }
+            if !Arc::ptr_eq(&entry.identity, &root.identity) {
+                self.error
+                    .get_or_insert_with(|| cte_name_conflict(root.name));
+            }
+            false
+        });
+    }
+
+    fn record_error<D: Dialect>(&self, out: &mut Sql<D>) {
+        if let Some(error) = self.error.clone() {
+            out.set_error(error);
+        }
+    }
+}
+
+fn cte_name_conflict(name: &str) -> besu_core::Error {
+    besu_core::Error::invalid_query(alloc::format!(
+        "different common table expressions use the name `{name}` in one WITH clause"
+    ))
 }
 
 /// One named expression in a `WITH` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CteEntry {
     pub(crate) name: &'static str,
+    pub(crate) identity: Arc<()>,
     pub(crate) columns: Cow<'static, [ColumnDef]>,
     /// Whether the `WITH` definition spells the output column names explicitly.
     pub(crate) named_columns: bool,
@@ -401,6 +438,7 @@ pub(crate) struct CteEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CteRoot {
     pub(crate) name: &'static str,
+    pub(crate) identity: Arc<()>,
     pub(crate) columns: Cow<'static, [ColumnDef]>,
     /// Whether the `WITH` definition spells the output column names explicitly.
     pub(crate) named_columns: bool,
@@ -444,6 +482,7 @@ pub(crate) fn render_with<D: Dialect>(out: &mut Sql<D>, with: &mut Option<WithCl
     let Some(with) = with else {
         return;
     };
+    with.record_error(out);
     if with.entries.is_empty() {
         return;
     }
@@ -602,7 +641,7 @@ impl SelectQuery {
         }
     }
 
-    /// Merge a `WITH` clause into this statement's, keeping the first entry of each name.
+    /// Merge another `WITH` clause, deduplicating repeated uses of the same definition.
     pub(crate) fn push_with(&mut self, with: WithClause) {
         match &mut self.with {
             Some(existing) => existing.push(with),

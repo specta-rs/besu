@@ -1819,6 +1819,45 @@ fn several_common_table_expressions_render_in_order() {
     assert_eq!(text.matches(r#""adults" AS"#).count(), 1, "{text}");
 }
 
+#[test]
+fn distinct_ctes_with_the_same_name_are_rejected() {
+    let db = dry::<TestDialect>();
+    let first = db.select(users).filter(users.age.eq(18)).cte("people");
+    let second = db.select(users).filter(users.age.eq(21)).cte("people");
+
+    let merged = db.from(&first).union_all(db.from(&second));
+    assert!(matches!(
+        merged.to_sql().unwrap().finish(),
+        Err(Error::InvalidQuery(message)) if message.contains("people")
+    ));
+
+    let dependent = db
+        .from(&first)
+        .pick(first.column(users.id))
+        .cte_named("people", ("id", Int8));
+    assert!(matches!(
+        db.from(&dependent).to_sql().unwrap().finish(),
+        Err(Error::InvalidQuery(message)) if message.contains("people")
+    ));
+
+    let recursive = first.clone().union_all(db.from(&second));
+    assert!(matches!(
+        recursive.to_sql().unwrap().finish(),
+        Err(Error::InvalidQuery(message)) if message.contains("people")
+    ));
+}
+
+#[test]
+fn cloned_ctes_share_one_definition() {
+    let db = dry::<TestDialect>();
+    let first = db.select(users).filter(users.age.eq(18)).cte("people");
+    let clone = first.clone();
+    let merged = db.from(&first).union_all(db.from(&clone));
+    let sql = merged.to_sql().unwrap().finish().unwrap();
+    assert_eq!(sql.sql().matches("\"people\" AS (").count(), 1);
+    assert_eq!(sql.args(), &[Value::Int(18)]);
+}
+
 /// A set query takes a comment in the same place, after the compound's own clauses.
 #[test]
 fn a_set_query_carries_its_comment() {
