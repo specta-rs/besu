@@ -137,10 +137,9 @@ impl Ddl for PostgresDdl {
 
     /// PostgreSQL can change a column in place, so only the parts that differ are emitted.
     ///
-    /// Primary key and `UNIQUE` changes are not expressed here because they are *table*
-    /// constraints; they need an explicit migration rather than an `ALTER COLUMN`. A
-    /// generated column is the exception to "change it in place": its expression cannot be
-    /// altered portably, and it holds no data of its own, so it is dropped and added.
+    /// Primary key changes still need an explicit migration. Single-column `UNIQUE` is
+    /// changed as a table constraint. A generated column's expression cannot be altered
+    /// portably, so the column is dropped and added.
     fn alter_column(&self, table: &str, from: &Column, to: &Column) -> Vec<String> {
         if from.generated != to.generated {
             return vec![
@@ -193,6 +192,14 @@ impl Ddl for PostgresDdl {
                 statements.push(format!(
                     "ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY"
                 ));
+            }
+        }
+
+        if from.unique != to.unique {
+            if to.unique {
+                statements.push(format!("ALTER TABLE {table} ADD UNIQUE ({column})"));
+            } else {
+                statements.push(drop_column_unique(&table, &to.name));
             }
         }
 
@@ -403,6 +410,36 @@ impl Ddl for PostgresDdl {
     fn drop_sequence(&self, name: &str) -> Vec<String> {
         vec![format!("DROP SEQUENCE {}", self.quote_table(name))]
     }
+}
+
+fn drop_column_unique(table: &str, column: &str) -> String {
+    // The column flag does not carry a name. Match the exact set of constrained columns
+    // under the same lock used to drop the constraint, and never guess if it is ambiguous.
+    let relation = escape_string_literal(table);
+    let column = escape_string_literal(column);
+    let body = format!(
+        "DECLARE
+            constraint_name text;
+         BEGIN
+            LOCK TABLE ONLY {table} IN ACCESS EXCLUSIVE MODE;
+            SELECT pg_catalog.min(c.conname::text) INTO constraint_name
+            FROM pg_catalog.pg_constraint c
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid
+            WHERE c.conrelid = {relation}::pg_catalog.regclass
+              AND c.contype = 'u' AND c.conkey = ARRAY[a.attnum] AND a.attname = {column}
+            HAVING count(*) = 1 AND pg_catalog.bool_and(c.conparentid = 0 AND c.coninhcount = 0);
+            IF constraint_name IS NULL THEN
+                RAISE SQLSTATE '0A000' USING MESSAGE =
+                    'cannot identify a single local UNIQUE constraint for the column; use an explicit migration';
+            END IF;
+            EXECUTE pg_catalog.format('ALTER TABLE ONLY %s DROP CONSTRAINT %I', {relation}, constraint_name);
+         END;"
+    );
+    format!("DO {}", escape_string_literal(&body))
+}
+
+fn escape_string_literal(text: &str) -> String {
+    format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 /// Whether an expression has the form `name(...)`, which PostgreSQL accepts as an index key
