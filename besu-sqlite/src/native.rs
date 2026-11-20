@@ -1273,8 +1273,10 @@ fn decode_julian(value: f64) -> Option<chrono::DateTime<chrono::FixedOffset>> {
         return None;
     }
 
-    let seconds = timestamp.trunc() as i64;
-    let nanos = (timestamp.fract() * 1e9).abs() as u32;
+    // Chrono expects the fractional nanoseconds to be measured from the whole second below.
+    let seconds = timestamp.floor();
+    let nanos = ((timestamp - seconds) * 1e9) as u32;
+    let seconds = seconds as i64;
     chrono::DateTime::from_timestamp(seconds, nanos)
         .map(|datetime| chrono::Utc.fix().from_utc_datetime(&datetime.naive_utc()))
 }
