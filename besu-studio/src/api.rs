@@ -54,18 +54,22 @@ pub(crate) async fn schema(State(state): State<AppState>) -> Result<Json<Schema>
 /// The readable name of the database a connection string points at.
 ///
 /// A URL names its database in its last non-empty path segment, so
-/// `sqlite:///tmp/app.db` is `app.db` and `postgres://user@host/app` is `app`. A DSN such
-/// as `host=… dbname=app` has no path to read, so the whole (already redacted) string is
-/// shown; that is still more useful than nothing.
+/// `sqlite:///tmp/app.db` is `app.db` and `postgres://user@host/app` is `app`. A bare
+/// path is treated the same way, with either separator, so a Windows
+/// `sqlite://C:\data\app.db` is also `app.db`. A DSN such as `host=… dbname=app` has no
+/// path to read, so the whole (already redacted) string is shown; that is still more useful
+/// than nothing.
 fn database_label(connection: &str) -> &str {
-    let Some((_, rest)) = connection.split_once("://") else {
-        return connection;
-    };
+    let rest = connection
+        .split_once("://")
+        .map_or(connection, |(_, rest)| rest);
 
     // A password or an SSL option may contain a slash, so drop the query before splitting.
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
 
-    let Some(segment) = rest.rsplit('/').find(|segment| !segment.is_empty()) else {
+    // Windows paths in a connection string use backslashes, including the ones that follow
+    // `sqlite://`.
+    let Some(segment) = rest.rsplit(['/', '\\']).find(|segment| !segment.is_empty()) else {
         return connection;
     };
 
@@ -478,6 +482,8 @@ fn bind_json<D: Dialect>(sql: &mut Sql<D>, ty: &TypeDef, value: &Value) {
 fn json_text(value: &Value, ty: &TypeDef) -> Option<String> {
     match value {
         Value::Null => None,
+        // A string in a JSON column is a document, so it needs its JSON quotes and escapes.
+        value if matches!(ty, TypeDef::Json | TypeDef::Jsonb) => Some(value.to_string()),
         Value::Bool(value) => Some(match ty {
             TypeDef::Bool => if *value { "1" } else { "0" }.to_owned(),
             _ => value.to_string(),
@@ -1294,6 +1300,9 @@ mod tests {
         assert_eq!(database_label("sqlite://app.db"), "app.db");
         assert_eq!(database_label("postgres://besu@localhost:5432/app"), "app");
         assert_eq!(database_label("mysql://root@127.0.0.1/db?ssl=true"), "db");
+        // A SQLite file is a path, and Windows spells one with backslashes.
+        assert_eq!(database_label("sqlite://C:\\data\\app.db"), "app.db");
+        assert_eq!(database_label(r"C:\data\app.db"), "app.db");
 
         // A DSN has no path to read, so it is shown whole.
         assert_eq!(

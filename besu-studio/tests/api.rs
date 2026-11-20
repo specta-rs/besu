@@ -231,6 +231,52 @@ async fn a_view_is_read_through_a_probe() {
 }
 
 #[tokio::test]
+async fn a_json_string_round_trips_as_a_valid_json_document() {
+    let fixture = fixture().await;
+    let app = &fixture.app;
+    let response = post_json(
+        app,
+        "/api/query",
+        json!({"sql": "CREATE TABLE documents (id INTEGER PRIMARY KEY, payload JSON, label TEXT)"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let uri = "/api/tables/documents/rows";
+    let response = post_json(
+        app,
+        uri,
+        json!({"values": {"id": 1, "payload": "a string", "label": "a string"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = get_json(app, uri).await;
+    assert_eq!(page["rows"], json!([[1, "a string", "a string"]]));
+
+    let response = request_json(
+        app,
+        Method::PATCH,
+        uri,
+        json!({"key": {"id": 1}, "values": {"payload": page["rows"][0][1]}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // An invalid document can still look like a string in the grid, so check what was stored.
+    let response = post_json(
+        app,
+        "/api/query",
+        json!({"sql": "SELECT json_valid(payload) AS valid, payload, label FROM documents"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(response).await["rows"],
+        json!([["1", "\"a string\"", "a string"]])
+    );
+}
+
+#[tokio::test]
 async fn insert_update_and_delete_round_trip() {
     let fixture = fixture().await;
     assert_eq!(users(&fixture.app).await.len(), 3);
