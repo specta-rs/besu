@@ -1,4 +1,4 @@
-use crate::Driver;
+use crate::{Driver, Error};
 
 /// Decode a value, or a whole row, from a query result.
 ///
@@ -30,16 +30,19 @@ impl<D: Driver, T: Decode<D>> Decode<D> for Option<T> {
 
     fn decode(row: &D::Row, offset: &mut usize) -> Result<Self, D::Error> {
         let start = *offset;
-        let mut all_null = true;
-        for index in start..start + T::COLUMNS {
-            if !D::is_null(row, index) {
-                all_null = false;
-                break;
-            }
-        }
+        let len = D::row_len(row);
+        let end = start
+            .checked_add(T::COLUMNS)
+            .filter(|&end| end <= len)
+            .ok_or_else(|| {
+                D::error(Error::decode(
+                    start.max(len),
+                    "the row has no column at this position",
+                ))
+            })?;
 
-        if all_null {
-            *offset += T::COLUMNS;
+        if (start..end).all(|index| D::is_null(row, index)) {
+            *offset = end;
             Ok(None)
         } else {
             T::decode(row, offset).map(Some)
