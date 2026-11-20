@@ -1449,6 +1449,29 @@ mod tests {
     }
 
     #[test]
+    fn changing_only_the_case_of_a_text_default_alters_the_column() {
+        let text_default = |value: &str| {
+            let mut label = column("label", TypeDef::Text);
+            label.default = Some(value.into());
+            schema(vec![table("tags", vec![label])])
+        };
+
+        for (before, after) in [
+            ("'abc'", "'ABC'"),
+            ("'now()'", "'NOW()'"),
+            ("concat('a', 'b')", "concat('A', 'b')"),
+        ] {
+            assert!(
+                matches!(
+                    diff(&text_default(before), &text_default(after)).as_slice(),
+                    [Change::AlterColumn { .. }]
+                ),
+                "{before} and {after} are different defaults"
+            );
+        }
+    }
+
+    #[test]
     fn a_boolean_default_folds_the_numeric_spelling() {
         // MySQL stores a `BOOL` default as `0`/`1` whatever the declaration wrote, while the
         // declaration renders `FALSE`/`TRUE`. Without folding the pair, every push reports
