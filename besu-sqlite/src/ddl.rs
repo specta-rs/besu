@@ -3,6 +3,27 @@ use besu_schema::{Change, Check, Column, Ddl, Index, Schema, Table};
 
 use crate::{REBUILD_SUFFIX, SQLite};
 
+pub(crate) const REBUILD_FOREIGN_KEYS_OFF: &str = "PRAGMA foreign_keys = OFF";
+pub(crate) const REBUILD_BEGIN: &str = "BEGIN IMMEDIATE";
+pub(crate) const REBUILD_COMMIT: &str = "COMMIT";
+pub(crate) const REBUILD_FOREIGN_KEYS_ON: &str = "PRAGMA foreign_keys = ON";
+
+/// Split a generated rebuild at the head of the plan into its transaction body and the rest
+/// of the plan. Drivers recognise the whole envelope so they only clean up their own work.
+#[cfg(any(feature = "native", feature = "sqlx"))]
+pub(crate) fn split_rebuild(statements: &[String]) -> Option<(&[String], &[String])> {
+    let [off, begin, rest @ ..] = statements else {
+        return None;
+    };
+    if off != REBUILD_FOREIGN_KEYS_OFF || begin != REBUILD_BEGIN {
+        return None;
+    }
+    let end = rest
+        .windows(2)
+        .position(|pair| pair[0] == REBUILD_COMMIT && pair[1] == REBUILD_FOREIGN_KEYS_ON)?;
+    Some((&rest[..end], &rest[end + 2..]))
+}
+
 /// DDL generation for SQLite.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SQLiteDdl;
@@ -20,13 +41,11 @@ impl SQLiteDdl {
         let mut statements = vec![
             // `DROP TABLE` would fail while another table's foreign key points at this
             // one, and with an `ON DELETE CASCADE` it would delete the child rows instead.
-            // Enforcement is therefore off for the whole rebuild. SQLite ignores this
-            // pragma inside a transaction, and `Database::push` executes statements one at
-            // a time without opening one, so the setting takes effect.
-            "PRAGMA foreign_keys = OFF".to_owned(),
-            // A rebuild that failed after this point left the temporary table behind, and
-            // creating it again would then be the error the next push reports. It is always
-            // this rebuild's own scratch table, so whatever is there is a leftover copy.
+            // SQLite ignores changes to foreign_keys inside a transaction. Turn it off
+            // first, then keep the copy, drop and rename in one transaction.
+            REBUILD_FOREIGN_KEYS_OFF.to_owned(),
+            REBUILD_BEGIN.to_owned(),
+            // Clean up a scratch table left behind by a previously non-transactional rebuild.
             format!(
                 "DROP TABLE IF EXISTS {}",
                 self.quote_table(&temporary.qualified_name())
@@ -104,9 +123,9 @@ impl SQLiteDdl {
         }
 
         statements.push(self.drop_table(&desired.qualified_name()));
-        // `PRAGMA legacy_alter_table` is not needed: the old table is gone before this
-        // rename, so there are no references to the temporary name to rewrite. The new name
-        // cannot be schema-qualified; the table stays where it already is.
+        // The new name cannot be schema-qualified; the table stays where it already is.
+        // SQLite may reject the rename if a view still refers to the old table. The
+        // transaction lets the driver restore the original table and its rows in that case.
         statements.push(format!(
             "ALTER TABLE {} RENAME TO {}",
             self.quote_table(&temporary.qualified_name()),
@@ -120,7 +139,8 @@ impl SQLiteDdl {
             statements.push(self.create_index(&desired.qualified_name(), index));
         }
 
-        statements.push("PRAGMA foreign_keys = ON".to_owned());
+        statements.push(REBUILD_COMMIT.to_owned());
+        statements.push(REBUILD_FOREIGN_KEYS_ON.to_owned());
         statements
     }
 }

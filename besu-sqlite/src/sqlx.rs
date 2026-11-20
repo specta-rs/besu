@@ -6,12 +6,16 @@ use besu_core::{
 };
 use sqlx::{
     Arguments, Column as _, Row, Sqlite, SqlitePool,
+    pool::PoolConnection,
     sqlite::{
         SqliteArguments, SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult, SqliteRow,
     },
 };
 
 use crate::SQLite;
+use crate::ddl::{
+    REBUILD_BEGIN, REBUILD_COMMIT, REBUILD_FOREIGN_KEYS_OFF, REBUILD_FOREIGN_KEYS_ON, split_rebuild,
+};
 
 /// A [`besu_core::Driver`] for SQLite, backed by [`sqlx`].
 ///
@@ -273,22 +277,84 @@ impl besu::SchemaDriver for Sqlx {
     /// SQLite's table rebuild toggles `PRAGMA foreign_keys`, which applies to the connection
     /// that ran it. Through a pool, the `DROP TABLE` would otherwise land on a connection
     /// that still has foreign keys enabled and cascade into child rows.
-    async fn execute_statements(&self, statements: &[String]) -> Result<(), Self::Error> {
+    async fn execute_statements(&self, mut statements: &[String]) -> Result<(), Self::Error> {
         let mut connection = self.pool.acquire().await?;
-        for statement in statements {
-            if let Err(err) = sqlx::query(statement).execute(&mut *connection).await {
-                // A rebuild switches enforcement off at its start and on at its end. A
-                // statement that fails in between would otherwise hand the connection back
-                // to the pool with foreign keys off, silently accepting every violation.
-                // Every connection opens with them on, so that is the state to restore.
-                let _ = sqlx::query("PRAGMA foreign_keys = ON")
-                    .execute(&mut *connection)
-                    .await;
-                return Err(err);
+        while let Some((statement, rest)) = statements.split_first() {
+            if let Some((body, rest)) = split_rebuild(statements) {
+                run_rebuild(&mut connection, body).await?;
+                statements = rest;
+            } else {
+                sqlx::query(statement).execute(&mut *connection).await?;
+                statements = rest;
             }
         }
         Ok(())
     }
+}
+
+/// Quarantine a pooled connection when cancellation interrupts the rebuild or its cleanup.
+/// Closing the connection rolls back any open transaction; a successful cleanup reuses it.
+struct RebuildConnection<'a> {
+    connection: &'a mut PoolConnection<Sqlite>,
+    close_on_drop: bool,
+}
+
+impl Drop for RebuildConnection<'_> {
+    fn drop(&mut self) {
+        if self.close_on_drop {
+            self.connection.close_on_drop();
+        }
+    }
+}
+
+impl RebuildConnection<'_> {
+    async fn execute(&mut self, statement: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(statement)
+            .execute(&mut **self.connection)
+            .await?;
+        Ok(())
+    }
+}
+
+async fn run_rebuild(
+    connection: &mut PoolConnection<Sqlite>,
+    statements: &[String],
+) -> Result<(), sqlx::Error> {
+    let foreign_keys: bool = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&mut **connection)
+        .await?;
+    let mut guard = RebuildConnection {
+        connection,
+        close_on_drop: true,
+    };
+    guard.execute(REBUILD_FOREIGN_KEYS_OFF).await?;
+    let result = match guard.execute(REBUILD_BEGIN).await {
+        Ok(()) => {
+            let result = async {
+                for statement in statements {
+                    guard.execute(statement).await?;
+                }
+                guard.execute(REBUILD_COMMIT).await
+            }
+            .await;
+            // Only roll back a transaction we successfully opened. A failed BEGIN could
+            // mean a caller already opened one, which is not ours to roll back.
+            if result.is_err() && guard.execute("ROLLBACK").await.is_err() {
+                return result;
+            }
+            result
+        }
+        Err(err) => Err(err),
+    };
+    let restore = guard
+        .execute(if foreign_keys {
+            REBUILD_FOREIGN_KEYS_ON
+        } else {
+            REBUILD_FOREIGN_KEYS_OFF
+        })
+        .await;
+    guard.close_on_drop = restore.is_err();
+    result.and(restore)
 }
 
 impl TransactionDriver for Sqlx {
