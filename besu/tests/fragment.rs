@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use besu::{Dialect, Error, Fragment, Sql, TypeDef, Value};
+use besu::{Dialect, Error, Fragment, Sql, TypeDef, Value, sql};
 use besu_core::{Placeholder, UpsertStyle};
 
 struct Numbered;
@@ -39,4 +39,24 @@ fn a_fragment_keeps_the_error_from_a_rendered_statement() {
     let mut fragment = Fragment::from(Sql::<Numbered>::raw("EXPLAIN "));
     fragment.push(Fragment::from(invalid));
     assert_eq!(fragment.render::<Numbered>().finish().unwrap_err(), error);
+}
+
+#[test]
+fn appending_rendered_numbered_fragments_refuses_duplicate_indexes() {
+    let left = sql!("SELECT ?", 1).render::<Numbered>();
+    let right = sql!(" UNION ALL SELECT ?", 2).render::<Numbered>();
+    let mut fragment = Fragment::from(left.clone());
+    fragment.push(Fragment::from(right.clone()));
+
+    assert!(fragment.render::<Numbered>().finish().is_err());
+
+    // Composing before conversion is supported: Sql::append shifts the indexes.
+    let mut composed = left;
+    composed.append(right);
+    let rendered = Fragment::from(composed)
+        .render::<Numbered>()
+        .finish()
+        .unwrap();
+    assert_eq!(rendered.sql(), "SELECT $1 UNION ALL SELECT $2");
+    assert_eq!(rendered.args().len(), 2);
 }

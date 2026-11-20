@@ -11,7 +11,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use besu_core::{Dialect, Error, Sql, Value};
+use besu_core::{Dialect, Error, Placeholder, Sql, Value};
 
 /// A raw SQL statement with its parameters.
 ///
@@ -35,7 +35,10 @@ enum Placeholders {
     /// `?` placeholders, rewritten at render time.
     Rewrite,
     /// Already rendered by the named dialect.
-    Rendered(&'static str),
+    Rendered {
+        dialect: &'static str,
+        multiple_parameter_lists: bool,
+    },
     /// Two fragments that could not be joined were joined anyway.
     Mixed,
 }
@@ -92,12 +95,28 @@ impl Fragment {
     /// cannot be glued to one that is already rendered, because the latter's placeholders are
     /// numbered and the former's are not; joining them records an error at render time rather
     /// than producing SQL that happens to parse.
+    ///
+    /// If both fragments are already rendered with numbered parameters, combine the original
+    /// statements with [`Sql::append`] before converting them to a fragment. It shifts the
+    /// indexes in the second statement; this method reports an error instead.
     pub fn push(&mut self, other: Fragment) {
         self.placeholders = match (&self.placeholders, &other.placeholders) {
             (Placeholders::Rewrite, Placeholders::Rewrite) => Placeholders::Rewrite,
-            (Placeholders::Rendered(a), Placeholders::Rendered(b)) if a == b => {
-                Placeholders::Rendered(a)
-            }
+            (
+                Placeholders::Rendered {
+                    dialect: a,
+                    multiple_parameter_lists: left,
+                },
+                Placeholders::Rendered {
+                    dialect: b,
+                    multiple_parameter_lists: right,
+                },
+            ) if a == b => Placeholders::Rendered {
+                dialect: a,
+                multiple_parameter_lists: *left
+                    || *right
+                    || (!self.args.is_empty() && !other.args.is_empty()),
+            },
             _ => Placeholders::Mixed,
         };
         self.sql.to_mut().push_str(&other.sql);
@@ -126,7 +145,7 @@ impl Fragment {
         // A statement a builder already rendered has its placeholders numbered, so rewriting
         // them would corrupt the text. It is valid only for the dialect that produced it.
         match self.placeholders {
-            Placeholders::Rendered(name) if name != D::NAME => {
+            Placeholders::Rendered { dialect: name, .. } if name != D::NAME => {
                 let mut out = Sql::<D>::raw(self.sql.clone());
                 out.set_error(Error::unsupported(alloc::format!(
                     "this statement was rendered for `{name}` and cannot be re-rendered for \
@@ -145,8 +164,18 @@ impl Fragment {
                 ));
                 return out;
             }
-            Placeholders::Rendered(_) => {
+            Placeholders::Rendered {
+                multiple_parameter_lists,
+                ..
+            } => {
                 let mut out = Sql::<D>::raw(self.sql.clone());
+                if multiple_parameter_lists && D::PLACEHOLDER != Placeholder::Question {
+                    out.set_error(Error::unsupported(
+                        "appending rendered fragments would reuse numbered parameters; \
+                         combine the original statements with Sql::append instead",
+                    ));
+                    return out;
+                }
                 for arg in &self.args {
                     out.push_arg(arg.clone());
                 }
@@ -223,7 +252,10 @@ where
         Self {
             sql: Cow::Owned(text),
             args: args.into_iter().map(Into::into).collect(),
-            placeholders: Placeholders::Rendered(D::NAME),
+            placeholders: Placeholders::Rendered {
+                dialect: D::NAME,
+                multiple_parameter_lists: false,
+            },
             error,
         }
     }
