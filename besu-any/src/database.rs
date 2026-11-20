@@ -199,9 +199,11 @@ impl AnyDatabase {
         Ok(match self {
             Self::Sqlite(db) => {
                 let out = db.execute(fragment).await?;
+                let rows_affected = out.rows_affected();
                 AnyOutput {
-                    rows_affected: out.rows_affected(),
-                    last_insert_id: generated_key
+                    rows_affected,
+                    // An ignored insert leaves the previous connection-local rowid intact.
+                    last_insert_id: (generated_key && rows_affected != 0)
                         .then(|| u64::try_from(out.last_insert_rowid()).ok())
                         .flatten(),
                 }
@@ -387,6 +389,38 @@ mod tests {
 
         // A bare file path has no scheme at all, which is equally unsupported.
         assert!(backend_for_url("app.db").is_err());
+    }
+
+    #[test]
+    fn an_ignored_sqlite_insert_has_no_last_insert_id() {
+        sqlx::test_block_on(async {
+            use super::{AnyDatabase, AnyOutput};
+            use besu::sql;
+
+            let driver = besu_sqlite::Sqlx::memory().await.expect("open SQLite");
+            let db = AnyDatabase::Sqlite(besu::Database::new(driver));
+            db.execute(sql!(
+                "CREATE TABLE ignored_insert_rows (id INTEGER PRIMARY KEY, name TEXT UNIQUE)"
+            ))
+            .await
+            .expect("create the table");
+
+            let first = db
+                .execute(sql!(
+                    "INSERT INTO ignored_insert_rows (name) VALUES ('first')"
+                ))
+                .await
+                .expect("insert the first row");
+            assert_eq!(first.last_insert_id, Some(1));
+
+            let ignored = db
+                .execute(sql!(
+                    "INSERT OR IGNORE INTO ignored_insert_rows (name) VALUES ('first')"
+                ))
+                .await
+                .expect("ignore the duplicate");
+            assert_eq!(ignored, AnyOutput::default());
+        });
     }
 
     #[test]
