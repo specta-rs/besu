@@ -149,16 +149,19 @@ impl SetParts {
     /// the name back out, which is what lets the definition refer to itself.
     pub(crate) fn set_root(&mut self, root: CteRoot) {
         // The definition itself is written from `root`, so an entry of the same name that
-        // arrived from a branch must not be written a second time.
+        // refers to the same expression must not be written a second time.
         if let Some(with) = &mut self.with {
-            with.entries.retain(|entry| entry.name != root.name);
+            with.remove_root_reference(&root);
             with.recursive = true;
         }
         self.root = Some(root);
     }
 
-    /// Merge a `WITH` clause into this statement's, keeping the first entry of each name.
-    pub(crate) fn push_with(&mut self, with: WithClause) {
+    /// Merge another `WITH` clause, deduplicating repeated uses of the same definition.
+    pub(crate) fn push_with(&mut self, mut with: WithClause) {
+        if let Some(root) = &self.root {
+            with.remove_root_reference(root);
+        }
         match &mut self.with {
             Some(existing) => existing.push(with),
             None => self.with = Some(with),
@@ -186,6 +189,10 @@ impl SetParts {
         // Taken out of `self` so that the branches can be borrowed mutably while the
         // definition's name is still in hand.
         let root = self.root.take();
+
+        if let Some(with) = &self.with {
+            with.record_error(out);
+        }
 
         if root.is_some()
             || self
