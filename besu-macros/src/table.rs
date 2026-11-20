@@ -4,7 +4,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitStr, Result, Token, Type,
-    parse::Parse, spanned::Spanned,
+    Visibility, parse::Parse, spanned::Spanned,
 };
 
 /// Resolve the path to the `besu` crate, so generated code keeps working when the
@@ -95,6 +95,7 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     Ok(Codegen {
         besu,
         struct_ident,
+        visibility: input.vis,
         table_name,
         schema: table_attrs.schema,
         indexes: table_attrs.indexes,
@@ -1153,6 +1154,7 @@ fn reference_action(
 struct Codegen {
     besu: TokenStream,
     struct_ident: Ident,
+    visibility: Visibility,
     table_name: LitStr,
     schema: Option<LitStr>,
     indexes: Vec<IndexDecl>,
@@ -1174,6 +1176,24 @@ impl Codegen {
         let table_struct_ident = &self.table_struct_ident;
         let insert_struct_ident = &self.insert_struct_ident;
         let table_name = &self.table_name;
+        let visibility = &self.visibility;
+        // Re-exports live alongside the model, but the items themselves are one module
+        // deeper. Rebase relative visibility without widening it.
+        let child_visibility = match visibility {
+            Visibility::Inherited => quote!(pub(super)),
+            Visibility::Restricted(vis) if vis.path.is_ident("self") => quote!(pub(super)),
+            Visibility::Restricted(vis)
+                if vis
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|segment| segment.ident == "super") =>
+            {
+                let path = &vis.path;
+                quote!(pub(in super::#path))
+            }
+            _ => quote!(#visibility),
+        };
 
         let schema = match &self.schema {
             Some(schema) => quote!(Some(#schema)),
@@ -1531,7 +1551,7 @@ impl Codegen {
                 use super::*;
 
                 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                pub struct #table_struct_ident {
+                #child_visibility struct #table_struct_ident {
                     #(#handle_fields,)*
                 }
 
@@ -1565,13 +1585,13 @@ impl Codegen {
                 }
 
                 /// The table handle for this table.
-                pub const #handle_ident: #table_struct_ident = #table_struct_ident {
+                #child_visibility const #handle_ident: #table_struct_ident = #table_struct_ident {
                     #(#handle_init,)*
                 };
 
                 /// A new row to insert.
                 #[derive(Debug, Clone, Default)]
-                pub struct #insert_struct_ident {
+                #child_visibility struct #insert_struct_ident {
                     #(#insert_fields,)*
                 }
 
@@ -1633,7 +1653,8 @@ impl Codegen {
                 }
             }
 
-            pub use #module_ident::{#handle_ident, #insert_struct_ident, #table_struct_ident};
+            #[allow(unused_imports)]
+            #visibility use #module_ident::{#handle_ident, #insert_struct_ident, #table_struct_ident};
         }
     }
 }
