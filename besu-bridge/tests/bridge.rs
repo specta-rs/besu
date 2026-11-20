@@ -489,6 +489,18 @@ fn a_parameter_survives_the_wire_and_the_server_rebuild() {
     }
 }
 
+#[test]
+fn the_server_prepares_distinct_sql_for_distinct_postgres_parameter_types() {
+    let integer = Request::query("SELECT $1::text", vec![BridgeValue::Int(1)])
+        .to_sql::<Postgres>()
+        .expect("integer request rebuilds");
+    let text = Request::query("SELECT $1::text", vec![BridgeValue::Text("one".to_owned())])
+        .to_sql::<Postgres>()
+        .expect("text request rebuilds");
+
+    assert_ne!(integer.sql(), text.sql());
+}
+
 /// The same value, decoded straight back from its wire form rather than through a statement,
 /// and a placeholder reading for a second dialect so the rebuild is not PostgreSQL-only.
 #[test]

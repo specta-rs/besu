@@ -24,8 +24,8 @@ use crate::BridgeValue;
 ///
 /// There is one thing a wrapper cannot forward: [`Dialect::write_statement_suffix`]. A
 /// PostgreSQL pool uses it to keep two statements with the same text but different parameter
-/// types out of one prepared-statement cache entry. A bridge request is prepared on its own,
-/// so there is no cache to protect and the suffix is omitted.
+/// types out of one prepared-statement cache entry. The client omits the suffix; the server
+/// adds it in [`Request::to_sql`](crate::Request::to_sql) after binding through its dialect.
 ///
 /// ```ignore
 /// use besu_bridge::{Bridge, BridgeDialect};

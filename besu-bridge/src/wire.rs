@@ -380,7 +380,7 @@ impl Request {
         for param in &self.params {
             sql.push_arg(param.clone().into_value()?);
         }
-        sql.finish()
+        sql.seal().finish()
     }
 }
 
