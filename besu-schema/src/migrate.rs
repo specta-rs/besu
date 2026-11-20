@@ -103,7 +103,7 @@ pub struct AppliedMigration {
 pub enum MigrationError<E> {
     /// The database rejected a statement.
     Driver(E),
-    /// The database refused to report its migration history.
+    /// The runner could not safely perform the migration.
     Core(besu_core::Error),
     /// A previously applied migration has been edited since it ran.
     ChecksumMismatch {
@@ -295,6 +295,7 @@ impl Migrator {
                 continue;
             }
 
+            check_migration_statements::<E>(migration.version, &migration.statements)?;
             for statement in &migration.statements {
                 let sql = Sql::<besu_core::executor::DialectOf<E>>::raw(statement.clone());
                 match exec.execute(&sql).await {
@@ -402,6 +403,7 @@ impl Migrator {
         };
 
         verify_checksums::<ErrorOf<E>>(&record, migration)?;
+        check_migration_statements::<E>(record.version, statements)?;
 
         // Down statements run from the bottom of the file up, mirroring the order the up
         // file applies them in.
@@ -420,6 +422,92 @@ impl Migrator {
 
         Ok(record)
     }
+}
+
+/// SQLite ignores changes to foreign-key enforcement inside a transaction. In a table
+/// rebuild, the subsequent DROP can therefore cascade into other tables. Even outside a
+/// transaction, an executor backed by a pool cannot promise the same connection throughout.
+fn check_migration_statements<E: Executor>(
+    version: i64,
+    statements: &[String],
+) -> Result<(), MigrationError<ErrorOf<E>>> {
+    use besu_core::Dialect;
+
+    if <besu_core::DialectOf<E> as Dialect>::NAME == "sqlite"
+        && statements
+            .iter()
+            .any(|statement| disables_sqlite_foreign_keys(statement))
+    {
+        return Err(MigrationError::Core(besu_core::Error::unsupported(
+            format!(
+                "SQLite migration {version} disables foreign_keys, but SQLite ignores that setting \
+                 inside a transaction. Rewrite the migration to keep foreign_keys enabled, or run \
+                 the rebuild separately on a dedicated connection with foreign_keys disabled \
+                 before beginning the transaction and run PRAGMA foreign_key_check before committing."
+            ),
+        )));
+    }
+    Ok(())
+}
+
+fn disables_sqlite_foreign_keys(mut statement: &str) -> bool {
+    // Recognise both PRAGMA foreign_keys = OFF and PRAGMA main.foreign_keys(OFF).
+    // SQLite allows comments between tokens and quoting pragma names and values.
+    fn token<'a>(statement: &mut &'a str) -> Option<&'a str> {
+        loop {
+            *statement =
+                statement.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+            if let Some(comment) = statement.strip_prefix("/*") {
+                *statement = comment.split_once("*/")?.1;
+            } else if let Some(comment) = statement.strip_prefix("--") {
+                *statement = comment.split_once('\n')?.1;
+            } else {
+                break;
+            }
+        }
+        let first = statement.chars().next()?;
+        let end = match first {
+            '(' | ')' | '=' | '.' | ';' => 1,
+            '\'' | '"' | '`' => statement[1..].find(first)? + 2,
+            '[' => statement[1..].find(']')? + 2,
+            _ => statement
+                .find(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, '(' | ')' | '=' | '.' | ';' | '/')
+                })
+                .unwrap_or(statement.len()),
+        };
+        let (token, rest) = statement.split_at(end);
+        *statement = rest;
+        Some(token)
+    }
+
+    if !token(&mut statement).is_some_and(|word| word.eq_ignore_ascii_case("pragma")) {
+        return false;
+    }
+    let mut name = token(&mut statement);
+    let mut separator = token(&mut statement);
+    if separator == Some(".") {
+        name = token(&mut statement);
+        separator = token(&mut statement);
+    }
+    let unquote = |ch| matches!(ch, '\'' | '"' | '`' | '[' | ']');
+    if !name.is_some_and(|name| {
+        name.trim_matches(unquote)
+            .eq_ignore_ascii_case("foreign_keys")
+    }) || !matches!(separator, Some("=" | "("))
+    {
+        return false;
+    }
+    token(&mut statement).is_some_and(|value| {
+        let value = value.trim_matches(unquote).to_ascii_lowercase();
+        // SQLite treats unrecognised boolean values as false, not as an error.
+        !matches!(value.as_str(), "on" | "yes" | "true")
+            && !value.parse::<i64>().is_ok_and(|value| value > 0)
+            && !value
+                .strip_prefix("0x")
+                .and_then(|hex| i64::from_str_radix(hex, 16).ok())
+                .is_some_and(|value| value > 0)
+    })
 }
 
 /// Create the journal if it is missing, then read what has already run, oldest first.
@@ -611,6 +699,27 @@ pub fn split_statements(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognises_sqlite_foreign_key_disable_statements() {
+        for statement in [
+            "PRAGMA foreign_keys = OFF",
+            "pragma main.foreign_keys(0)",
+            "/* rebuild */ PRAGMA /* keep */ [foreign_keys] = 'no'",
+            "pragma \"foreign_keys\"(false)",
+        ] {
+            assert!(disables_sqlite_foreign_keys(statement), "{statement}");
+        }
+        for statement in [
+            "PRAGMA foreign_keys",
+            "PRAGMA foreign_keys = ON",
+            "PRAGMA foreign_keys(1)",
+            "PRAGMA defer_foreign_keys = OFF",
+            "SELECT 'PRAGMA foreign_keys = OFF'",
+        ] {
+            assert!(!disables_sqlite_foreign_keys(statement), "{statement}");
+        }
+    }
 
     #[test]
     fn splits_statements_on_semicolons() {
