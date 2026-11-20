@@ -151,7 +151,10 @@ where
 
     let foreign_keys = db
         .execute(table_query(
-            "SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_NAME, \
+            "SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, \
+             CASE WHEN CAST(k.REFERENCED_TABLE_SCHEMA AS BINARY) = CAST(k.TABLE_SCHEMA AS BINARY) \
+                  THEN k.REFERENCED_TABLE_NAME \
+                  ELSE CONCAT(k.REFERENCED_TABLE_SCHEMA, '.', k.REFERENCED_TABLE_NAME) END, \
              k.REFERENCED_COLUMN_NAME, r.DELETE_RULE, r.UPDATE_RULE \
              FROM information_schema.KEY_COLUMN_USAGE k \
              JOIN information_schema.REFERENTIAL_CONSTRAINTS r \

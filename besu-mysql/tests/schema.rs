@@ -267,6 +267,39 @@ async fn a_user_index_over_foreign_key_columns_is_reported() {
     assert!(db.push_schema(&introspected).await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn a_foreign_key_to_another_database_retains_its_qualified_target() {
+    use besu::schema::Ddl;
+
+    let child_db = fresh("besu_test_fk_cross_child").await;
+    let parent_db = fresh("besu_test_fk_cross_parent").await;
+    parent_db
+        .execute(sql!("CREATE TABLE parents (id BIGINT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    child_db
+        .execute(sql!(
+            "CREATE TABLE children (parent_id BIGINT NOT NULL, \
+             CONSTRAINT children_parent_fk FOREIGN KEY (parent_id) \
+             REFERENCES besu_test_fk_cross_parent.parents (id))"
+        ))
+        .await
+        .unwrap();
+
+    let schema = child_db.introspect().await.unwrap();
+    let children = schema.table("children").unwrap();
+    assert_eq!(
+        children.foreign_keys[0].references_table,
+        "besu_test_fk_cross_parent.parents"
+    );
+    assert!(
+        besu_mysql::MySqlDdl
+            .create_table(children)
+            .contains("REFERENCES `besu_test_fk_cross_parent`.`parents`")
+    );
+    assert!(child_db.push_schema(&schema).await.unwrap().is_empty());
+}
+
 /// Changing the type of a unique column keeps the unique key it already has.
 ///
 /// `MODIFY COLUMN` carries the whole column definition, and MySQL leaves the existing
