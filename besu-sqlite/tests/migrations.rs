@@ -3,7 +3,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
-use besu::schema::Migrator;
+use besu::schema::{Migration, Migrator};
 use besu_sqlite::Sqlx;
 
 #[tokio::test]
@@ -57,6 +57,50 @@ async fn applies_each_migration_once() {
         .await
         .unwrap();
     assert_eq!(rows, [("Oscar".to_string(),)]);
+}
+
+#[tokio::test]
+async fn refuses_to_run_a_sqlite_rebuild_that_disables_foreign_keys() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let mut migrator = Migrator::new();
+    migrator.push(Migration::from_sql(
+        1,
+        "seed",
+        "CREATE TABLE parents (id INTEGER PRIMARY KEY, note TEXT);
+         CREATE TABLE children (
+             id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE
+         );
+         INSERT INTO parents VALUES (1, 'note');
+         INSERT INTO children VALUES (1, 1);",
+    ));
+    db.migrate(&migrator).await.unwrap();
+    migrator.push(Migration::from_sql(
+        2,
+        "rebuild parents",
+        "PRAGMA foreign_keys = OFF;
+         CREATE TABLE parents__besu_tmp (id INTEGER PRIMARY KEY, note TEXT NOT NULL);
+         INSERT INTO parents__besu_tmp SELECT id, note FROM parents;
+         DROP TABLE parents;
+         ALTER TABLE parents__besu_tmp RENAME TO parents;
+         PRAGMA foreign_keys = ON;",
+    ));
+
+    let result = db.migrate(&migrator).await;
+    let children = db
+        .execute(sql!("SELECT id FROM children"))
+        .all::<(i64,)>()
+        .await
+        .unwrap();
+    assert_eq!(
+        children,
+        [(1,)],
+        "the rebuild must not cascade into the child"
+    );
+    assert!(
+        result.unwrap_err().to_string().contains("foreign_keys"),
+        "the error must explain why the rebuild was refused"
+    );
+    assert_eq!(journal_len(&db).await, 1);
 }
 
 #[tokio::test]
