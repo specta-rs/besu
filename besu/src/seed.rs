@@ -897,7 +897,7 @@ macro_rules! string_length_seed {
 string_length_seed!(Char, N);
 string_length_seed!(VarChar, N);
 
-impl<const PRECISION: u8, const SCALE: u8> SeedValue for Decimal<PRECISION, SCALE> {
+impl<const PRECISION: u16, const SCALE: i16> SeedValue for Decimal<PRECISION, SCALE> {
     fn generate(rng: &mut Rng, _column: &SeedColumn) -> String {
         decimal_text(rng, PRECISION, SCALE, None)
     }
@@ -1258,8 +1258,11 @@ fn clamp(text: String, max: Option<usize>) -> String {
 /// value has to stay inside the declaration the schema will enforce. `unique_row` makes the
 /// integer part the row number, which is what keeps a unique decimal column distinct without
 /// abandoning the requested scale.
-fn decimal_text(rng: &mut Rng, precision: u8, scale: u8, unique_row: Option<usize>) -> String {
+fn decimal_text(rng: &mut Rng, precision: u16, scale: i16, unique_row: Option<usize>) -> String {
     let whole_limit = decimal_whole_limit(precision, scale);
+    // A negative scale rounds to tens, hundreds or larger; seed text still needs no
+    // fractional digits for it.
+    let scale = u16::try_from(scale.max(0)).unwrap_or(0);
     let whole = match unique_row {
         // The row number is the discriminator. A type too narrow to hold every row is the
         // same limitation a narrow integer has; the insert reports the collision.
@@ -1290,11 +1293,11 @@ fn decimal_text(rng: &mut Rng, precision: u8, scale: u8, unique_row: Option<usiz
 ///
 /// A precision of zero is a dialect's "unconstrained numeric", so it keeps the old, wider
 /// range instead of collapsing every value to zero.
-fn decimal_whole_limit(precision: u8, scale: u8) -> u64 {
+fn decimal_whole_limit(precision: u16, scale: i16) -> u64 {
     if precision == 0 {
         return 100_000;
     }
-    let digits = usize::from(precision.saturating_sub(scale));
+    let digits = usize::from(precision.saturating_sub(scale.unsigned_abs()));
     if digits == 0 {
         return 1;
     }
@@ -1307,11 +1310,11 @@ mod tests {
     use std::collections::HashSet;
 
     /// A generated decimal must be representable by the declaration it was generated for.
-    fn assert_fits(text: &str, precision: u8, scale: u8) {
+    fn assert_fits(text: &str, precision: u16, scale: i16) {
         let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
         assert_eq!(
             fraction.len(),
-            usize::from(scale),
+            usize::try_from(scale.max(0)).unwrap_or(0),
             "`{text}` has the wrong number of fractional digits for DECIMAL({precision}, {scale})"
         );
         assert!(!whole.is_empty(), "`{text}` has no integer part");
@@ -1320,7 +1323,7 @@ mod tests {
             "`{text}` is not a decimal"
         );
         if precision != 0 {
-            let integer_digits = usize::from(precision.saturating_sub(scale));
+            let integer_digits = usize::from(precision.saturating_sub(scale.unsigned_abs()));
             let bare = whole.trim_start_matches('0');
             assert!(
                 bare.len() <= integer_digits,
@@ -1350,6 +1353,13 @@ mod tests {
                 &SeedColumn::new("amount", row, false),
             );
             assert_fits(&value, 3, 0);
+
+            let value = <Decimal<5, -2> as SeedValue>::generate(
+                &mut rng,
+                &SeedColumn::new("amount", row, false),
+            );
+            assert_fits(&value, 5, -2);
+            assert!(!value.contains('.'), "{value}");
         }
     }
 

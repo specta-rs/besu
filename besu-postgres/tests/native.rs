@@ -1035,6 +1035,41 @@ async fn a_value_that_does_not_match_its_rust_type_is_an_error() {
     );
 }
 
+#[tokio::test]
+async fn array_type_metadata_cannot_inject_sql_into_the_statement_suffix() {
+    let db = database().await;
+    db.execute(besu::Fragment::new(
+        "CREATE TABLE native_comment_secret (secret TEXT)".to_owned(),
+    ))
+    .await
+    .unwrap();
+    db.execute(besu::Fragment::new(
+        "INSERT INTO native_comment_secret VALUES ('dummy secret')".to_owned(),
+    ))
+    .await
+    .unwrap();
+
+    let payload = "x */ UNION SELECT ARRAY[(SELECT secret FROM native_comment_secret)] --";
+    for element in [
+        TypeDef::Text,
+        TypeDef::Custom(payload.into()),
+        TypeDef::Collated(Box::new(TypeDef::Text), "x*/ OR true --".into()),
+    ] {
+        let mut statement = Sql::<besu_postgres::Postgres>::raw("SELECT $1::text[]");
+        statement.push_arg(Value::Array {
+            element,
+            values: vec![Value::Text("visible".into())],
+        });
+        let statement = statement.finish().unwrap().seal();
+        let mut rows = db.stream::<Vec<String>>(&statement).await.unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await {
+            values.push(row.unwrap());
+        }
+        assert_eq!(values, [vec!["visible".to_owned()]]);
+    }
+}
+
 /// A domain is a named type whose values are the base type's values. The column keeps the
 /// domain's name, and the value is written and read through the base type's encoding.
 #[tokio::test]

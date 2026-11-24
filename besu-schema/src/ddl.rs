@@ -2,7 +2,7 @@ use besu_core::{IndexKind, TypeDef, Value};
 
 use crate::{
     Change, Check, Column, Domain, Enum, ForeignKey, Index, IndexColumn, IndexTarget,
-    ReferenceAction, Schema, Sequence, Table, Unique, View, view_body,
+    ReferenceAction, Schema, Sequence, Table, Unique, View, split_qualified_name, view_body,
 };
 
 /// Render a schema as DDL for a particular database.
@@ -20,10 +20,11 @@ pub trait Ddl {
 
     /// Quote a possibly schema-qualified table name.
     fn quote_table(&self, table: &str) -> String {
-        match table.split_once('.') {
-            Some((schema, table)) => format!("{}.{}", self.quote(schema), self.quote(table)),
-            None => self.quote(table),
-        }
+        split_qualified_name(table)
+            .iter()
+            .map(|part| self.quote(part))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// The native type name for a canonical type.
@@ -399,6 +400,14 @@ pub trait Ddl {
         Vec::new()
     }
 
+    /// Statements that reorder an enum's labels.
+    ///
+    /// The default returns nothing; PostgreSQL overrides it by replacing the type while
+    /// retargeting its columns.
+    fn reorder_enum(&self, _from: &Enum, _to: &Enum) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether the dialect has named types that are not part of a column.
     ///
     /// Only PostgreSQL does; MySQL and SQLite render a [`Domain`] as its base type and have
@@ -579,6 +588,7 @@ pub trait Ddl {
             Change::DropEnum { name } => self.drop_enum(name),
             Change::AddEnumValue { name, value } => self.add_enum_value(name, value),
             Change::RemoveEnumValue { name, value } => self.remove_enum_value(name, value),
+            Change::ReorderEnum { from, to, .. } => self.reorder_enum(from, to),
             Change::CreateDomain(domain) => self.create_domain(domain),
             Change::DropDomain { name } => self.drop_domain(name),
             Change::AddColumn { table, column } => vec![self.add_column(table, column)],
@@ -818,6 +828,13 @@ mod tests {
             TestDdl.create_index("users", &index),
             r#"CREATE UNIQUE INDEX "users_email_idx" ON "users" ("email" COLLATE "NOCASE" DESC)"#
         );
+    }
+
+    #[test]
+    fn a_quoted_table_component_keeps_its_literal_dot() {
+        assert_eq!(TestDdl.quote_table(r#""order.items""#), r#""order.items""#);
+        assert_eq!(TestDdl.quote_table(r#""a.b"."c.d""#), r#""a.b"."c.d""#);
+        assert_eq!(TestDdl.quote_table("app.users"), r#""app"."users""#);
     }
 
     fn accounts(checks: Vec<Check>) -> Table {

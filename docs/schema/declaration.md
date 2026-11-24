@@ -19,6 +19,8 @@ pub struct User {
 
 The SQL table name; without it the struct name becomes `snake_case`. The handle identifier comes
 from the table name, so `#[besu(table = "user_profiles")]` generates `user_profiles`.
+The name is unqualified: a dot is part of the identifier, not a schema separator. Use the
+separate `schema` attribute for a table in another schema.
 
 ## `schema`
 

@@ -1,9 +1,12 @@
 //! A declared rename is one statement, and the column keeps its data.
-#![cfg(feature = "sqlx")]
+#![cfg(any(feature = "native", feature = "sqlx"))]
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 #![allow(unused_imports)]
 
 use besu::prelude::*;
+#[cfg(feature = "native")]
+use besu_sqlite::Native;
+#[cfg(feature = "sqlx")]
 use besu_sqlite::Sqlx;
 
 mod v1 {
@@ -50,6 +53,7 @@ mod v2 {
 }
 
 #[tokio::test]
+#[cfg(feature = "sqlx")]
 async fn a_declared_rename_keeps_the_data() {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
 
@@ -90,6 +94,7 @@ async fn a_declared_rename_keeps_the_data() {
 }
 
 #[tokio::test]
+#[cfg(feature = "sqlx")]
 async fn a_rename_that_did_not_happen_is_just_an_add() {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
     db.push([v0::users.def()]).await.unwrap();
@@ -105,4 +110,76 @@ async fn a_rename_that_did_not_happen_is_just_an_add() {
         "got {:?}",
         result.statements
     );
+}
+
+mod reuse_v0 {
+    use besu::Table;
+
+    #[derive(Table, Debug, Clone)]
+    #[besu(table = "reused_names")]
+    pub struct ReusedName {
+        pub old: String,
+    }
+}
+
+mod reuse_v1 {
+    use besu::Table;
+
+    #[derive(Table, Debug, Clone)]
+    #[besu(table = "reused_names")]
+    pub struct ReusedName {
+        #[besu(column = "renamed", renamed_from = "old")]
+        pub renamed: i64,
+        #[besu(default = "fresh")]
+        pub old: String,
+    }
+}
+
+async fn a_rename_can_change_type_and_reuse_the_old_name<Dr>(driver: Dr)
+where
+    Dr: besu::Driver<Dialect = besu_sqlite::SQLite> + besu::SchemaDriver,
+    Dr::Error: core::fmt::Debug,
+    String: besu::Decode<Dr>,
+    i64: besu::Decode<Dr>,
+{
+    let db = besu::Database::new(driver);
+    db.push([reuse_v0::reused_names.def()]).await.unwrap();
+    db.execute(sql!("INSERT INTO reused_names (old) VALUES ('41')"))
+        .await
+        .unwrap();
+
+    let applied = db.push([reuse_v1::reused_names.def()]).await.unwrap();
+    assert!(
+        applied.changes.iter().any(|change| matches!(
+            change,
+            besu::schema::Change::RenameColumn { from, to, .. }
+                if from == "old" && to == "renamed"
+        )),
+        "got {:?}",
+        applied.changes
+    );
+    let rows: Vec<(String, i64)> = db
+        .execute(sql!("SELECT old, renamed FROM reused_names"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [("fresh".to_owned(), 41)]);
+    assert!(
+        db.push([reuse_v1::reused_names.def()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "native")]
+async fn native_a_rename_can_change_type_and_reuse_the_old_name() {
+    a_rename_can_change_type_and_reuse_the_old_name(Native::in_memory().unwrap()).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "sqlx")]
+async fn sqlx_a_rename_can_change_type_and_reuse_the_old_name() {
+    a_rename_can_change_type_and_reuse_the_old_name(Sqlx::memory().await.unwrap()).await;
 }

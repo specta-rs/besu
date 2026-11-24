@@ -17,7 +17,10 @@
 use core::future::Future;
 
 use besu_core::{Dialect, Driver, Sql, TableDef};
-use besu_schema::{AppliedMigration, Change, Ddl, MigrationError, Migrator, Schema};
+use besu_schema::{
+    AppliedMigration, Change, Ddl, MigrationError, Migrator, Schema, join_qualified_name,
+    split_qualified_name,
+};
 
 use crate::database::Database;
 
@@ -406,16 +409,14 @@ fn _keep_dialect<D: Dialect>(_: Option<Sql<D>>) {}
 
 /// Prefix the last segment of a possibly schema-qualified name.
 fn prefixed_name(prefix: &str, name: &str) -> String {
-    match name.split_once('.') {
-        Some((schema, name)) => alloc::format!("{schema}.{prefix}{name}"),
-        None => alloc::format!("{prefix}{name}"),
+    let mut parts = split_qualified_name(name);
+    if let Some(last) = parts.last_mut() {
+        last.insert_str(0, prefix);
     }
+    join_qualified_name(&parts)
 }
 
 /// The name without its schema qualifier.
-fn unqualified(name: &str) -> &str {
-    match name.split_once('.') {
-        Some((_, name)) => name,
-        None => name,
-    }
+fn unqualified(name: &str) -> String {
+    split_qualified_name(name).pop().unwrap_or_default()
 }

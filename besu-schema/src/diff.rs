@@ -46,6 +46,20 @@ pub enum Change {
         /// The value being added.
         value: String,
     },
+    /// An enum's surviving labels changed order.
+    ///
+    /// PostgreSQL compares enum values in declaration order but has no direct reorder
+    /// statement. The PostgreSQL renderer replaces the type while preserving its columns.
+    /// Label membership may change at the same time; `from` and `to` retain both complete
+    /// definitions so the change can be classified accurately.
+    ReorderEnum {
+        /// The enum's name.
+        name: String,
+        /// The enum as it exists now.
+        from: Enum,
+        /// The enum as it should be.
+        to: Enum,
+    },
     /// An enum value is no longer declared.
     ///
     /// PostgreSQL has no `ALTER TYPE ... DROP VALUE`, so this cannot be rendered as DDL; it
@@ -212,6 +226,17 @@ impl Change {
             | Self::AddCheck { .. }
             // Appending an enum value cannot break an existing row; it can only be slow.
             | Self::AddEnumValue { .. } => Safety::Risky,
+            Self::ReorderEnum { from, to, .. } => {
+                if from
+                    .values
+                    .iter()
+                    .any(|value| !to.values.contains(value))
+                {
+                    Safety::Destructive
+                } else {
+                    Safety::Risky
+                }
+            }
             // Replacing a view re-runs its query, and for a materialised view that query
             // runs immediately.
             Self::ReplaceView(_) => Safety::Risky,
@@ -219,11 +244,17 @@ impl Change {
             // are already handed out, and rewrites the catalogue.
             Self::AlterSequence { .. } => Safety::Risky,
             Self::AlterColumn { from, to, .. } => {
-                // A drop of a uniqueness or primary-key guarantee is the same loss as the
-                // `DropUnique` this code already refuses, however it is spelled.
+                // A drop of an integrity guarantee is the same loss as the corresponding
+                // `DropUnique`/`DropCheck` this code already refuses, however it is spelled.
                 let loses_guarantee = (from.unique && !to.unique)
-                    || (from.primary_key && !to.primary_key);
+                    || (from.primary_key && !to.primary_key)
+                    || (!from.nullable && to.nullable);
                 if loses_guarantee {
+                    return Safety::Destructive;
+                }
+                // MySQL spells an enum's labels inline. Removing an allowed label narrows
+                // the column's domain even though the canonical type changed in place.
+                if removes_inline_enum_label(&from.ty, &to.ty) {
                     return Safety::Destructive;
                 }
                 if from.ty == to.ty
@@ -273,6 +304,7 @@ impl Change {
             | Self::DropEnum { .. }
             | Self::AddEnumValue { .. }
             | Self::RemoveEnumValue { .. }
+            | Self::ReorderEnum { .. }
             | Self::CreateDomain(_)
             | Self::DropDomain { .. } => None,
             // A view or sequence is not a table: it has no columns to rebuild and SQLite's
@@ -340,6 +372,7 @@ impl core::fmt::Display for Change {
             Self::DropCheck { table, check } => write!(f, "drop check {} on {table}", check.name),
             Self::CreateView(view) => write!(f, "create view {}", view.name),
             Self::ReplaceView(view) => write!(f, "replace view {}", view.name),
+            Self::ReorderEnum { name, .. } => write!(f, "reorder enum {name}"),
             Self::DropView { name, .. } => write!(f, "drop view {name}"),
             Self::CreateSequence(sequence) => {
                 write!(f, "create sequence {}", sequence.qualified_name())
@@ -432,20 +465,38 @@ pub fn diff_with(
         let Some(existing) = current.find_enum(&desired_enum.name) else {
             continue;
         };
-        for value in &desired_enum.values {
-            if !existing.values.contains(value) {
-                changes.push(Change::AddEnumValue {
-                    name: desired_enum.name.clone(),
-                    value: value.clone(),
-                });
+        let existing_common: Vec<&String> = existing
+            .values
+            .iter()
+            .filter(|value| desired_enum.values.contains(value))
+            .collect();
+        let desired_common: Vec<&String> = desired_enum
+            .values
+            .iter()
+            .filter(|value| existing.values.contains(value))
+            .collect();
+        if existing_common != desired_common {
+            changes.push(Change::ReorderEnum {
+                name: desired_enum.name.clone(),
+                from: existing.clone(),
+                to: desired_enum.clone(),
+            });
+        } else {
+            for value in &desired_enum.values {
+                if !existing.values.contains(value) {
+                    changes.push(Change::AddEnumValue {
+                        name: desired_enum.name.clone(),
+                        value: value.clone(),
+                    });
+                }
             }
-        }
-        for value in &existing.values {
-            if !desired_enum.values.contains(value) {
-                changes.push(Change::RemoveEnumValue {
-                    name: desired_enum.name.clone(),
-                    value: value.clone(),
-                });
+            for value in &existing.values {
+                if !desired_enum.values.contains(value) {
+                    changes.push(Change::RemoveEnumValue {
+                        name: desired_enum.name.clone(),
+                        value: value.clone(),
+                    });
+                }
             }
         }
     }
@@ -614,6 +665,7 @@ pub fn diff_with(
         // or an altered column, whose default may be the new value. It still follows every
         // `CreateEnum` above because the type has to exist first.
         Change::AddEnumValue { .. } => 2,
+        Change::ReorderEnum { .. } => 2,
         Change::AlterSequence { .. } => 8,
         Change::DropForeignKey { .. } => 9,
         // Dropping a check before the column it names avoids "constraint does not exist":
@@ -645,6 +697,23 @@ pub fn diff_with(
     });
 
     changes
+}
+
+/// Whether changing an inline enum type removes a label it used to allow.
+fn removes_inline_enum_label(from: &besu_core::TypeDef, to: &besu_core::TypeDef) -> bool {
+    let besu_core::TypeDef::Enum(from) = from else {
+        return false;
+    };
+    if !from.name.is_empty() {
+        return false;
+    }
+    match to {
+        besu_core::TypeDef::Enum(to) => from
+            .labels
+            .iter()
+            .any(|label| !to.labels.iter().any(|candidate| candidate == label)),
+        _ => !from.labels.is_empty(),
+    }
 }
 
 /// Whether two indexes describe the same object.
@@ -940,7 +1009,7 @@ pub fn worst_safety(changes: &[Change]) -> Safety {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff, worst_safety};
+    use super::{diff, diff_with, worst_safety};
     use crate::{Change, Column, Enum, IndexColumn, Safety, Schema, Table, Unique};
     use besu_core::{EnumDef, TypeDef};
 
@@ -1223,6 +1292,59 @@ mod tests {
                 name: "mood".into(),
                 value: "happy".into(),
             }]
+        );
+        assert_eq!(worst_safety(&changes), Safety::Destructive);
+    }
+
+    #[test]
+    fn reordering_named_enum_labels_is_a_change() {
+        let current = Schema {
+            tables: Vec::new(),
+            enums: vec![mood(&["happy", "sad"])],
+            views: Vec::new(),
+            ..Schema::default()
+        };
+        let desired = Schema {
+            tables: Vec::new(),
+            enums: vec![mood(&["sad", "happy"])],
+            views: Vec::new(),
+            ..Schema::default()
+        };
+
+        let changes = diff_with(&current, &desired, &|ty| ty.clone());
+        assert_eq!(
+            changes,
+            [Change::ReorderEnum {
+                name: "mood".into(),
+                from: current.enums[0].clone(),
+                to: desired.enums[0].clone(),
+            }]
+        );
+        assert_eq!(changes[0].safety(), Safety::Risky);
+    }
+
+    #[test]
+    fn removing_not_null_or_an_inline_enum_label_is_destructive() {
+        let required = column("required_value", TypeDef::Int8);
+        let mut nullable = required.clone();
+        nullable.nullable = true;
+        let changes = diff(
+            &schema(vec![table("things", vec![required.clone()])]),
+            &schema(vec![table("things", vec![nullable])]),
+        );
+        assert_eq!(worst_safety(&changes), Safety::Destructive);
+
+        let before = column(
+            "mood",
+            TypeDef::Enum(besu_core::EnumDef::owned("", ["happy", "sad"])),
+        );
+        let after = column(
+            "mood",
+            TypeDef::Enum(besu_core::EnumDef::owned("", ["happy"])),
+        );
+        let changes = diff(
+            &schema(vec![table("reviews", vec![before])]),
+            &schema(vec![table("reviews", vec![after])]),
         );
         assert_eq!(worst_safety(&changes), Safety::Destructive);
     }
@@ -1676,6 +1798,25 @@ mod tests {
 
         // And an identical view is nothing.
         assert!(diff(&desired, &desired).is_empty());
+    }
+
+    #[test]
+    fn a_changed_correlated_view_is_replaced() {
+        let mut current = Schema::new();
+        current.add_view(crate::View::new(
+            "matching_users",
+            "SELECT outer_t.id FROM outer_t WHERE EXISTS (\
+             SELECT 1 FROM inner_t WHERE inner_t.id = outer_t.id)",
+        ));
+        let mut desired = current.clone();
+        desired.views[0].definition = "SELECT outer_t.id FROM outer_t WHERE EXISTS (\
+             SELECT 1 FROM inner_t WHERE inner_t.id = inner_t.id)"
+            .into();
+
+        assert_eq!(
+            diff_with(&current, &desired, &|ty| ty.clone()),
+            [Change::ReplaceView(desired.views[0].clone())]
+        );
     }
 
     #[test]

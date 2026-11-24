@@ -83,17 +83,40 @@ impl SQLiteDdl {
         // that `CREATE TABLE` gave it. A generated column is never written: the database
         // computes it, and SQLite rejects an `INSERT` into one.
         //
-        // A column the declaration renamed is copied from its old name: the rebuild is what
-        // performs the rename, so selecting the new name from the old table would fail to
-        // find it and lose the column's values.
+        // Resolve declared renames before matching names. The old physical name is consumed
+        // by the rename, so a fresh column that reuses it must keep its default instead of
+        // copying the renamed column's value into both columns.
+        let mut renames: Vec<(&Column, &str)> = Vec::new();
+        for column in &desired.columns {
+            if current.column(&column.name).is_some() {
+                continue;
+            }
+            let Some(previous) = column.renamed_from.as_deref() else {
+                continue;
+            };
+            if current.column(previous).is_none()
+                || renames.iter().any(|(_, taken)| *taken == previous)
+            {
+                continue;
+            }
+            renames.push((column, previous));
+        }
+        let moved_away = |name: &str| renames.iter().any(|(_, previous)| *previous == name);
         let columns: Vec<(&Column, &Column)> = desired
             .columns
             .iter()
             .filter(|column| column.generated.is_none())
             .filter_map(|column| {
-                current
+                if let Some(source) = current
                     .column(&column.name)
-                    .or_else(|| current.column(column.renamed_from.as_deref()?))
+                    .filter(|_| !moved_away(&column.name))
+                {
+                    return Some((column, source));
+                }
+                renames
+                    .iter()
+                    .find(|(target, _)| target.name == column.name)
+                    .and_then(|(_, previous)| current.column(previous))
                     .map(|source| (column, source))
             })
             .collect();

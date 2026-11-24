@@ -14,6 +14,34 @@ use besu::prelude::*;
 use besu::{Decimal, Driver, Sql};
 use besu_postgres::{Postgres, Sqlx};
 
+#[tokio::test]
+async fn fragment_array_metadata_cannot_widen_the_query() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(besu::Fragment::new(
+        "CREATE TABLE comment_users (name TEXT NOT NULL)".to_owned(),
+    ))
+    .await
+    .unwrap();
+    db.execute(besu::Fragment::new(
+        "INSERT INTO comment_users VALUES ('alice'), ('bob')".to_owned(),
+    ))
+    .await
+    .unwrap();
+
+    for collation in ["C", "x*/ OR true --"] {
+        let statement = besu::Fragment::with_args(
+            "SELECT name FROM comment_users WHERE name = ANY(?)",
+            vec![Value::Array {
+                element: TypeDef::Collated(Box::new(TypeDef::Text), collation.into()),
+                values: vec![Value::Text("alice".into())],
+            }],
+        );
+        let rows: Vec<String> = db.execute(statement).all().await.unwrap();
+        assert_eq!(rows, ["alice"], "collation {collation}");
+    }
+}
+
 #[derive(Table, Debug, Clone, PartialEq)]
 #[besu(table = "things")]
 pub struct Thing {

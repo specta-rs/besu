@@ -608,6 +608,7 @@ impl Ddl for MySqlDdl {
             | Change::DropEnum { .. }
             | Change::AddEnumValue { .. }
             | Change::RemoveEnumValue { .. }
+            | Change::ReorderEnum { .. }
             | Change::CreateSequence(_)
             | Change::AlterSequence { .. }
             | Change::DropSequence { .. } => Vec::new(),

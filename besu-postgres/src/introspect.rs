@@ -747,12 +747,13 @@ fn number(modifier: Option<&str>) -> Option<u32> {
 }
 
 /// The `(precision, scale)` in a `numeric` modifier such as `10,2`.
-fn decimal_parts(modifier: &str) -> Option<(u8, u8)> {
+fn decimal_parts(modifier: &str) -> Option<(u16, i16)> {
     let mut parts = modifier.split(',');
     let precision = parts.next()?.trim().parse().ok()?;
-    let scale = parts
-        .next()
-        .map_or(0, |part| part.trim().parse().unwrap_or_default());
+    let scale = match parts.next() {
+        Some(part) => part.trim().parse().ok()?,
+        None => 0,
+    };
     Some((precision, scale))
 }
 
@@ -1331,4 +1332,32 @@ fn strip_parens(sql: &str) -> Option<&str> {
         }
     }
     Some(inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use besu_core::Dialect;
+
+    #[test]
+    fn numeric_modifiers_keep_postgresqls_full_width() {
+        assert_eq!(
+            parse_type_name("numeric(1000,2)"),
+            TypeDef::Decimal(1000, 2)
+        );
+        assert_eq!(
+            parse_type_name("numeric(10,300)"),
+            TypeDef::Decimal(10, 300)
+        );
+        assert_eq!(parse_type_name("numeric(5,-2)"), TypeDef::Decimal(5, -2));
+        assert_eq!(
+            Postgres::type_name(TypeDef::Decimal(5, -2)),
+            "NUMERIC(5,-2)"
+        );
+        assert_eq!(parse_type_name("numeric(10,2)"), TypeDef::Decimal(10, 2));
+        assert_eq!(
+            parse_type_name("numeric"),
+            TypeDef::Custom("numeric".into())
+        );
+    }
 }

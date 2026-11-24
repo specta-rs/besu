@@ -28,7 +28,8 @@ pub use ddl::{Ddl, normalise_schema};
 pub use diff::{Change, Safety, diff_with};
 pub use ir::{
     Check, Column, Default, Domain, Enum, ForeignKey, Generated, Index, IndexColumn, IndexKind,
-    IndexTarget, ReferenceAction, Schema, Sequence, Table, Unique, View, normalise_expression,
-    normalise_generated_expression, normalise_view_definition, view_body,
+    IndexTarget, ReferenceAction, Schema, Sequence, Table, Unique, View, join_qualified_name,
+    normalise_expression, normalise_generated_expression, normalise_view_definition,
+    split_qualified_name, view_body,
 };
 pub use migrate::{AppliedMigration, Migration, MigrationError, Migrator};

@@ -135,3 +135,36 @@ async fn a_new_label_is_an_alter_type_not_a_table_rewrite() {
         ["happy", "meh", "sad", "ecstatic"]
     );
 }
+
+#[tokio::test]
+async fn reordering_labels_preserves_rows_and_converges() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.push([reviews.def()]).await.unwrap();
+    db.insert(reviews)
+        .value(reviews.insert(Mood::Happy))
+        .await
+        .unwrap();
+
+    let mut desired = Schema::from_defs(&[reviews.def()]);
+    desired.enums[0].values.reverse();
+    let applied = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        applied.changes,
+        [Change::ReorderEnum {
+            name: "mood".into(),
+            from: Schema::from_defs(&[reviews.def()]).enums[0].clone(),
+            to: desired.enums[0].clone(),
+        }]
+    );
+    assert_eq!(applied.statements.len(), 1);
+    assert!(applied.statements[0].starts_with("DO $besu$"));
+    assert_eq!(
+        db.introspect().await.unwrap().enums[0].values,
+        ["sad", "meh", "happy"]
+    );
+    let rows: Vec<Review> = db.select(reviews).all().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].mood, Mood::Happy);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}

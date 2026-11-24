@@ -163,7 +163,7 @@ impl Dialect for Postgres {
                     // The subtype is part of the bytes: `int4range` and `int8range` share
                     // this SQL text but not their wire format.
                     suffix.push('R');
-                    suffix.push_str(&format!("{element:?}"));
+                    write_type_suffix(suffix, element);
                     continue;
                 }
                 Value::Geometry(_) => 'G',
@@ -172,7 +172,7 @@ impl Dialect for Postgres {
                     // The element OID is part of the bytes, so it has to be part of the key:
                     // `int8[]` and `text[]` bind differently into the same SQL text.
                     suffix.push('A');
-                    suffix.push_str(&format!("{element:?}"));
+                    write_type_suffix(suffix, element);
                     continue;
                 }
                 _ => '?',
@@ -352,6 +352,21 @@ impl Dialect for Postgres {
     }
 }
 
+/// Append a type's Debug spelling without letting metadata close the SQL block comment.
+///
+/// Backslashes are escaped first so the encoding stays one-to-one: a literal `\*` in a
+/// type name cannot collide with the escaping applied to `*`.
+fn write_type_suffix(suffix: &mut String, element: &TypeDef) {
+    for ch in format!("{element:?}").chars() {
+        match ch {
+            '\\' => suffix.push_str("\\\\"),
+            '*' => suffix.push_str("\\*"),
+            '/' => suffix.push_str("\\/"),
+            ch => suffix.push(ch),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -437,5 +452,39 @@ mod tests {
             }],
         );
         assert_ne!(integers, texts);
+    }
+
+    #[test]
+    fn array_and_range_metadata_cannot_close_the_statement_comment() {
+        let payload = "x */ UNION SELECT ARRAY[(SELECT secret FROM users)] --";
+        let values = [
+            Value::Array {
+                element: TypeDef::Custom(payload.into()),
+                values: vec![Value::Text("visible".into())],
+            },
+            Value::Array {
+                element: TypeDef::Collated(Box::new(TypeDef::Text), "x*/ OR true --".into()),
+                values: vec![Value::Text("alice".into())],
+            },
+            Value::Range {
+                element: TypeDef::Custom(payload.into()),
+                range: Box::new(besu_core::Range::new(
+                    besu_core::Bound::Included(Value::Int(1)),
+                    besu_core::Bound::Excluded(Value::Int(2)),
+                )),
+            },
+        ];
+
+        for value in values {
+            let mut suffix = String::new();
+            Postgres::write_statement_suffix(&mut suffix, std::slice::from_ref(&value));
+            assert!(suffix.starts_with("\n/* besu:"), "{suffix}");
+            assert!(suffix.ends_with(" */"), "{suffix}");
+            assert_eq!(
+                suffix.matches("*/").count(),
+                1,
+                "type metadata escaped the comment: {suffix}"
+            );
+        }
     }
 }

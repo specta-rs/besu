@@ -1004,7 +1004,9 @@ async fn a_compatible_view_survives_a_rebuild() {
 
     let mut desired = db.introspect().await.unwrap();
     desired.table_mut("native_rebuild_parent").unwrap().columns[1].nullable = true;
-    db.push_schema(&desired).await.unwrap();
+    // Relaxing NOT NULL is destructive under the updated safety classifier; opt in so
+    // the rebuild can prove the compatible view survives.
+    db.push_schema_destructive(&desired).await.unwrap();
 
     let table_rows: Vec<String> = db
         .execute(sql!("SELECT name FROM native_rebuild_parent"))
