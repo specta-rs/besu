@@ -1015,10 +1015,14 @@ mod tests {
             down_checksum: Some(legacy_checksum_of(
                 &migration.name,
                 "down",
-                migration.down.as_deref().unwrap(),
+                migration
+                    .down
+                    .as_deref()
+                    .expect("test migration has down statements"),
             )),
         };
-        verify_checksums::<besu_core::Error>(&record, &migration).unwrap();
+        verify_checksums::<besu_core::Error>(&record, &migration)
+            .expect("unchanged legacy checksums should verify");
 
         let edited = Migration::from_sql_pair(
             1,
