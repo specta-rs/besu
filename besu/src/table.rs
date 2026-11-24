@@ -12,6 +12,20 @@ use besu_core::{TableDef, Value};
 ///
 /// The generated handle and insert types have the same visibility as the row model.
 ///
+/// Every non-skipped field must have a distinct SQL column name.
+///
+/// ```compile_fail
+/// use besu::prelude::*;
+/// #[derive(Table)]
+/// #[besu(table = "duplicate_columns")]
+/// struct DuplicateTable {
+///     #[besu(column = "id")]
+///     first_id: i64,
+///     #[besu(column = "id")]
+///     second_id: i64,
+/// }
+/// ```
+///
 /// ```compile_fail,E0603
 /// mod schema {
 ///     #[derive(besu::Table)]
@@ -69,7 +83,7 @@ pub trait Table: Copy + 'static {
 /// let author = totals.column(posts.author_id);
 /// db.select(&totals).pick((author.clone(), count_all())).group_by(author)
 /// ```
-pub trait TableRef {
+pub trait TableRef: crate::sealed::TableRef {
     /// The type that appears in the query's row set.
     type Marker: 'static;
 
@@ -88,6 +102,8 @@ impl<T: Table> TableRef for T {
         crate::query::From::Table(T::DEF)
     }
 }
+
+impl<T: Table> crate::sealed::TableRef for T {}
 
 /// A new row to be inserted.
 ///

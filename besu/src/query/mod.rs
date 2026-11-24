@@ -124,7 +124,17 @@ pub enum QueryBody {
 /// lets [`derived`](crate::derived) take either one. The executor is dropped when the query is
 /// nested: it is rendered by the statement that contains it, so it shares that statement's
 /// dialect and its parameters continue that statement's numbering.
-pub trait IntoQueryBody {
+///
+/// This adapter is sealed; only Besu's own query builders can produce a query body.
+///
+/// ```compile_fail
+/// struct Fake;
+/// impl besu::IntoQueryBody for Fake {
+///     type Row = String;
+///     fn into_query_body(self) -> besu::QueryBody { unreachable!() }
+/// }
+/// ```
+pub trait IntoQueryBody: crate::sealed::IntoQueryBody {
     /// The row type the query produces.
     type Row;
 
@@ -134,6 +144,14 @@ pub trait IntoQueryBody {
 }
 
 impl QueryBody {
+    /// Render this body as a complete statement.
+    pub(crate) fn build<D: Dialect>(self, prefix: Option<alloc::sync::Arc<str>>) -> Sql<D> {
+        match self {
+            Self::Select(query) => query.build(prefix),
+            Self::Set(parts) => parts.build(prefix),
+        }
+    }
+
     /// The number of SQL columns the body's projection produces.
     pub(crate) fn projection_len(&self) -> usize {
         match self {

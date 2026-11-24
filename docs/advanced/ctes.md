@@ -43,6 +43,22 @@ The Rust type, the SQL type and the nullability are the ones the schema declares
 expression must be in the query's row set for the call to compile — using a handle the
 statement never defined or joined is a compile error.
 
+Outer-join nullability is added on top. A CTE column that is non-nullable in its definition
+still projects as `Option<T>` when the CTE is the outer side of a join:
+
+```rust
+let rows: Vec<Option<String>> = db
+    .select(users)
+    .left_join_cte(&posts_cte, eq(users.id, posts_cte.column(posts.author_id)))
+    .pick(posts_cte.column(posts.title))
+    .all()
+    .await?;
+```
+
+Derived-table and alias accessors follow the same rule. Accessors preserve a column's own
+nullability and the path by which their source was joined; computed expressions do not carry
+that proof and are assumed non-null.
+
 Two expressions over the same table are the same Rust type, so the compiler cannot tell them
 apart. The check is "this kind of expression is in scope", not "this exact one"; a mistake
 there is a database error rather than a compile error. For the same reason a statement can

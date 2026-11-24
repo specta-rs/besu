@@ -157,6 +157,12 @@ discards the `NULL` rows, which turns the outer join into an inner one. Put the 
   nullable can decode as `None` even when a row matched, because that is the only signal an
   outer join gives.
 - **A right join widens everything before it, not itself.** `right_join` keeps the new table
-  non-nullable and puts the accumulated `R` behind `Option`.
+  non-nullable and puts the accumulated row set behind `Option`. A full join widens both
+  sides. This applies to whole-row projections, individual columns and columns reached through
+  an alias, CTE or derived table.
+- **Computed expressions are assumed non-null.** Direct columns and source accessors preserve
+  outer-join nullability, but a function such as `upper(posts.title)` erases that proof. Avoid
+  projecting one over a nullable input unless you handle the database's NULL explicitly (for
+  example with `coalesce`).
 - **`cross_join` is a Cartesian product.** There is no condition and no warning; the row count
   multiplies.

@@ -16,6 +16,19 @@
 //! The `Path` parameter exists only so the compiler can search a tuple: without it the
 //! blanket implementations for the head and the tail of a tuple would overlap. Every
 //! consumer makes `Path` an inferred generic, so users never spell it out.
+//!
+//! This trait is sealed. A downstream implementation could otherwise claim that a table is
+//! present when it is not, bypassing the builder's scope checks.
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { id: i64 }
+//! # #[derive(Table)] #[besu(table = "posts")] struct Post { id: i64 }
+//! struct MyPath;
+//! impl besu::Contains<MyPath, UserTable> for (PostTable,) {}
+//! fn require<M: besu::Contains<MyPath, UserTable>>() {}
+//! require::<(PostTable,)>();
+//! ```
 
 use core::marker::PhantomData;
 
@@ -33,6 +46,9 @@ pub struct First<P>(PhantomData<P>);
 /// A path that descends into the second element of a tuple.
 pub struct Second<P>(PhantomData<P>);
 
+/// A path that descends through an optional row-set entry.
+pub struct Optional<P>(PhantomData<P>);
+
 /// The path used by expressions and literals, which reference no table of their own.
 pub enum LiteralPath {}
 
@@ -43,7 +59,12 @@ pub enum LiteralPath {}
 pub enum Literal {}
 
 /// `Container` contains `X` somewhere, reachable by `Path`.
-pub trait Contains<Path, X> {}
+pub trait Contains<Path, X>: crate::sealed::Contains {}
+
+impl crate::sealed::Contains for () {}
+impl<A> crate::sealed::Contains for (A,) {}
+impl<A, B> crate::sealed::Contains for (A, B) {}
+impl<A> crate::sealed::Contains for Option<A> {}
 
 impl<A> Contains<Zero, A> for (A,) {}
 impl<A, B> Contains<Zero, A> for (A, B) {}
@@ -52,11 +73,12 @@ impl<P, I, A: Contains<P, I>, B> Contains<First<P>, I> for (A, B) {}
 impl<P, I, A, B: Contains<P, I>> Contains<Second<P>, I> for (A, B) {}
 
 impl<A> Contains<(), A> for Option<A> {}
+impl<P, I, A: Contains<P, I>> Contains<Optional<P>, I> for Option<A> {}
 
 // Literals are accepted by every row set. The path is a distinct type from `Zero`, `One`,
 // `First<_>` and `Second<_>` so this never overlaps with the structural implementations
 // above.
-impl<M> Contains<LiteralPath, Literal> for M {}
+impl<M: crate::sealed::Contains> Contains<LiteralPath, Literal> for M {}
 
 /// Whether a table found at a given path can be absent.
 ///
@@ -85,7 +107,11 @@ impl<P: PathNullability> PathNullability for First<P> {
     type Nullability = P::Nullability;
 }
 
-impl<P> PathNullability for Second<P> {
+impl<P: PathNullability> PathNullability for Second<P> {
+    type Nullability = P::Nullability;
+}
+
+impl<P> PathNullability for Optional<P> {
     type Nullability = crate::types::Nullable;
 }
 

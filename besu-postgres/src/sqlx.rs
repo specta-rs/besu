@@ -1046,7 +1046,9 @@ pub fn arguments(sql: &Sql<Postgres>) -> Result<PgArguments, sqlx::Error> {
             // in binary format, so what travels is `vector_recv`'s form — a dimension and
             // big-endian components — not the `[1,2,3]` text a SQL literal would use.
             Value::Vector(v) => {
-                let bytes = v.to_binary();
+                let bytes = v.to_binary().map_err(|err| {
+                    <Sqlx as Driver>::error(Error::encode("vector", err.to_string()))
+                })?;
                 add(&mut arguments, UntypedBytes(&bytes))?;
             }
             Value::Json(v) => {

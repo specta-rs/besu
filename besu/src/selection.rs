@@ -16,7 +16,25 @@ use crate::table::Table;
 ///
 /// `M` is the query's row set and `P` is a search path for the containment check; both are
 /// inferred, so you never write them.
-pub trait Selection<M, P = LiteralPath> {
+///
+/// This trait is sealed so a downstream implementation cannot describe a row type that its
+/// projections do not actually produce.
+///
+/// ```compile_fail
+/// use besu::prelude::*;
+/// # #[derive(Table)] #[besu(table = "posts")] struct Post { id: i64 }
+/// struct MyPath;
+/// struct Fake;
+/// impl besu::Selection<(PostTable,), MyPath> for Fake {
+///     type Out = String;
+///     fn into_projection(self) -> (Vec<besu::ExprKind>, usize) {
+///         (Vec::new(), 0)
+///     }
+/// }
+/// fn require<S: besu::Selection<(PostTable,), MyPath>>(_: S) {}
+/// require(Fake);
+/// ```
+pub trait Selection<M, P = LiteralPath>: crate::sealed::Selection {
     /// The Rust type produced for one row.
     type Out;
 
@@ -25,13 +43,26 @@ pub trait Selection<M, P = LiteralPath> {
     fn into_projection(self) -> (Vec<ExprKind>, usize);
 }
 
-impl<M, S: SqlType> Selection<M, LiteralPath> for Expr<M, S> {
-    type Out = S::Rust;
+impl<M, S: SqlType, N: Nullability, P: PathNullability, X: 'static> Selection<M, P>
+    for Expr<M, S, N, P, X>
+where
+    M: Contains<P, X>,
+    N: Combine<P::Nullability>,
+{
+    type Out = <<N as Combine<P::Nullability>>::Out as Nullability>::Wrap<S::Rust>;
 
     fn into_projection(self) -> (Vec<ExprKind>, usize) {
         (alloc::vec![self.into_kind()], 1)
     }
 }
+
+impl crate::sealed::Selection for () {}
+impl<M, S: SqlType, N: Nullability, P: PathNullability, X: 'static> crate::sealed::Selection
+    for Expr<M, S, N, P, X>
+{
+}
+impl<T: Table> crate::sealed::Selection for T {}
+impl<T: Table, S: SqlType, N: Nullability> crate::sealed::Selection for Column<T, S, N> {}
 
 impl<M, T, Path> Selection<M, Path> for T
 where
@@ -82,6 +113,8 @@ where
 
 macro_rules! impl_tuple_selection {
     ($($name:ident : $path:ident),+) => {
+        impl<$($name,)+> crate::sealed::Selection for ($($name,)+) {}
+
         impl<M, $($name, $path,)+> Selection<M, ($($path,)+)> for ($($name,)+)
         where
             $($name: Selection<M, $path>,)+

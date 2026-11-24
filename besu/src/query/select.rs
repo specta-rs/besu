@@ -9,7 +9,7 @@ use alloc::borrow::Cow;
 use crate::types::Bool;
 use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
 
-use crate::expr::{Expr, IntoCondition, IntoOrder};
+use crate::expr::{Expr, IntoCondition, IntoGroupBy, IntoQueryOrder};
 use crate::query::{
     Cte, CteColumns, DerivedSource, DynamicSelect, From, IntoQueryBody, JoinClause, JoinKind,
     QueryBody, SelectQuery, SetOp, SetQuery, validate_cte,
@@ -71,20 +71,29 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 
     /// Add an `ORDER BY` term.
-    pub fn order_by<O: IntoOrder>(mut self, order: O) -> Self {
-        self.query.order_by.push(order.into_order());
+    pub fn order_by<O, P, K>(mut self, order: O) -> Self
+    where
+        O: IntoQueryOrder<M, P, K>,
+    {
+        self.query.order_by.push(order.into_query_order());
         self
     }
 
     /// Add a descending `ORDER BY` term.
-    pub fn order_by_desc<O: IntoOrder>(mut self, order: O) -> Self {
-        self.query.order_by.push(order.into_order().reverse());
+    pub fn order_by_desc<O, P, K>(mut self, order: O) -> Self
+    where
+        O: IntoQueryOrder<M, P, K>,
+    {
+        self.query.order_by.push(order.into_query_order().reverse());
         self
     }
 
     /// Add a `GROUP BY` expression.
-    pub fn group_by<O: IntoOrder>(mut self, expr: O) -> Self {
-        self.query.group_by.push(expr.into_order().expr);
+    pub fn group_by<O, P, K>(mut self, expr: O) -> Self
+    where
+        O: IntoGroupBy<M, P, K>,
+    {
+        self.query.group_by.push(expr.into_group_by());
         self
     }
 
@@ -201,10 +210,6 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
                 .build::<DialectOf<E>>(self.exec.table_prefix())
                 .inspect(),
         ))
-    }
-
-    fn into_parts(self) -> (E, SelectQuery) {
-        (self.exec, self.query)
     }
 }
 
@@ -514,7 +519,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
         mut self,
         table: T,
         on: Expr<(M, T::Marker), Bool>,
-    ) -> Select<'a, E, (M, T::Marker), (Option<R>, T::Model)> {
+    ) -> Select<'a, E, (Option<M>, T::Marker), (Option<R>, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Right,
             source: table.into_source(),
@@ -533,7 +538,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
         mut self,
         table: T,
         on: Expr<(M, Option<T::Marker>), Bool>,
-    ) -> Select<'a, E, (M, Option<T::Marker>), (Option<R>, Option<T::Model>)> {
+    ) -> Select<'a, E, (Option<M>, Option<T::Marker>), (Option<R>, Option<T::Model>)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Full,
             source: table.into_source(),
@@ -619,29 +624,33 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
-        let prefix = self.exec.table_prefix();
-        let (mut exec, query) = self.into_parts();
-        let sql = query
-            .build::<DialectOf<E>>(prefix)
-            .finish()
-            .map_err(<E::Driver as Driver>::error)?;
-        let rows = exec.query(&sql).await?;
-        decode_rows::<E::Driver, R>(&rows)
+        execute_query(self.exec, QueryBody::Select(self.query)).await
     }
 
     /// Run the query and return the first row, if any.
     pub async fn first(mut self) -> Result<Option<R>, ErrorOf<E>> {
         self.query.limit = Some(1);
-        let prefix = self.exec.table_prefix();
-        let (mut exec, query) = self.into_parts();
-        let sql = query
-            .build::<DialectOf<E>>(prefix)
-            .finish()
-            .map_err(<E::Driver as Driver>::error)?;
-        let rows = exec.query(&sql).await?;
-        let mut decoded = decode_rows::<E::Driver, R>(&rows)?;
-        Ok(decoded.pop())
+        let mut rows = self.all().await?;
+        Ok(rows.pop())
     }
+}
+
+/// Render, run and decode a query body without its builder's row-set parameter.
+pub(crate) async fn execute_query<E, R>(
+    mut exec: E,
+    body: QueryBody,
+) -> Result<alloc::vec::Vec<R>, ErrorOf<E>>
+where
+    E: Executor,
+    R: Decode<E::Driver>,
+{
+    let prefix = exec.table_prefix();
+    let sql = body
+        .build::<DialectOf<E>>(prefix)
+        .finish()
+        .map_err(<E::Driver as Driver>::error)?;
+    let rows = exec.query(&sql).await?;
+    decode_rows::<E::Driver, R>(&rows)
 }
 
 /// Decode every row into `R`, one allocation for the whole result.
@@ -681,3 +690,5 @@ impl<'a, E: Executor, M, R> IntoQueryBody for Select<'a, E, M, R> {
         QueryBody::Select(self.query)
     }
 }
+
+impl<'a, E: Executor, M, R> crate::sealed::IntoQueryBody for Select<'a, E, M, R> {}

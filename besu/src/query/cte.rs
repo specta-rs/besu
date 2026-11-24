@@ -46,7 +46,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 use besu_core::{ColumnDef, Error, Executor};
 
-use crate::condition::Contains;
+use crate::condition::{Contains, PathNullability};
 use crate::expr::{Expr, ExprKind};
 use crate::query::set::{SetOp, SetParts};
 use crate::query::{CteEntry, CteRoot, CteSource, From, QueryBody, Select, SetQuery, WithClause};
@@ -188,10 +188,14 @@ impl<R: 'static> Cte<R> {
     /// defined or joined does not compile. A presence check is all the compiler can do: two
     /// expressions over the same table are different types only because the handles are
     /// different values of the same type, so the compiler cannot tell them apart.
-    pub fn column<RowSet, P, T, S, N>(&self, column: Column<T, S, N>) -> Expr<RowSet, S>
+    pub fn column<RowSet, P, T, S, N>(
+        &self,
+        column: Column<T, S, N>,
+    ) -> Expr<RowSet, S, N, P, Cte<R>>
     where
         S: SqlType,
         N: Nullability,
+        P: PathNullability,
         RowSet: Contains<P, Cte<R>>,
     {
         let _ = PhantomData::<P>;
@@ -224,6 +228,7 @@ impl<R: 'static> Cte<R> {
     where
         S: SqlType,
         W: TypeWitness<S>,
+        P: PathNullability,
         RowSet: Contains<P, Cte<R>>,
     {
         let _ = (witness, PhantomData::<P>);

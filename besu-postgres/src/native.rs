@@ -736,7 +736,11 @@ fn encode(value: &Value, ty: &Type, out: &mut BytesMut) -> Result<(), String> {
         }
         Value::Array { values, .. } => write_array(values, ty, out)?,
         Value::Geometry(value) => out.put_slice(value.ewkb()),
-        Value::Vector(value) => out.put_slice(&value.to_binary()),
+        Value::Vector(value) => out.put_slice(
+            &value
+                .to_binary()
+                .map_err(|err| Error::encode("vector", err.to_string()).to_string())?,
+        ),
         // `Value` is `#[non_exhaustive]`: a future variant fails loudly rather than
         // silently becoming `NULL`.
         other => {
@@ -2029,5 +2033,15 @@ mod tests {
         assert!(decode_numeric_decimal(&[]).is_err());
         assert!(decode_network_binary(&[]).is_err());
         assert!(decode_network_binary(&[2, 24, 0, 4, 1]).is_err());
+    }
+
+    #[test]
+    fn an_oversized_vector_is_rejected_before_writing_bytes() {
+        let vector =
+            besu_core::Vector::new((0..32_768).map(|value| value as f32).collect::<Vec<_>>());
+        let mut out = BytesMut::new();
+        let error = encode(&Value::Vector(vector), &Type::TEXT, &mut out).unwrap_err();
+        assert!(error.contains("32767"), "{error}");
+        assert!(out.is_empty());
     }
 }

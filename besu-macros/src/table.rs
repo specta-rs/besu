@@ -2,6 +2,7 @@ use heck::ToSnakeCase;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
+use std::collections::HashSet;
 use syn::{
     Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitInt, LitStr, Result, Token,
     Type, Visibility, parse::Parse, spanned::Spanned,
@@ -90,6 +91,17 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
             struct_ident.span(),
             "besu: a table needs at least one column (every field was skipped)",
         ));
+    }
+
+    let mut sql_names = HashSet::new();
+    for column in &columns {
+        let name = column.sql_name.value();
+        if !sql_names.insert(name.clone()) {
+            return Err(Error::new(
+                column.sql_name.span(),
+                format!("besu: duplicate SQL column name `{name}`"),
+            ));
+        }
     }
 
     Ok(Codegen {
@@ -1762,6 +1774,38 @@ mod tests {
         if let Err(err) = syn::parse2::<syn::File>(tokens) {
             panic!("the derive emitted invalid Rust ({err}):\n{text}");
         }
+    }
+
+    #[test]
+    fn duplicate_sql_column_names_are_rejected() {
+        let error = expand(parse_quote! {
+            #[besu(table = "duplicate_columns")]
+            struct DuplicateTable {
+                #[besu(column = "id")]
+                first_id: i64,
+                #[besu(column = "id")]
+                second_id: i64,
+            }
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate SQL column name `id`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_skipped_field_does_not_reserve_its_sql_name() {
+        let tokens = expand(parse_quote! {
+            #[besu(table = "items")]
+            struct Item {
+                id: i64,
+                #[besu(skip, column = "id")]
+                cached_id: i64,
+            }
+        })
+        .unwrap();
+        assert_parses(tokens);
     }
 
     #[test]

@@ -444,7 +444,7 @@ impl<'a, E: Executor, M, I: Insertable> Insert<'a, E, M, I> {
     /// A single column or a tuple of up to four names the key the clause applies to, which
     /// must be a unique constraint or index. Omit the target with [`Self::on_conflict_all`]
     /// when the action is `do_nothing`.
-    pub fn on_conflict(mut self, target: impl ConflictTarget) -> Self {
+    pub fn on_conflict<C: ConflictTarget<M>>(mut self, target: C) -> Self {
         self.query.conflict = Some(OnConflict::new(target.into_columns()));
         self
     }
@@ -756,7 +756,10 @@ where
 }
 
 /// Something usable as an `ON CONFLICT` target.
-pub trait ConflictTarget {
+///
+/// The row-set parameter ties every column to the inserted table. A column from another
+/// table has no implementation, even when both tables happen to have the same column name.
+pub trait ConflictTarget<M>: crate::sealed::ConflictTarget {
     /// The columns that make up the target.
     fn into_columns(self) -> Vec<&'static str>;
 }
@@ -765,13 +768,15 @@ pub trait ConflictTarget {
 ///
 /// [`Insert::on_conflict_all`] is the readable spelling; this exists so `on_conflict(())`
 /// means the same thing.
-impl ConflictTarget for () {
+impl<M> ConflictTarget<M> for () {
     fn into_columns(self) -> Vec<&'static str> {
         Vec::new()
     }
 }
 
-impl<T: Table, S: crate::types::SqlType, N: crate::types::Nullability> ConflictTarget
+impl crate::sealed::ConflictTarget for () {}
+
+impl<T: Table, S: crate::types::SqlType, N: crate::types::Nullability> ConflictTarget<(T,)>
     for crate::types::Column<T, S, N>
 {
     fn into_columns(self) -> Vec<&'static str> {
@@ -779,9 +784,14 @@ impl<T: Table, S: crate::types::SqlType, N: crate::types::Nullability> ConflictT
     }
 }
 
+impl<T: Table, S: crate::types::SqlType, N: crate::types::Nullability> crate::sealed::ConflictTarget
+    for crate::types::Column<T, S, N>
+{
+}
+
 macro_rules! conflict_tuple {
     ($($name:ident),+) => {
-        impl<$($name: ConflictTarget),+> ConflictTarget for ($($name,)+) {
+        impl<M, $($name: ConflictTarget<M>),+> ConflictTarget<M> for ($($name,)+) {
             #[allow(non_snake_case)]
             fn into_columns(self) -> Vec<&'static str> {
                 let ($($name,)+) = self;
@@ -790,6 +800,10 @@ macro_rules! conflict_tuple {
                 out
             }
         }
+
+        impl<$($name: crate::sealed::ConflictTarget),+> crate::sealed::ConflictTarget
+            for ($($name,)+)
+        {}
     };
 }
 
