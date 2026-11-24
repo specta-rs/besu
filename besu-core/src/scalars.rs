@@ -1367,9 +1367,14 @@ impl Vector {
 
     /// Write `pgvector`'s binary form, which is what the extension sends inside a query
     /// result.
-    pub fn to_binary(&self) -> Vec<u8> {
-        let dimension = i16::try_from(self.0.len()).unwrap_or(i16::MAX);
-        let components = usize::try_from(dimension).unwrap_or(0);
+    ///
+    /// The wire format stores the dimension in a signed 16-bit integer. A longer vector is
+    /// rejected rather than silently truncated.
+    pub fn to_binary(&self) -> Result<Vec<u8>, ParseValueError> {
+        let dimension = i16::try_from(self.0.len())
+            .map_err(|_| ParseValueError::new("", "a vector with at most 32767 components"))?;
+        let components = usize::try_from(dimension)
+            .map_err(|_| ParseValueError::new("", "a vector with at most 32767 components"))?;
         let mut out = Vec::with_capacity(4 + components * 4);
         out.extend_from_slice(&dimension.to_be_bytes());
         // The second field is unused by the extension and is always zero.
@@ -1377,7 +1382,7 @@ impl Vector {
         for value in self.0.iter().take(components) {
             out.extend_from_slice(&value.to_be_bytes());
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1764,10 +1769,37 @@ mod tests {
         assert_eq!("[]".parse::<Vector>(), Ok(Vector::default()));
         assert!("1,2,3".parse::<Vector>().is_err());
 
-        let binary = vector.to_binary();
+        let binary = vector.to_binary().unwrap();
         assert_eq!(&binary[..4], &[0, 3, 0, 0]);
         assert_eq!(Vector::from_binary(&binary), Ok(vector));
         assert!(Vector::from_binary(&binary[..binary.len() - 1]).is_err());
         assert!(Vector::from_binary(&[]).is_err());
+    }
+
+    #[test]
+    fn a_vector_rejects_a_dimension_the_binary_format_cannot_represent() {
+        let maximum = Vector::new((0..i16::MAX).map(|value| value as f32).collect::<Vec<_>>());
+        let binary = maximum.to_binary().unwrap();
+        assert_eq!(&binary[..2], &i16::MAX.to_be_bytes());
+        assert_eq!(Vector::from_binary(&binary).unwrap(), maximum);
+
+        let components = (0..=i16::MAX).map(|value| value as f32).collect::<Vec<_>>();
+        for vector in [
+            Vector::new(components.clone()),
+            Vector::from(components.clone()),
+            format!(
+                "[{}]",
+                components
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .parse::<Vector>()
+            .unwrap(),
+        ] {
+            assert_eq!(vector.len(), 32_768);
+            assert!(vector.to_binary().is_err());
+        }
     }
 }
