@@ -104,10 +104,11 @@ export function httpSource(base = ""): DataSource {
         body: JSON.stringify({ key }),
       }),
 
-    query: (sql) =>
+    query: (sql, options) =>
       request<QueryResult>(base, "/api/query", {
         method: "POST",
         body: JSON.stringify({ sql }),
+        signal: options?.signal,
       }),
   };
 }

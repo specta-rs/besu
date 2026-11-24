@@ -117,31 +117,28 @@ interface ProbeFailure {
 export async function probe(
   target: string,
   timeoutMs = 4000,
+  signal?: AbortSignal,
 ): Promise<ConnectionInfo> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${target}/api/info`, {
-      signal: controller.signal,
-      headers: { accept: "application/json" },
-    });
-    const type = response.headers.get("content-type") ?? "";
-    if (!type.includes("application/json")) {
-      throw new ApiError(
-        `${target} answered with ${type.split(";")[0] || "no content type"}, not a studio server.`,
-        response.status,
-      );
-    }
-    if (!response.ok) {
-      throw new ApiError(
-        `${target} answered ${response.status} ${response.statusText}.`,
-        response.status,
-      );
-    }
-    return (await response.json()) as ConnectionInfo;
-  } finally {
-    window.clearTimeout(timer);
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const response = await fetch(`${target}/api/info`, {
+    signal: requestSignal,
+    headers: { accept: "application/json" },
+  });
+  const type = response.headers.get("content-type") ?? "";
+  if (!type.includes("application/json")) {
+    throw new ApiError(
+      `${target} answered with ${type.split(";")[0] || "no content type"}, not a studio server.`,
+      response.status,
+    );
   }
+  if (!response.ok) {
+    throw new ApiError(
+      `${target} answered ${response.status} ${response.statusText}.`,
+      response.status,
+    );
+  }
+  return (await response.json()) as ConnectionInfo;
 }
 
 function describe(target: string, error: unknown): ProbeFailure {
@@ -152,7 +149,10 @@ function describe(target: string, error: unknown): ProbeFailure {
       hint: `Nothing answered as a studio server on ${label}. Check the port the CLI printed when it started.`,
     };
   }
-  if (error instanceof DOMException && error.name === "AbortError") {
+  if (
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
     return {
       message: `${label} did not answer within four seconds.`,
       hint: "The server may be starting, or something is blocking the request.",
@@ -167,6 +167,25 @@ function describe(target: string, error: unknown): ProbeFailure {
 /** Everything the app needs to decide what it is talking to. */
 export function createConnection() {
   const [state, setState] = createSignal<Connection>({ kind: "idle" });
+  let generation = 0;
+  let pending: AbortController | undefined;
+
+  const cancelPending = () => {
+    generation += 1;
+    pending?.abort();
+    pending = undefined;
+  };
+
+  const beginProbe = () => {
+    cancelPending();
+    const id = generation;
+    const controller = new AbortController();
+    pending = controller;
+    return { id, controller };
+  };
+
+  const isCurrent = (id: number, controller: AbortController) =>
+    id === generation && !controller.signal.aborted;
 
   const source = createMemo<DataSource | null>(() => {
     const current = state();
@@ -182,27 +201,36 @@ export function createConnection() {
 
   const connect = async (input: string) => {
     const target = normalizeTarget(input);
+    const { id, controller } = beginProbe();
     setState({ kind: "probing", target });
     try {
-      live(target, await probe(target));
+      const info = await probe(target, 4000, controller.signal);
+      if (!isCurrent(id, controller)) return;
+      live(target, info);
     } catch (error) {
+      if (!isCurrent(id, controller)) return;
       store(null);
       setState({ kind: "offline", target, ...describe(target, error) });
+    } finally {
+      if (pending === controller) pending = undefined;
     }
   };
 
   const useDemo = () => {
+    cancelPending();
     store({ mode: "demo" });
     setState({ kind: "demo" });
   };
 
   const disconnect = () => {
+    cancelPending();
     store(null);
     setState({ kind: "idle" });
   };
 
   /** Restore the previous choice, or look for a server on this origin first. */
   const start = async () => {
+    cancelPending();
     const saved = stored();
     if (saved?.mode === "demo") {
       setState({ kind: "demo" });
@@ -215,21 +243,30 @@ export function createConnection() {
 
     // Served by `besu studio` itself: same-origin always works, and a hosted
     // page falls through to the loopback address the CLI defaults to.
+    const { id, controller } = beginProbe();
     setState({ kind: "probing", target: "" });
     try {
-      live(window.location.origin, await probe(""));
+      const info = await probe("", 4000, controller.signal);
+      if (!isCurrent(id, controller)) return;
+      live(window.location.origin, info);
       return;
     } catch {
+      if (!isCurrent(id, controller)) return;
       // Not a studio server. Try the default port before asking the user.
     }
 
     const target = `http://127.0.0.1:${DEFAULT_PORT}`;
     setState({ kind: "probing", target });
     try {
-      live(target, await probe(target));
+      const info = await probe(target, 4000, controller.signal);
+      if (!isCurrent(id, controller)) return;
+      live(target, info);
     } catch (error) {
+      if (!isCurrent(id, controller)) return;
       setState({ kind: "idle" });
       void error;
+    } finally {
+      if (pending === controller) pending = undefined;
     }
   };
 

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{future::poll_fn, pin::Pin, time::Instant};
 
 use axum::{
     Json,
@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use besu::{
-    Database, Decode, Dialect, Driver, Fragment, Sql, TypeDef, Value as SqlValue,
+    Database, Decode, Dialect, Driver, Fragment, Sql, Stream, TypeDef, Value as SqlValue,
     schema::{Column, Schema, Table, migrate::split_statements},
 };
 use besu_any::AnyDatabase;
@@ -458,7 +458,26 @@ fn bind_text<D: Dialect>(sql: &mut Sql<D>, ty: Option<&TypeDef>, value: &str) {
 
 /// Bind one JSON value for a column, casting on PostgreSQL for the same reason as
 /// [`bind_text`].
-fn bind_json<D: Dialect>(sql: &mut Sql<D>, ty: &TypeDef, value: &Value) {
+fn bind_json<D: Dialect>(sql: &mut Sql<D>, ty: &TypeDef, value: &Value) -> Result<(), ApiError> {
+    if let Value::String(text) = value {
+        if is_bytes(ty) {
+            let bytes = match text.strip_prefix("hex:") {
+                Some(hex) => decode_hex(hex)?,
+                None => text.as_bytes().to_vec(),
+            };
+            if D::NAME == "postgres" {
+                sql.push_raw("CAST(");
+                sql.bind_value(SqlValue::Bytes(bytes));
+                sql.push_raw(" AS ");
+                sql.push_raw(&D::type_name(ty.clone()));
+                sql.push_raw(")");
+            } else {
+                sql.bind_value(SqlValue::Bytes(bytes));
+            }
+            return Ok(());
+        }
+    }
+
     let text = json_text(value, ty);
 
     if D::NAME == "postgres" {
@@ -469,6 +488,35 @@ fn bind_json<D: Dialect>(sql: &mut Sql<D>, ty: &TypeDef, value: &Value) {
         sql.push_raw(")");
     } else {
         sql.bind(text);
+    }
+    Ok(())
+}
+
+fn decode_hex(hex: &str) -> Result<Vec<u8>, ApiError> {
+    if hex.len() % 2 != 0 {
+        return Err(ApiError::bad_request(
+            "a hex byte value needs pairs of digits",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let high = hex_digit(pair[0]).ok_or_else(|| {
+            ApiError::bad_request("a hex byte value contains a non-hexadecimal digit")
+        })?;
+        let low = hex_digit(pair[1]).ok_or_else(|| {
+            ApiError::bad_request("a hex byte value contains a non-hexadecimal digit")
+        })?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -657,10 +705,10 @@ where
 
 /// Read one page, projecting every value into JSON.
 ///
-/// Each backend decodes a cell as text, because the driver is the only layer that knows how
-/// a row is laid out. `CAST` makes the server hand back text, `NULL` is projected through
-/// [`Driver::is_null`], and the introspected column type turns a numeric or boolean cell
-/// back into a JSON number or boolean.
+/// Text-like cells are cast to text because every backend can decode that. Byte columns
+/// are read without a cast and rendered as hex, since casting arbitrary binary data to
+/// text fails for non-UTF-8 bytes. The introspected type turns numeric and boolean text
+/// back into JSON values.
 async fn read_rows<Dr>(
     db: &Database<Dr>,
     target: &Target,
@@ -672,6 +720,7 @@ async fn read_rows<Dr>(
 where
     Dr: Driver,
     String: Decode<Dr>,
+    Vec<u8>: Decode<Dr>,
 {
     // A view can be empty, and an empty view has no row for the probe to name its columns
     // from. There is then no projection to build, and the honest answer is no rows.
@@ -686,11 +735,15 @@ where
         if index > 0 {
             sql.push_raw(", ");
         }
-        sql.push_raw("CAST(");
-        sql.push_ident(&column.name);
-        sql.push_raw(" AS ");
-        sql.push_raw(cast_type::<Dr::Dialect>());
-        sql.push_raw(")");
+        if is_bytes(&column.ty) {
+            sql.push_ident(&column.name);
+        } else {
+            sql.push_raw("CAST(");
+            sql.push_ident(&column.name);
+            sql.push_raw(" AS ");
+            sql.push_raw(cast_type::<Dr::Dialect>());
+            sql.push_raw(")");
+        }
     }
 
     sql.push_raw(" FROM ");
@@ -714,6 +767,10 @@ where
             if Dr::is_null(row, decode_offset) {
                 values.push(Value::Null);
                 decode_offset += 1;
+            } else if is_bytes(&column.ty) {
+                let bytes =
+                    Vec::<u8>::decode(row, &mut decode_offset).map_err(ApiError::backend)?;
+                values.push(bytes_value(&bytes));
             } else {
                 let text = String::decode(row, &mut decode_offset).map_err(ApiError::backend)?;
                 values.push(cell_value(&column.ty, text));
@@ -724,6 +781,28 @@ where
     }
 
     Ok(out)
+}
+
+/// Whether a cell must be read as bytes instead of being cast to text.
+fn is_bytes(ty: &TypeDef) -> bool {
+    match ty {
+        TypeDef::Bytes => true,
+        TypeDef::Domain(domain) => is_bytes(domain.base.as_type()),
+        _ => false,
+    }
+}
+
+/// A complete, JSON-safe byte value. Hex keeps the preview readable and avoids a
+/// base64 dependency; unlike casting to text it also works for non-UTF-8 data.
+fn bytes_value(bytes: &[u8]) -> Value {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(4 + bytes.len() * 2);
+    out.push_str("hex:");
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Value::String(out)
 }
 
 /// Turn one text cell into JSON using the column's introspected type.
@@ -743,16 +822,26 @@ fn cell_value(ty: &TypeDef, text: String) -> Value {
     }
 }
 
-/// Parse an integer cell, keeping values outside `i64` as text rather than losing precision.
+/// Parse an integer cell, keeping values JavaScript cannot represent exactly as text.
 fn integer_value(text: &str) -> Value {
     if let Ok(value) = text.parse::<i64>() {
-        return Value::from(value);
+        if (JS_SAFE_INTEGER_MIN..=JS_SAFE_INTEGER_MAX).contains(&value) {
+            return Value::from(value);
+        }
+        return Value::String(text.to_owned());
     }
     if let Ok(value) = text.parse::<u64>() {
-        return Value::from(value);
+        if value <= JS_SAFE_INTEGER_MAX as u64 {
+            return Value::from(value);
+        }
     }
     Value::String(text.to_owned())
 }
+
+// JavaScript numbers represent every integer in this range exactly. Larger keys
+// travel as decimal strings so the browser cannot round one row into another.
+const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+const JS_SAFE_INTEGER_MIN: i64 = -9_007_199_254_740_991;
 
 /// Parse a floating-point cell, falling back to text for `NaN` and infinities, which JSON
 /// cannot represent.
@@ -937,7 +1026,7 @@ where
         let column = target
             .column(name)
             .ok_or_else(|| unknown_column(target, name))?;
-        bind_json(&mut sql, &column.ty, value);
+        bind_json(&mut sql, &column.ty, value)?;
     }
 
     sql.push_raw(")");
@@ -977,7 +1066,7 @@ where
             .ok_or_else(|| unknown_column(target, name))?;
         sql.push_ident(name);
         sql.push_raw(" = ");
-        bind_json(&mut sql, &column.ty, value);
+        bind_json(&mut sql, &column.ty, value)?;
     }
 
     sql.push_raw(" WHERE ");
@@ -1029,7 +1118,7 @@ fn push_key<D: Dialect>(
 
         sql.push_ident(name);
         sql.push_raw(" = ");
-        bind_json(sql, &column.ty, value);
+        bind_json(sql, &column.ty, value)?;
     }
 
     Ok(())
@@ -1063,7 +1152,7 @@ struct Outcome {
     columns: Vec<String>,
     rows: Vec<Vec<Value>>,
     rows_affected: u64,
-    last_insert_id: Option<u64>,
+    last_insert_id: Option<String>,
 }
 
 /// Run one SQL statement and report what it produced.
@@ -1077,6 +1166,10 @@ pub(crate) async fn query(
     let request = json_body(body)?;
     let started = Instant::now();
     let statement = one_statement(&request.sql)?;
+    // A disconnected client is not a reliable cancellation signal for SQL already
+    // running on the server. Serializing console statements ensures a later query
+    // cannot finish while an earlier stopped mutation is still in flight.
+    let _query = state.query_lock.lock().await;
 
     let outcome = match &state.db {
         AnyDatabase::Sqlite(db) => run_statement(db, &state.db, &statement).await,
@@ -1109,11 +1202,20 @@ fn one_statement(sql: &str) -> Result<String, ApiError> {
     }
 }
 
-/// Run one statement, preferring a `SELECT` and falling back to a plain execution.
+/// How a statement exposes its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementKind {
+    Query,
+    /// A data-modifying statement with `RETURNING`.
+    AffectingQuery,
+    Execute,
+}
+
+/// Run one statement exactly once, using the driver's own result metadata.
 ///
-/// A statement is a `SELECT` if wrapping it in a derived table works. That probe is a second
-/// execution of a read, which costs one round trip and is safe. A statement that is not a
-/// `SELECT` is executed exactly once, so an `INSERT` is never run twice.
+/// Executing a statement inside a derived-table probe is not a classification technique:
+/// the probe itself can run volatile expressions or mutations. The leading SQL verb says
+/// whether to ask for rows or affected-row output, and the successful path never retries.
 async fn run_statement<Dr>(
     db: &Database<Dr>,
     any: &AnyDatabase,
@@ -1122,9 +1224,22 @@ async fn run_statement<Dr>(
 where
     Dr: Driver,
     String: Decode<Dr>,
+    bool: Decode<Dr>,
+    i64: Decode<Dr>,
+    u64: Decode<Dr>,
+    i128: Decode<Dr>,
+    u128: Decode<Dr>,
+    f64: Decode<Dr>,
+    Vec<u8>: Decode<Dr>,
+    uuid::Uuid: Decode<Dr>,
+    chrono::NaiveDate: Decode<Dr>,
+    chrono::NaiveTime: Decode<Dr>,
+    chrono::NaiveDateTime: Decode<Dr>,
+    chrono::DateTime<chrono::Utc>: Decode<Dr>,
+    serde_json::Value: Decode<Dr>,
 {
-    match probe(db, statement).await.map_err(ApiError::backend)? {
-        Probe::Failed => {
+    match statement_kind(statement) {
+        StatementKind::Execute => {
             let output = any
                 .execute(Fragment::new(statement.to_owned()))
                 .await
@@ -1134,120 +1249,318 @@ where
                 columns: Vec::new(),
                 rows: Vec::new(),
                 rows_affected: output.rows_affected,
-                last_insert_id: output.last_insert_id,
+                last_insert_id: output.last_insert_id.map(|id| id.to_string()),
             })
         }
-        // The probe worked but there is nothing to read names from. Guessing would put a
-        // header the user cannot trust above an empty grid, so there is no header.
-        Probe::Empty => Ok(Outcome {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            rows_affected: 0,
-            last_insert_id: None,
-        }),
-        Probe::Columns(columns) => {
-            let rows = select_as_text(db, statement, &columns).await?;
-
-            Ok(Outcome {
-                columns,
-                rows,
-                rows_affected: 0,
-                last_insert_id: None,
-            })
-        }
+        kind => query_statement(db, statement, kind).await,
     }
 }
 
-/// What wrapping a statement in `SELECT * FROM (...) AS __besu_q LIMIT 1` found.
-enum Probe {
-    /// The statement is not a query; it has to be executed instead.
-    Failed,
-    /// It is a query, but it returned no row to take column names from.
-    Empty,
-    /// It is a query with these columns.
-    Columns(Vec<String>),
-}
-
-/// Ask the database whether a statement is a query, and what it returns.
-async fn probe<Dr>(db: &Database<Dr>, statement: &str) -> Result<Probe, Dr::Error>
-where
-    Dr: Driver,
-{
-    let mut sql = Sql::<Dr::Dialect>::new();
-    sql.push_raw("SELECT * FROM (");
-    sql.push_raw(statement);
-    sql.push_raw(") AS __besu_q LIMIT 1");
-
-    let sql = sql.finish().map_err(Dr::error)?;
-    let rows = match db.driver().query(&sql).await {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::debug!(error = %err, "the statement is not a query");
-            return Ok(Probe::Failed);
-        }
-    };
-
-    Ok(match rows.first().and_then(Dr::column_names) {
-        Some(columns) if !columns.is_empty() => Probe::Columns(columns),
-        _ => Probe::Empty,
-    })
-}
-
-/// Re-read a query with every cell cast to text.
-///
-/// The original column names are known from the probe and are kept for the response; the
-/// casts need aliases the driver can decode in a known order, so they are numbered.
-async fn select_as_text<Dr>(
+async fn query_statement<Dr>(
     db: &Database<Dr>,
     statement: &str,
-    columns: &[String],
-) -> Result<Vec<Vec<Value>>, ApiError>
+    kind: StatementKind,
+) -> Result<Outcome, ApiError>
 where
     Dr: Driver,
     String: Decode<Dr>,
+    bool: Decode<Dr>,
+    i64: Decode<Dr>,
+    u64: Decode<Dr>,
+    i128: Decode<Dr>,
+    u128: Decode<Dr>,
+    f64: Decode<Dr>,
+    Vec<u8>: Decode<Dr>,
+    uuid::Uuid: Decode<Dr>,
+    chrono::NaiveDate: Decode<Dr>,
+    chrono::NaiveTime: Decode<Dr>,
+    chrono::NaiveDateTime: Decode<Dr>,
+    chrono::DateTime<chrono::Utc>: Decode<Dr>,
+    serde_json::Value: Decode<Dr>,
 {
-    let mut sql = Sql::<Dr::Dialect>::with_capacity(statement.len() + columns.len() * 32 + 32);
-    sql.push_raw("SELECT ");
-
-    for (index, column) in columns.iter().enumerate() {
-        if index > 0 {
-            sql.push_raw(", ");
+    let sql = Sql::<Dr::Dialect>::raw(statement.to_owned())
+        .finish()
+        .map_err(ApiError::backend)?
+        .seal();
+    let mut stream = db
+        .driver()
+        .query_stream(&sql)
+        .await
+        .map_err(ApiError::backend)?;
+    let mut rows = Vec::with_capacity(QUERY_LIMIT as usize);
+    while rows.len() < QUERY_LIMIT as usize {
+        let next = poll_fn(|cx| Pin::new(&mut stream).poll_next(cx)).await;
+        match next {
+            Some(row) => rows.push(row.map_err(ApiError::backend)?),
+            None => break,
         }
-        sql.push_raw("CAST(q.");
-        sql.push_ident(column);
-        sql.push_raw(" AS ");
-        sql.push_raw(cast_type::<Dr::Dialect>());
-        sql.push_raw(") AS ");
-        sql.push_ident(&format!("__c{index}"));
     }
 
-    sql.push_raw(" FROM (");
-    sql.push_raw(statement);
-    sql.push_raw(") AS q LIMIT ");
-    sql.bind(i64::from(QUERY_LIMIT));
-
-    let sql = sql.finish().map_err(ApiError::backend)?.seal();
-    let rows = db.driver().query(&sql).await.map_err(ApiError::backend)?;
-
+    let columns = rows.first().and_then(Dr::column_names).unwrap_or_default();
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut values = Vec::with_capacity(columns.len());
         let mut offset = 0;
-
-        for _ in columns {
+        for _ in &columns {
             if Dr::is_null(row, offset) {
                 values.push(Value::Null);
                 offset += 1;
             } else {
-                let text = String::decode(row, &mut offset).map_err(ApiError::backend)?;
-                values.push(Value::String(text));
+                values.push(query_cell::<Dr>(row, &mut offset)?);
+                offset += 1;
             }
         }
-
         out.push(values);
     }
 
-    Ok(out)
+    Ok(Outcome {
+        columns,
+        rows_affected: if kind == StatementKind::AffectingQuery {
+            out.len() as u64
+        } else {
+            0
+        },
+        rows: out,
+        last_insert_id: None,
+    })
+}
+
+/// Decode one cell from a query that was not wrapped in projection casts.
+///
+/// The console must execute a statement only once, so it cannot cast the result in a
+/// second statement. Drivers first get a chance to provide text; the built-in decoders
+/// then cover the primitive, temporal, JSON and byte values a hand-written query can
+/// return. Each attempt uses its own offset so a failed decode cannot skip a column.
+fn query_cell<Dr>(row: &Dr::Row, offset: &mut usize) -> Result<Value, ApiError>
+where
+    Dr: Driver,
+    String: Decode<Dr>,
+    bool: Decode<Dr>,
+    i64: Decode<Dr>,
+    u64: Decode<Dr>,
+    i128: Decode<Dr>,
+    u128: Decode<Dr>,
+    f64: Decode<Dr>,
+    Vec<u8>: Decode<Dr>,
+    uuid::Uuid: Decode<Dr>,
+    chrono::NaiveDate: Decode<Dr>,
+    chrono::NaiveTime: Decode<Dr>,
+    chrono::NaiveDateTime: Decode<Dr>,
+    chrono::DateTime<chrono::Utc>: Decode<Dr>,
+    serde_json::Value: Decode<Dr>,
+{
+    let index = *offset;
+    if let Ok(text) = Dr::decode_text(row, index) {
+        return Ok(Value::String(text));
+    }
+
+    macro_rules! decode_as {
+        ($ty:ty, $render:expr) => {{
+            let mut candidate = index;
+            if let Ok(value) = <$ty as Decode<Dr>>::decode(row, &mut candidate) {
+                return Ok(Value::String($render(value)));
+            }
+        }};
+    }
+
+    // Integers precede booleans because SQLite stores booleans as integers and
+    // sqlx will happily decode any non-zero integer as `true`.
+    decode_as!(i64, |value: i64| value.to_string());
+    decode_as!(u64, |value: u64| value.to_string());
+    decode_as!(i128, |value: i128| value.to_string());
+    decode_as!(u128, |value: u128| value.to_string());
+    decode_as!(f64, |value: f64| value.to_string());
+    decode_as!(bool, |value: bool| {
+        if Dr::Dialect::NAME == "sqlite" || Dr::Dialect::NAME == "mysql" {
+            if value { "1" } else { "0" }.to_owned()
+        } else {
+            value.to_string()
+        }
+    });
+    decode_as!(uuid::Uuid, |value: uuid::Uuid| value.to_string());
+    decode_as!(chrono::NaiveDate, |value: chrono::NaiveDate| value
+        .to_string());
+    decode_as!(chrono::NaiveTime, |value: chrono::NaiveTime| value
+        .to_string());
+    decode_as!(chrono::NaiveDateTime, |value: chrono::NaiveDateTime| value
+        .to_string());
+    decode_as!(chrono::DateTime<chrono::Utc>, |value: chrono::DateTime<
+        chrono::Utc,
+    >| value.to_string());
+    decode_as!(serde_json::Value, |value: serde_json::Value| value
+        .to_string());
+
+    let mut candidate = index;
+    if let Ok(bytes) = Vec::<u8>::decode(row, &mut candidate) {
+        return Ok(bytes_value(&bytes));
+    }
+
+    Err(ApiError::backend(Dr::error(besu::Error::decode(
+        index,
+        "the studio could not decode this query cell",
+    ))))
+}
+
+/// Classify a statement without sending any SQL to the database.
+///
+/// This deliberately handles the row-returning forms the console supports rather than
+/// pretending to be a SQL parser. Unknown forms use `execute`; valid row-returning forms
+/// such as `PRAGMA`, `WITH ... SELECT`, and DML with `RETURNING` use `query`.
+fn statement_kind(statement: &str) -> StatementKind {
+    let words = top_level_words(statement);
+    let Some(first) = words.first().map(String::as_str) else {
+        return StatementKind::Execute;
+    };
+
+    let (verb, start) = if first == "with" {
+        let Some((index, verb)) = words
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, word)| is_statement_verb(word))
+        else {
+            return StatementKind::Execute;
+        };
+        (verb.as_str(), index)
+    } else {
+        (first, 0)
+    };
+
+    let affecting = matches!(verb, "insert" | "update" | "delete");
+    let returns_rows = matches!(
+        verb,
+        "select" | "values" | "table" | "pragma" | "explain" | "show" | "describe" | "desc"
+    ) || (affecting
+        && words.iter().skip(start + 1).any(|word| word == "returning"));
+
+    if !returns_rows {
+        StatementKind::Execute
+    } else if affecting {
+        StatementKind::AffectingQuery
+    } else {
+        StatementKind::Query
+    }
+}
+
+fn is_statement_verb(word: &str) -> bool {
+    matches!(
+        word,
+        "select"
+            | "values"
+            | "table"
+            | "insert"
+            | "update"
+            | "delete"
+            | "pragma"
+            | "explain"
+            | "show"
+            | "describe"
+            | "desc"
+    )
+}
+
+/// Unquoted, uncommented words at parenthesis depth zero. Words inside strings,
+/// identifiers, comments and CTE bodies cannot change the statement's outer verb.
+fn top_level_words(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut words = Vec::new();
+    let mut index = 0;
+    let mut depth = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\r' | b'\n' => index += 1,
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                let mut comments = 1usize;
+                while index < bytes.len() && comments > 0 {
+                    if bytes.get(index..index + 2) == Some(b"/*") {
+                        comments += 1;
+                        index += 2;
+                    } else if bytes.get(index..index + 2) == Some(b"*/") {
+                        comments -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            quote @ (b'\'' | b'"' | b'`') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                        } else {
+                            index += 1;
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'[' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+                index = (index + 1).min(bytes.len());
+            }
+            b'$' => {
+                // PostgreSQL dollar-quoted string: $tag$ ... $tag$.
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                if bytes.get(index) == Some(&b'$') {
+                    let delimiter = &sql[start..=index];
+                    index += 1;
+                    if let Some(end) = sql[index..].find(delimiter) {
+                        index += end + delimiter.len();
+                    } else {
+                        index = bytes.len();
+                    }
+                } else {
+                    index = start + 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric()
+                        || bytes[index] == b'_'
+                        || bytes[index] == b'$')
+                {
+                    index += 1;
+                }
+                if depth == 0 {
+                    words.push(sql[start..index].to_ascii_lowercase());
+                }
+            }
+            _ => index += 1,
+        }
+    }
+
+    words
 }
 
 /// A duration a JSON number can hold.
@@ -1256,6 +1569,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 /// A failure the API can report as JSON.
+#[derive(Debug)]
 pub(crate) struct ApiError {
     status: StatusCode,
     message: String,
@@ -1290,7 +1604,132 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::database_label;
+    use super::{StatementKind, database_label, query_statement, statement_kind};
+    use besu::besu_core::{Placeholder, UpsertStyle};
+    use besu::{Database, Decode, Dialect, Driver, Error, TypeDef, Value};
+    use std::{
+        borrow::Cow,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    #[derive(Debug, Clone, Copy)]
+    struct TestDialect;
+
+    impl Dialect for TestDialect {
+        type Value = Value;
+        const NAME: &'static str = "test";
+        const PLACEHOLDER: Placeholder = Placeholder::Question;
+        const SUPPORTS_RETURNING: bool = true;
+        const SUPPORTS_ILIKE: bool = false;
+        const SUPPORTS_FULL_JOIN: bool = true;
+        const UPSERT: UpsertStyle = UpsertStyle::OnConflict;
+
+        fn bind(value: Value) -> Result<Self::Value, Error> {
+            Ok(value)
+        }
+
+        fn write_placeholder(out: &mut String, _index: usize) {
+            out.push('?');
+        }
+
+        fn type_name(_ty: TypeDef) -> Cow<'static, str> {
+            Cow::Borrowed("TEXT")
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestRow(i64);
+
+    impl Decode<CountingDriver> for String {
+        fn decode(row: &TestRow, offset: &mut usize) -> Result<Self, Error> {
+            *offset += 1;
+            Ok(row.0.to_string())
+        }
+    }
+
+    impl Decode<CountingDriver> for i64 {
+        fn decode(row: &TestRow, offset: &mut usize) -> Result<Self, Error> {
+            *offset += 1;
+            Ok(row.0)
+        }
+    }
+
+    macro_rules! unsupported_decode {
+        ($($ty:ty),* $(,)?) => {
+            $(
+                impl Decode<CountingDriver> for $ty {
+                    fn decode(_row: &TestRow, _offset: &mut usize) -> Result<Self, Error> {
+                        Err(Error::unsupported("not used by this test"))
+                    }
+                }
+            )*
+        };
+    }
+
+    unsupported_decode!(
+        bool,
+        u64,
+        i128,
+        u128,
+        f64,
+        Vec<u8>,
+        uuid::Uuid,
+        chrono::NaiveDate,
+        chrono::NaiveTime,
+        chrono::NaiveDateTime,
+        chrono::DateTime<chrono::Utc>,
+        serde_json::Value,
+    );
+
+    #[derive(Clone, Default)]
+    struct CountingDriver {
+        queries: Arc<AtomicUsize>,
+    }
+
+    impl Driver for CountingDriver {
+        type Dialect = TestDialect;
+        type Error = Error;
+        type Row = TestRow;
+        type Output = ();
+
+        fn error(err: Error) -> Self::Error {
+            err
+        }
+
+        fn row_len(_row: &Self::Row) -> usize {
+            1
+        }
+
+        fn is_null(_row: &Self::Row, _index: usize) -> bool {
+            false
+        }
+
+        fn column_names(_row: &Self::Row) -> Option<Vec<String>> {
+            Some(vec!["value".to_owned()])
+        }
+
+        fn decode_text(row: &Self::Row, _index: usize) -> Result<String, Self::Error> {
+            Ok(row.0.to_string())
+        }
+
+        async fn query(
+            &self,
+            _sql: &besu::Sql<Self::Dialect>,
+        ) -> Result<Vec<Self::Row>, Self::Error> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![TestRow(7)])
+        }
+
+        async fn execute(
+            &self,
+            _sql: &besu::Sql<Self::Dialect>,
+        ) -> Result<Self::Output, Self::Error> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn a_database_label_is_the_last_path_segment() {
@@ -1309,5 +1748,54 @@ mod tests {
             database_label("host=localhost user=besu dbname=app"),
             "host=localhost user=besu dbname=app"
         );
+    }
+
+    #[test]
+    fn statements_are_classified_without_being_executed() {
+        for sql in [
+            "SELECT 1",
+            "PRAGMA table_info(users)",
+            "EXPLAIN SELECT 1",
+            "SHOW TABLES",
+            "VALUES (1)",
+            "/* lead */ WITH x AS (SELECT 1) SELECT * FROM x",
+            "WITH x AS (DELETE FROM users RETURNING id) SELECT count(*) FROM x",
+        ] {
+            assert_eq!(statement_kind(sql), StatementKind::Query, "{sql}");
+        }
+
+        for sql in [
+            "INSERT INTO users (name) VALUES ('x') RETURNING id",
+            "UPDATE users SET name = 'x' RETURNING id",
+            "DELETE FROM users RETURNING id",
+            "WITH x AS (SELECT 1) UPDATE users SET name = 'x' RETURNING id",
+        ] {
+            assert_eq!(statement_kind(sql), StatementKind::AffectingQuery, "{sql}");
+        }
+
+        for sql in [
+            "UPDATE users SET name = 'x'",
+            "INSERT INTO users (name) VALUES ('RETURNING SELECT')",
+            "WITH x AS (DELETE FROM users RETURNING id) UPDATE users SET name = 'x'",
+            "CREATE TABLE users (name TEXT)",
+        ] {
+            assert_eq!(statement_kind(sql), StatementKind::Execute, "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_query_statement_reaches_the_driver_exactly_once() {
+        let driver = CountingDriver::default();
+        let outcome = query_statement(
+            &Database::new(driver.clone()),
+            "SELECT volatile_expression() AS value",
+            StatementKind::Query,
+        )
+        .await
+        .expect("the query runs");
+
+        assert_eq!(driver.queries.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.columns, ["value"]);
+        assert_eq!(outcome.rows, vec![vec![serde_json::json!("7")]]);
     }
 }

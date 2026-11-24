@@ -7,6 +7,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::database::AnyDatabase;
+use besu_studio::redact_connection;
 
 /// Serve the studio for a database.
 #[derive(clap::Args)]
@@ -35,9 +36,12 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         )
         .init();
 
-    let db = AnyDatabase::connect(&args.database)
-        .await
-        .map_err(|err| anyhow::anyhow!("could not connect to `{}`: {err}", args.database))?;
+    let db = AnyDatabase::connect(&args.database).await.map_err(|err| {
+        anyhow::anyhow!(
+            "could not connect to `{}`: {err}",
+            redact_connection(&args.database)
+        )
+    })?;
 
     let host = if args.allow_remote {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -82,6 +86,7 @@ mod tests {
     // production path.
     #![allow(clippy::panic)]
 
+    use besu_studio::redact_connection;
     use clap::Parser;
 
     #[test]
@@ -110,5 +115,25 @@ mod tests {
             }
             _ => panic!("parsed the wrong subcommand"),
         }
+    }
+
+    #[test]
+    fn a_connection_failure_does_not_print_the_password() {
+        let database = "postgres://audit_user:AUDIT_DUMMY_PASSWORD_7f3a@127.0.0.1:1/audit_db";
+        let error = anyhow::anyhow!(
+            "could not connect to `{}`: pool timed out",
+            redact_connection(database)
+        );
+        let rendered = format!("{error:#}");
+
+        assert!(rendered.contains("could not connect to"), "{rendered}");
+        assert!(
+            rendered.contains("postgres://audit_user@127.0.0.1:1/audit_db"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("AUDIT_DUMMY_PASSWORD_7f3a"),
+            "{rendered}"
+        );
     }
 }

@@ -386,8 +386,9 @@ async fn a_select_returns_typed_columns_and_string_cells() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let result = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
 
     assert_eq!(result["columns"], json!(["id", "name", "active"]));
     assert_eq!(
@@ -396,6 +397,197 @@ async fn a_select_returns_typed_columns_and_string_cells() {
     );
     assert_eq!(result["rows_affected"], 0);
     assert!(result["duration_ms"].is_number(), "{result}");
+}
+
+#[tokio::test]
+async fn binary_rows_are_hex_encoded_and_other_pages_still_work() {
+    let fixture = fixture().await;
+    let created = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "CREATE TABLE blobs (id INTEGER PRIMARY KEY, data BLOB, label TEXT)"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let inserted = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "INSERT INTO blobs VALUES (1, X'FF', 'first'), (2, X'4869', 'second')"}),
+    )
+    .await;
+    assert_eq!(inserted.status(), StatusCode::OK);
+
+    let first = get_json(&fixture.app, "/api/tables/blobs/rows?limit=1").await;
+    assert_eq!(first["rows"], json!([[1, "hex:FF", "first"]]));
+    let second = get_json(&fixture.app, "/api/tables/blobs/rows?limit=1&offset=1").await;
+    assert_eq!(second["rows"], json!([[2, "hex:4869", "second"]]));
+
+    let updated = request_json(
+        &fixture.app,
+        Method::PATCH,
+        "/api/tables/blobs/rows",
+        json!({"key": {"id": 1}, "values": {"data": "hex:00FF"}}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let page = get_json(&fixture.app, "/api/tables/blobs/rows?limit=1").await;
+    assert_eq!(page["rows"], json!([[1, "hex:00FF", "first"]]));
+}
+
+#[tokio::test]
+async fn the_query_console_returns_pragma_and_returning_results() {
+    let fixture = fixture().await;
+
+    let pragma = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "PRAGMA table_info(users)"}),
+    )
+    .await;
+    assert_eq!(pragma.status(), StatusCode::OK);
+    let result = body_json(pragma).await;
+    assert_eq!(
+        result["columns"],
+        json!(["cid", "name", "type", "notnull", "dflt_value", "pk"])
+    );
+    assert_eq!(result["rows"].as_array().expect("rows").len(), 3);
+
+    let returned = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "INSERT INTO users (id, name, active) VALUES (4, 'Ada', 1) RETURNING id, name"}),
+    )
+    .await;
+    assert_eq!(returned.status(), StatusCode::OK);
+    let result = body_json(returned).await;
+    assert_eq!(result["columns"], json!(["id", "name"]));
+    assert_eq!(result["rows"], json!([["4", "Ada"]]));
+    assert_eq!(result["rows_affected"], 1);
+    assert_eq!(users(&fixture.app).await.len(), 4);
+
+    let updated = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "UPDATE users SET active = 0 WHERE id = 4"}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let result = body_json(updated).await;
+    assert_eq!(result["columns"], json!([]));
+    assert_eq!(result["rows"], json!([]));
+    assert_eq!(result["rows_affected"], 1);
+}
+
+#[tokio::test]
+async fn a_with_select_returns_its_rows() {
+    let fixture = fixture().await;
+    let response = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "WITH ids AS (SELECT id FROM users) SELECT * FROM ids ORDER BY id"}),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = body_json(response).await;
+    assert_eq!(result["columns"], json!(["id"]));
+    assert_eq!(result["rows"], json!([["1"], ["2"], ["3"]]));
+}
+
+#[tokio::test]
+async fn a_later_console_query_waits_for_an_inflight_statement() {
+    use std::time::Duration;
+
+    let fixture = fixture().await;
+    let app = fixture.app.clone();
+    let first = tokio::spawn(async move {
+        post_json(
+            &app,
+            "/api/query",
+            json!({
+                "sql": "WITH RECURSIVE n(x) AS (
+                    VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1000000
+                ) SELECT sum(x) AS total FROM n"
+            }),
+        )
+        .await
+    });
+
+    // Give the first request time to acquire the console lock and start its
+    // deliberately expensive read. The later request must queue behind it.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let started = std::time::Instant::now();
+    let second = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "SELECT 1 AS one"}),
+    )
+    .await;
+    let waited = started.elapsed();
+
+    assert!(
+        waited >= Duration::from_millis(50),
+        "only waited {waited:?}"
+    );
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(body_json(second).await["rows"], json!([["1"]]));
+
+    let first = first.await.expect("the first request finishes");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(body_json(first).await["rows"], json!([["500000500000"]]));
+}
+
+#[tokio::test]
+async fn unsafe_64_bit_keys_keep_their_identity_through_update_and_delete() {
+    let fixture = fixture().await;
+    let created = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "CREATE TABLE precision_rows (id INTEGER PRIMARY KEY, label TEXT NOT NULL)"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let inserted = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "INSERT INTO precision_rows VALUES (9007199254740992, 'first'), (9007199254740993, 'second')"}),
+    )
+    .await;
+    assert_eq!(inserted.status(), StatusCode::OK);
+
+    let page = get_json(&fixture.app, "/api/tables/precision_rows/rows").await;
+    assert_eq!(
+        page["rows"],
+        json!([
+            ["9007199254740992", "first"],
+            ["9007199254740993", "second"]
+        ])
+    );
+
+    let updated = request_json(
+        &fixture.app,
+        Method::PATCH,
+        "/api/tables/precision_rows/rows",
+        json!({"key": {"id": "9007199254740993"}, "values": {"label": "changed"}}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    assert_eq!(body_json(updated).await["updated"], 1);
+    let page = get_json(&fixture.app, "/api/tables/precision_rows/rows").await;
+    assert_eq!(page["rows"][0][1], "first");
+    assert_eq!(page["rows"][1][1], "changed");
+
+    let deleted = request_json(
+        &fixture.app,
+        Method::DELETE,
+        "/api/tables/precision_rows/rows",
+        json!({"key": {"id": "9007199254740993"}}),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(body_json(deleted).await["deleted"], 1);
+    let page = get_json(&fixture.app, "/api/tables/precision_rows/rows").await;
+    assert_eq!(page["rows"], json!([["9007199254740992", "first"]]));
 }
 
 #[tokio::test]

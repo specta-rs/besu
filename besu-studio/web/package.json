@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "node --conditions=browser --import ./test/register.mjs --test test/*.test.ts",
     "deploy": "vite build && cf deploy ./dist"
   },
   "dependencies": {
