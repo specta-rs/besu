@@ -24,6 +24,7 @@ mod assets;
 use axum::{
     Router,
     extract::Request,
+    http::Uri,
     http::{HeaderValue, Method, header},
     middleware::Next,
     response::Response,
@@ -32,7 +33,7 @@ use axum::{
 use besu_any::AnyDatabase;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::Level;
 
 /// What the UI shows about the connection it is browsing.
@@ -93,7 +94,7 @@ pub fn router(db: AnyDatabase, connection: impl Into<String>) -> Router {
     let state = AppState {
         db,
         info: StudioInfo {
-            connection: redact(&connection.into()),
+            connection: redact_connection(&connection.into()),
             dialect,
             version: env!("CARGO_PKG_VERSION"),
         },
@@ -115,10 +116,49 @@ pub fn router(db: AnyDatabase, connection: impl Into<String>) -> Router {
         .layer(axum::middleware::from_fn(allow_private_network))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .make_span_with(StudioMakeSpan)
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(state)
+}
+
+/// Create request spans without copying private row-filter values into logs.
+#[derive(Debug, Clone, Copy, Default)]
+struct StudioMakeSpan;
+
+impl<B> MakeSpan<B> for StudioMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> tracing::Span {
+        tracing::info_span!(
+            "request",
+            method = %request.method(),
+            uri = %logged_uri(request.uri()),
+            version = ?request.version()
+        )
+    }
+}
+
+/// The request target with filter values replaced. Pagination and sort parameters
+/// remain useful in request logs; a filter can contain a name, token or other
+/// private value and must not be copied there.
+fn logged_uri(uri: &Uri) -> String {
+    let Some(query) = uri.query() else {
+        return uri.path().to_owned();
+    };
+
+    let mut target = uri.path().to_owned();
+    target.push('?');
+    for (index, pair) in query.split('&').enumerate() {
+        if index > 0 {
+            target.push('&');
+        }
+        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+        if key == "filter" {
+            target.push_str("filter=%5Bredacted%5D");
+        } else {
+            target.push_str(pair);
+        }
+    }
+    target
 }
 
 /// The origins allowed to read this server from a browser.
@@ -234,7 +274,7 @@ async fn fallback(request: Request) -> axum::response::Response {
 /// A URL reaches the UI only to be read, so `postgres://user:secret@host/db` is shown as
 /// `postgres://user@host/db`; a scheme-less DSN (`user=… password=…`) has its password
 /// parameter blanked instead.
-fn redact(connection: &str) -> String {
+pub fn redact_connection(connection: &str) -> String {
     let Some((scheme, rest)) = connection.split_once("://") else {
         return connection
             .split_whitespace()
@@ -269,7 +309,7 @@ fn redact(connection: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeaderValue, is_local_origin, redact};
+    use super::{HeaderValue, Uri, is_local_origin, logged_uri, redact_connection};
 
     fn origin(value: &str) -> HeaderValue {
         HeaderValue::from_str(value).expect("a valid header value")
@@ -313,18 +353,33 @@ mod tests {
     #[test]
     fn a_password_never_reaches_the_ui() {
         assert_eq!(
-            redact("postgres://besu:hunter2@localhost:5432/app"),
+            redact_connection("postgres://besu:hunter2@localhost:5432/app"),
             "postgres://besu@localhost:5432/app"
         );
         assert_eq!(
-            redact("mysql://root:secret@127.0.0.1/db?ssl=true"),
+            redact_connection("mysql://root:secret@127.0.0.1/db?ssl=true"),
             "mysql://root@127.0.0.1/db?ssl=true"
         );
-        assert_eq!(redact("sqlite:///tmp/app.db"), "sqlite:///tmp/app.db");
-        assert_eq!(redact("sqlite::memory:"), "sqlite::memory:");
         assert_eq!(
-            redact("host=localhost user=besu password=hunter2 dbname=app"),
+            redact_connection("sqlite:///tmp/app.db"),
+            "sqlite:///tmp/app.db"
+        );
+        assert_eq!(redact_connection("sqlite::memory:"), "sqlite::memory:");
+        assert_eq!(
+            redact_connection("host=localhost user=besu password=hunter2 dbname=app"),
             "host=localhost user=besu password=*** dbname=app"
         );
+    }
+
+    #[test]
+    fn request_logs_redact_filter_values() {
+        let uri = Uri::from_static(
+            "/api/tables/users/rows?limit=50&offset=0&filter=%5B%7B%22value%22%3A%22secret%22%7D%5D",
+        );
+        assert_eq!(
+            logged_uri(&uri),
+            "/api/tables/users/rows?limit=50&offset=0&filter=%5Bredacted%5D"
+        );
+        assert_eq!(logged_uri(&Uri::from_static("/api/info")), "/api/info");
     }
 }
