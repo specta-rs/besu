@@ -62,23 +62,50 @@ impl Migration {
     }
 }
 
-/// FNV-1a over a migration's name, its direction and its statements.
+/// FNV-1a over a migration's name, direction and length-delimited statements.
 ///
-/// The up direction contributes no bytes, so checksums recorded before down migrations
-/// existed still match.
+/// Length prefixes make statement boundaries part of the digest. Joining statements with a
+/// newline is ambiguous: replacing one separator with a newline can produce the same bytes
+/// from different statement vectors.
 fn checksum_of(name: &str, direction: &str, statements: &[String]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    feed(name.as_bytes());
-    feed(&[0]);
-    feed(direction.as_bytes());
-    feed(statements.join("\n").as_bytes());
+    feed_field(&mut hash, name.as_bytes());
+    feed_field(&mut hash, direction.as_bytes());
+    feed_bytes(&mut hash, &(statements.len() as u64).to_be_bytes());
+    for statement in statements {
+        feed_field(&mut hash, statement.as_bytes());
+    }
     format!("{hash:016x}")
+}
+
+fn feed_field(hash: &mut u64, bytes: &[u8]) {
+    feed_bytes(hash, &(bytes.len() as u64).to_be_bytes());
+    feed_bytes(hash, bytes);
+}
+
+fn feed_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// The checksum format used before statement boundaries were length-delimited.
+///
+/// Existing journals contain these digests, so unchanged legacy migrations must still verify.
+/// Newly applied migrations use the unambiguous format above.
+fn legacy_checksum_of(name: &str, direction: &str, statements: &[String]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    feed_bytes(&mut hash, name.as_bytes());
+    feed_bytes(&mut hash, &[0]);
+    feed_bytes(&mut hash, direction.as_bytes());
+    feed_bytes(&mut hash, statements.join("\n").as_bytes());
+    format!("{hash:016x}")
+}
+
+fn checksum_matches(expected: &str, name: &str, direction: &str, statements: &[String]) -> bool {
+    expected == checksum_of(name, direction, statements)
+        || expected == legacy_checksum_of(name, direction, statements)
 }
 
 /// A migration that has been applied to a database.
@@ -573,8 +600,8 @@ fn verify_checksums<F>(
     record: &AppliedMigration,
     migration: &Migration,
 ) -> Result<(), MigrationError<F>> {
-    let actual = migration.checksum();
-    if record.checksum != actual {
+    if !checksum_matches(&record.checksum, &migration.name, "", &migration.statements) {
+        let actual = migration.checksum();
         return Err(MigrationError::ChecksumMismatch {
             version: migration.version,
             expected: record.checksum.clone(),
@@ -584,12 +611,17 @@ fn verify_checksums<F>(
 
     // A row recorded before down checksums existed has no value to compare against, so a down
     // file added later is allowed. Once a checksum is recorded, editing the file is an error.
-    if let (Some(expected), Some(actual)) = (&record.down_checksum, migration.down_checksum()) {
-        if *expected != actual {
+    if let Some(expected) = &record.down_checksum {
+        let matches = migration.down.as_deref().is_some_and(|statements| {
+            checksum_matches(expected, &migration.name, "down", statements)
+        });
+        if !matches {
             return Err(MigrationError::ChecksumMismatch {
                 version: migration.version,
                 expected: expected.clone(),
-                actual,
+                actual: migration
+                    .down_checksum()
+                    .unwrap_or_else(|| "<missing>".to_owned()),
             });
         }
     }
@@ -811,46 +843,6 @@ mod tests {
     }
 
     #[test]
-    fn the_journal_probe_is_scoped_to_this_database() {
-        // `information_schema` is shared with every other schema on PostgreSQL and every
-        // other database on MySQL, so an unscoped count could see another application's
-        // journal and skip the `ALTER` that adds the column to this one.
-        let postgres = super::journal_column_probe("postgres");
-        assert!(
-            postgres.contains("table_schema = current_schema()"),
-            "{postgres}"
-        );
-
-        let mysql = super::journal_column_probe("mysql");
-        assert!(mysql.contains("table_schema = DATABASE()"), "{mysql}");
-
-        // SQLite has no information_schema: the pragma describes the one attached database.
-        let sqlite = super::journal_column_probe("sqlite");
-        assert!(
-            sqlite.contains("pragma_table_info('_besu_migrations')"),
-            "{sqlite}"
-        );
-    }
-
-    #[test]
-    fn checksum_is_stable_and_sensitive_to_content() {
-        let a = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
-        let b = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
-        let c = Migration::from_sql(1, "init", "CREATE TABLE a (id BIGINT)");
-        assert_eq!(a.checksum(), b.checksum());
-        assert_ne!(a.checksum(), c.checksum());
-    }
-
-    #[test]
-    fn up_checksum_is_pinned() {
-        // Every database that has run this migration stores this value in its journal, so a
-        // refactor that changes it would invalidate all of them. The test exists to make that
-        // change deliberate.
-        let migration = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
-        assert_eq!(migration.checksum(), "c5aaac2804fd1185");
-    }
-
-    #[test]
     fn keeps_postgres_dollar_quoted_bodies_in_one_statement() {
         let sql = "CREATE FUNCTION public.answer()\n\
                    RETURNS integer\n\
@@ -898,6 +890,104 @@ mod tests {
     }
 
     #[test]
+    fn the_journal_probe_is_scoped_to_this_database() {
+        // `information_schema` is shared with every other schema on PostgreSQL and every
+        // other database on MySQL, so an unscoped count could see another application's
+        // journal and skip the `ALTER` that adds the column to this one.
+        let postgres = super::journal_column_probe("postgres");
+        assert!(
+            postgres.contains("table_schema = current_schema()"),
+            "{postgres}"
+        );
+
+        let mysql = super::journal_column_probe("mysql");
+        assert!(mysql.contains("table_schema = DATABASE()"), "{mysql}");
+
+        // SQLite has no information_schema: the pragma describes the one attached database.
+        let sqlite = super::journal_column_probe("sqlite");
+        assert!(
+            sqlite.contains("pragma_table_info('_besu_migrations')"),
+            "{sqlite}"
+        );
+    }
+
+    #[test]
+    fn checksum_is_stable_and_sensitive_to_content() {
+        let a = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        let b = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        let c = Migration::from_sql(1, "init", "CREATE TABLE a (id BIGINT)");
+        assert_eq!(a.checksum(), b.checksum());
+        assert_ne!(a.checksum(), c.checksum());
+    }
+
+    #[test]
+    fn up_checksum_is_pinned() {
+        // New journals store the length-delimited format. Legacy digests are pinned below and
+        // still accepted when verifying existing history.
+        let migration = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        assert_eq!(migration.checksum(), "70cefc2f1aca861d");
+    }
+
+    #[test]
+    fn legacy_up_checksum_is_pinned() {
+        let migration = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        assert_eq!(
+            legacy_checksum_of(&migration.name, "", &migration.statements),
+            "c5aaac2804fd1185"
+        );
+    }
+
+    #[test]
+    fn checksum_changes_when_only_statement_boundaries_change() {
+        let before = Migration::from_sql(
+            1,
+            "init",
+            "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);",
+        );
+        let after = Migration::from_sql(
+            1,
+            "init",
+            "CREATE TABLE a (id INT)\nCREATE TABLE b (id INT);",
+        );
+        assert_eq!(before.statements.len(), 2);
+        assert_eq!(after.statements.len(), 1);
+        assert_eq!(before.statements.join("\n"), after.statements.join("\n"));
+        assert_ne!(before.checksum(), after.checksum());
+    }
+
+    #[test]
+    fn unchanged_legacy_up_and_down_checksums_still_verify() {
+        let migration = Migration::from_sql_pair(
+            1,
+            "init",
+            "CREATE TABLE a (id INT)",
+            Some("DROP TABLE a".to_owned()),
+        );
+        let record = AppliedMigration {
+            version: 1,
+            name: "init".to_owned(),
+            checksum: legacy_checksum_of(&migration.name, "", &migration.statements),
+            down_checksum: Some(legacy_checksum_of(
+                &migration.name,
+                "down",
+                migration.down.as_deref().unwrap(),
+            )),
+        };
+        verify_checksums::<besu_core::Error>(&record, &migration).unwrap();
+
+        let edited = Migration::from_sql_pair(
+            1,
+            "init",
+            "CREATE TABLE a (id BIGINT)",
+            Some("DROP TABLE a".to_owned()),
+        );
+        assert!(matches!(
+            verify_checksums::<besu_core::Error>(&record, &edited),
+            Err(MigrationError::ChecksumMismatch { version: 1, .. })
+        ));
+    }
+
+    #[test]
     fn down_checksum_covers_only_the_down_statements() {
         let migration = Migration::from_sql_pair(
             1,
@@ -914,7 +1004,7 @@ mod tests {
 
         assert_eq!(
             migration.down_checksum().as_deref(),
-            Some("539878c5921f7627")
+            Some("06e7fb8e93f3a4be")
         );
         assert_ne!(migration.down_checksum(), edited.down_checksum());
         // The up file did not change, so its checksum must not move.

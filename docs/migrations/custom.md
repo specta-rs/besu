@@ -49,17 +49,21 @@ still recorded in the journal.
 
 ## Checksums are append-only
 
-Every migration is hashed with FNV-1a over its name, a direction marker and its statements.
-The digest is 16 hexadecimal characters and is stored in the journal. Editing an applied
-migration is refused before anything runs:
+Every migration is hashed with FNV-1a over its name, a direction marker and its statements,
+with each field length-delimited so statement boundaries are part of the digest. The digest is
+16 hexadecimal characters and is stored in the journal. Checksums written by older versions
+are still accepted for unchanged migrations. Because the old format omitted statement
+boundaries, it cannot retroactively distinguish the documented separator collision in an
+already-applied legacy row. Editing an applied migration is refused before anything runs:
 
 ```text
 migration 3 has been modified since it was applied (recorded checksum …, now …); migrations are append-only
 ```
 
-The down half is hashed separately, so editing a `.down.sql` is refused the same way. Adding a
-down file to a migration that was applied without one is allowed, because there is no recorded
-down checksum to compare against. Renaming the file's name part also changes the checksum.
+The down half is hashed separately, so editing or deleting a recorded `.down.sql` is refused the
+same way. Adding a down file to a migration that was applied without one is allowed, because
+there is no recorded down checksum to compare against. Renaming the file's name part also
+changes the checksum.
 
 ## Down migrations
 

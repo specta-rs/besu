@@ -3,7 +3,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
-use besu::schema::{Migration, Migrator};
+use besu::schema::{Migration, MigrationError, Migrator};
 use besu_sqlite::Sqlx;
 
 #[tokio::test]
@@ -218,6 +218,37 @@ async fn reverts_the_newest_migration() {
 }
 
 #[tokio::test]
+async fn refuses_to_continue_when_only_statement_boundaries_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("0001_init.sql");
+    std::fs::write(&path, "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);").unwrap();
+
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.migrate(&Migrator::from_dir(dir.path()).unwrap())
+        .await
+        .unwrap();
+
+    // The old checksum joined statements with a newline, so these two files had the same
+    // digest even though the second is one invalid statement instead of two valid ones.
+    std::fs::write(&path, "CREATE TABLE a (id INT)\nCREATE TABLE b (id INT);").unwrap();
+    let error = db
+        .migrate(&Migrator::from_dir(dir.path()).unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            besu::SchemaError::Migration(MigrationError::ChecksumMismatch { version: 1, .. })
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(journal_len(&db).await, 1);
+    let schema = db.introspect().await.unwrap();
+    assert!(schema.table("a").is_some());
+    assert!(schema.table("b").is_some());
+}
+
+#[tokio::test]
 async fn reverts_everything_with_to_zero() {
     let dir = tempfile::tempdir().unwrap();
     write_users_migrations(dir.path(), true);
@@ -252,6 +283,18 @@ async fn reverts_down_to_a_version_and_stops_there() {
     assert_eq!(reverted.iter().map(|m| m.version).collect::<Vec<_>>(), [2]);
     assert_eq!(journal_len(&db).await, 1);
     assert!(db.introspect().await.unwrap().table("users").is_some());
+}
+
+async fn journal_versions(db: &besu::Database<Sqlx>) -> Vec<i64> {
+    db.execute(sql!(
+        "SELECT version FROM _besu_migrations ORDER BY version"
+    ))
+    .all::<(i64,)>()
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(version,)| version)
+    .collect()
 }
 
 #[tokio::test]
@@ -403,6 +446,40 @@ async fn upgrades_a_three_column_journal() {
 }
 
 #[tokio::test]
+async fn accepts_an_unchanged_migration_with_a_legacy_checksum() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("0001_init.sql"), "CREATE TABLE a (id INT)").unwrap();
+
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE _besu_migrations (\
+         version BIGINT PRIMARY KEY, \
+         name VARCHAR(255) NOT NULL, \
+         checksum VARCHAR(64) NOT NULL, \
+         down_checksum VARCHAR(64))"
+    ))
+    .await
+    .unwrap();
+    // The digest produced by the old statement-joining checksum format.
+    db.execute(sql!(
+        "INSERT INTO _besu_migrations (version, name, checksum) VALUES (?, ?, ?)",
+        1,
+        "init",
+        "c5aaac2804fd1185"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("CREATE TABLE a (id INT)")).await.unwrap();
+
+    let applied = db
+        .migrate(&Migrator::from_dir(dir.path()).unwrap())
+        .await
+        .unwrap();
+    assert!(applied.is_empty());
+    assert_eq!(journal_versions(&db).await, [1]);
+}
+
+#[tokio::test]
 async fn upgrades_a_three_column_journal_that_already_has_history() {
     let dir = tempfile::tempdir().unwrap();
     write_users_migrations(dir.path(), true);
@@ -446,6 +523,61 @@ async fn upgrades_a_three_column_journal_that_already_has_history() {
         [2, 1]
     );
     assert_eq!(journal_len(&db).await, 0);
+}
+
+#[tokio::test]
+async fn refuses_an_up_to_date_run_when_a_recorded_down_file_was_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("0001_init.sql"),
+        "CREATE TABLE sentinel (id INTEGER PRIMARY KEY);",
+    )
+    .unwrap();
+    let down_path = dir.path().join("0001_init.down.sql");
+    std::fs::write(&down_path, "DROP TABLE sentinel;").unwrap();
+
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let migrator = Migrator::from_dir(dir.path()).unwrap();
+    let applied = db.migrate(&migrator).await.unwrap();
+    assert!(applied[0].down_checksum.is_some());
+    let recorded = db
+        .execute(sql!(
+            "SELECT checksum, down_checksum FROM _besu_migrations WHERE version = 1"
+        ))
+        .all::<(String, Option<String>)>()
+        .await
+        .unwrap();
+
+    std::fs::remove_file(&down_path).unwrap();
+    let migrator = Migrator::from_dir(dir.path()).unwrap();
+    let error = db.migrate(&migrator).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            besu::SchemaError::Migration(MigrationError::ChecksumMismatch {
+                version: 1,
+                ref actual,
+                ..
+            }) if actual == "<missing>"
+        ),
+        "unexpected error: {error}"
+    );
+
+    assert_eq!(journal_versions(&db).await, [1]);
+    assert_eq!(
+        db.execute(sql!(
+            "SELECT checksum, down_checksum FROM _besu_migrations WHERE version = 1"
+        ))
+        .all::<(String, Option<String>)>()
+        .await
+        .unwrap(),
+        recorded
+    );
+    assert!(db.introspect().await.unwrap().table("sentinel").is_some());
+    assert!(matches!(
+        db.migrate_down_one(&migrator).await.unwrap_err(),
+        besu::SchemaError::Migration(MigrationError::MissingDownFile { version: 1 })
+    ));
 }
 
 #[tokio::test]
