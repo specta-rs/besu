@@ -221,6 +221,7 @@ impl Ddl for SQLiteDdl {
         index.predicate = None;
         for column in &mut index.columns {
             column.opclass = None;
+            column.prefix = None;
         }
         index
     }

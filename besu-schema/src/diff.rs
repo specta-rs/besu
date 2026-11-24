@@ -682,7 +682,7 @@ fn same_predicate(a: Option<&str>, b: Option<&str>) -> bool {
 /// databases report them in their own spelling (`lower(\`email\`)` on MySQL, for example)
 /// while the declaration is written as SQL. A column is compared exactly.
 fn same_index_column(a: &crate::IndexColumn, b: &crate::IndexColumn) -> bool {
-    if a.opclass != b.opclass {
+    if a.opclass != b.opclass || a.prefix != b.prefix {
         return false;
     }
     match (&a.target, &b.target) {
@@ -1851,6 +1851,26 @@ mod tests {
 
         // `text_pattern_ops` changes which predicates the index serves, so the declaration
         // must replace the old index rather than keep it.
+        let changes = diff(&before, &after);
+        assert!(matches!(&changes[0], Change::DropIndex { .. }));
+        assert!(matches!(&changes[1], Change::AddIndex { .. }));
+        assert!(diff(&after, &after).is_empty());
+    }
+
+    #[test]
+    fn an_index_prefix_is_part_of_the_index() {
+        let mut before = table("users", vec![column("email", TypeDef::Text)]);
+        before.indexes.push(crate::Index {
+            name: "email".into(),
+            columns: vec![IndexColumn::column("email").with_prefix(10)],
+            unique: true,
+            kind: crate::IndexKind::Btree,
+            predicate: None,
+        });
+        let mut after = before.clone();
+        after.indexes[0].columns[0].prefix = Some(20);
+        let (before, after) = (schema(vec![before]), schema(vec![after]));
+
         let changes = diff(&before, &after);
         assert!(matches!(&changes[0], Change::DropIndex { .. }));
         assert!(matches!(&changes[1], Change::AddIndex { .. }));

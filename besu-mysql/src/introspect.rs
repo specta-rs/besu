@@ -85,6 +85,43 @@ struct RawIndex {
     kind: Option<IndexKind>,
 }
 
+/// Build one STATISTICS key part, retaining MySQL's prefix length when it has one.
+fn index_column(
+    column_name: Option<String>,
+    expression: Option<String>,
+    prefix: Option<u32>,
+) -> Option<IndexColumn> {
+    let mut entry = match (column_name, expression) {
+        (Some(column_name), _) => IndexColumn::column(column_name),
+        (None, Some(expression)) => IndexColumn::expression(expression),
+        (None, None) => return None,
+    };
+    if let Some(prefix) = prefix {
+        entry = entry.with_prefix(prefix);
+    }
+    Some(entry)
+}
+
+/// Whether a unique key is the column's ordinary UNIQUE constraint.
+///
+/// A custom prefix changes the constraint's scope, so it must stay an index. A prefix equal
+/// to the length MySQL would choose automatically is still the ordinary column constraint.
+fn folds_into_column_unique(index: &RawIndex, table: &Table) -> bool {
+    if !index.unique {
+        return false;
+    }
+    let columns = column_names(&index.columns);
+    let Some([column_name]) = columns.as_deref() else {
+        return false;
+    };
+    if index.name != column_name.as_str() {
+        return false;
+    }
+    table
+        .column(column_name)
+        .is_some_and(|_| index.columns[0].prefix.is_none())
+}
+
 /// The key parts as plain column names, when every part is one.
 fn column_names(columns: &[IndexColumn]) -> Option<Vec<String>> {
     columns
@@ -140,13 +177,20 @@ where
 
     let statistics = db
         .execute(table_query(
-            "SELECT INDEX_NAME, COLUMN_NAME, EXPRESSION, NON_UNIQUE, INDEX_TYPE \
+            "SELECT INDEX_NAME, COLUMN_NAME, EXPRESSION, SUB_PART, NON_UNIQUE, INDEX_TYPE \
              FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY' \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             &name,
         ))
-        .all::<(String, Option<String>, Option<String>, u64, String)>()
+        .all::<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<u32>,
+            u64,
+            String,
+        )>()
         .await?;
 
     let foreign_keys = db
@@ -286,17 +330,19 @@ where
     }
 
     let mut indexes: Vec<RawIndex> = Vec::new();
-    for (index_name, column_name, expression, non_unique, index_type) in statistics {
-        // A column key part has a `COLUMN_NAME`; a functional one has an `EXPRESSION` and no
-        // column. A prefix length is not part of the IR, so the column is reported whole.
-        let entry = match (column_name, expression) {
-            (Some(column_name), _) => Some(IndexColumn::column(column_name)),
-            (None, Some(expression)) => Some(IndexColumn::expression(expression)),
-            (None, None) => None,
-        };
-        let Some(entry) = entry else {
+    for (index_name, column_name, expression, sub_part, non_unique, index_type) in statistics {
+        let Some(mut entry) = index_column(column_name, expression, sub_part) else {
             continue;
         };
+        // The automatic prefix is implied by the column type and is added again by the
+        // DDL renderer. Keep only custom lengths in the IR so declared indexes converge.
+        if let (Some(column), Some(prefix)) = (entry.as_column(), entry.prefix)
+            && table
+                .column(column)
+                .is_some_and(|column| Some(prefix) == crate::ddl::default_index_prefix(&column.ty))
+        {
+            entry.prefix = None;
+        }
         let kind = parse_index_type(&index_type);
         match indexes.iter_mut().find(|index| index.name == index_name) {
             Some(index) => index.columns.push(entry),
@@ -314,9 +360,8 @@ where
     // after the column, which is what distinguishes it from a unique index the user
     // declared themselves.
     for index in &indexes {
-        if index.unique
+        if folds_into_column_unique(index, &table)
             && let Some([column_name]) = column_names(&index.columns).as_deref()
-            && index.name == column_name.as_str()
             && let Some(column) = table
                 .columns
                 .iter_mut()
@@ -336,11 +381,7 @@ where
 
         let column_names = column_names(&index.columns);
 
-        if index.unique
-            && column_names
-                .as_deref()
-                .is_some_and(|names| names.len() == 1 && index.name == names[0])
-        {
+        if folds_into_column_unique(&index, &table) {
             continue;
         }
 
@@ -369,6 +410,7 @@ where
         // `DROP CONSTRAINT` (8.0.19+) or `DROP INDEX`, both of which name that key. A
         // unique functional key is not a column list and stays an index.
         if index.unique
+            && index.columns.iter().all(|column| column.prefix.is_none())
             && let Some(columns) = column_names
             && columns.len() > 1
         {
@@ -865,6 +907,23 @@ fn on_update_clause(extra: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_statistics_key_part_keeps_its_prefix() {
+        assert_eq!(
+            index_column(Some("email".into()), None, Some(10)),
+            Some(IndexColumn::column("email").with_prefix(10))
+        );
+        assert_eq!(
+            index_column(Some("email".into()), None, None),
+            Some(IndexColumn::column("email"))
+        );
+        assert_eq!(
+            index_column(None, Some("lower(email)".into()), None),
+            Some(IndexColumn::expression("lower(email)"))
+        );
+        assert_eq!(index_column(None, None, Some(10)), None);
+    }
 
     #[test]
     fn a_check_clause_with_a_literal_is_folded() {

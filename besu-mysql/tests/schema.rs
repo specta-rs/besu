@@ -1015,3 +1015,81 @@ async fn native_text_widths_replay_their_literal_defaults() {
         .unwrap();
     assert_eq!(rows, [("hello".into(), "hello".into(), "hello".into())]);
 }
+
+/// A single-column UNIQUE prefix is not the column's whole-value UNIQUE flag. Keep the
+/// index and its SUB_PART so recreating a snapshot cannot silently widen the key.
+#[tokio::test]
+async fn a_unique_prefix_survives_introspection_and_recreation() {
+    let db = fresh("besu_test_unique_prefix").await;
+    db.execute(sql!(
+        "CREATE TABLE prefixed_unique (\
+             email TEXT NOT NULL, \
+             UNIQUE KEY email (email(10)))"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO prefixed_unique (email) VALUES ('aaaaaaaaaa-one')"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO prefixed_unique (email) VALUES ('aaaaaaaaaa-two')"
+        ))
+        .await
+        .is_err(),
+        "the original ten-character prefix must reject the shared prefix"
+    );
+
+    let snapshot = db.introspect().await.unwrap();
+    let source = snapshot.table("prefixed_unique").unwrap();
+    assert!(!source.column("email").unwrap().unique);
+    assert!(source.uniques.is_empty());
+    assert_eq!(source.indexes.len(), 1);
+    assert_eq!(source.indexes[0].name, "email");
+    assert!(source.indexes[0].unique);
+    assert_eq!(
+        source.indexes[0].columns,
+        [IndexColumn::column("email").with_prefix(10)]
+    );
+
+    db.execute(sql!("DROP TABLE prefixed_unique"))
+        .await
+        .unwrap();
+    db.push_schema(&snapshot).await.unwrap();
+
+    let prefixes: Vec<(Option<u32>,)> = db
+        .execute(sql!(
+            "SELECT SUB_PART FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'prefixed_unique' \
+             AND INDEX_NAME = 'email'"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(prefixes, [(Some(10),)]);
+
+    db.execute(Fragment::with_args(
+        "INSERT INTO prefixed_unique (email) VALUES (?)",
+        vec![Value::Text("aaaaaaaaaa-one".into())],
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.execute(Fragment::with_args(
+            "INSERT INTO prefixed_unique (email) VALUES (?)",
+            vec![Value::Text("aaaaaaaaaa-two".into())],
+        ))
+        .await
+        .is_err(),
+        "the recreated ten-character prefix must enforce the same scope"
+    );
+    let rows: Vec<(String,)> = db
+        .execute(sql!("SELECT email FROM prefixed_unique"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [("aaaaaaaaaa-one".into(),)]);
+    assert!(db.push_schema(&snapshot).await.unwrap().is_empty());
+}

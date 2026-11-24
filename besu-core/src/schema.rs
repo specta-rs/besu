@@ -186,15 +186,18 @@ impl IndexColumn {
 
 /// One entry in an index's ordered key list.
 ///
-/// An entry is a column or an expression, optionally followed by an operator class.
-/// Operator classes are PostgreSQL's `text_pattern_ops`, `gin_trgm_ops` and friends; the
-/// dialects without them ignore the name rather than render a statement they reject.
+/// An entry is a column or an expression, optionally followed by an operator class or
+/// an index prefix. Operator classes are PostgreSQL's `text_pattern_ops`, `gin_trgm_ops` and
+/// friends; prefixes are MySQL's `column(10)` spelling. Dialects without either ignore it
+/// rather than render a statement they reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexEntry {
     /// What the entry indexes.
     pub target: IndexColumn,
     /// The operator class, if the index names one.
     pub opclass: Option<&'static str>,
+    /// The number of leading characters to index, when the dialect supports prefixes.
+    pub prefix: Option<u32>,
 }
 
 impl IndexEntry {
@@ -203,6 +206,7 @@ impl IndexEntry {
         Self {
             target: IndexColumn::Column(name),
             opclass: None,
+            prefix: None,
         }
     }
 
@@ -211,6 +215,7 @@ impl IndexEntry {
         Self {
             target: IndexColumn::Expression(expression),
             opclass: None,
+            prefix: None,
         }
     }
 
@@ -222,6 +227,19 @@ impl IndexEntry {
         Self {
             target: self.target,
             opclass: Some(opclass),
+            prefix: self.prefix,
+        }
+    }
+
+    /// Attach an index prefix length to this entry.
+    ///
+    /// MySQL uses this for TEXT, BLOB and oversized string keys. Dialects without prefix
+    /// keys ignore it.
+    pub const fn with_prefix(self, prefix: u32) -> Self {
+        Self {
+            target: self.target,
+            opclass: self.opclass,
+            prefix: Some(prefix),
         }
     }
 }
@@ -389,7 +407,7 @@ impl TableDef {
 
 #[cfg(test)]
 mod tests {
-    use super::DefaultValue;
+    use super::{DefaultValue, IndexEntry};
 
     #[test]
     fn text_defaults_escape_backslashes_before_quotes() {
@@ -404,5 +422,15 @@ mod tests {
             DefaultValue::Text("\\') , injected INT DEFAULT 5) #").render(),
             "'\\\\'') , injected INT DEFAULT 5) #'"
         );
+    }
+
+    #[test]
+    fn index_prefix_survives_other_entry_options() {
+        let entry = IndexEntry::column("email")
+            .with_opclass("text_pattern_ops")
+            .with_prefix(10);
+        assert_eq!(entry.prefix, Some(10));
+        assert_eq!(entry.opclass, Some("text_pattern_ops"));
+        assert_eq!(entry.target.as_column(), Some("email"));
     }
 }

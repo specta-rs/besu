@@ -100,8 +100,8 @@ CREATE UNIQUE INDEX "users_email_lower" ON "users" USING gin (lower(email) gin_t
 ```
 
 The keys inside `index(...)` are `columns(...)`, `name = "..."`, `unique`,
-`using = "..."` (`btree`, `gin`, `gist`, `brin`, `fulltext` or `spatial`) and `opclass`. An
-operator class may be written once for a single-entry index:
+`using = "..."` (`btree`, `gin`, `gist`, `brin`, `fulltext` or `spatial`), `opclass` and
+`prefix`. An operator class may be written once for a single-entry index:
 
 ```rust
 #[besu(index(columns(email), opclass = "text_pattern_ops"))]
@@ -117,6 +117,14 @@ or by column name for a composite one:
 operator class has no name to match, so declare that index in the `Schema` IR (which attaches
 the class to the entry directly) or as a hand-written `TableDef`. A bare `opclass` requires
 exactly one entry.
+
+MySQL prefix lengths follow the same two spellings: `prefix = 10` for a single column or
+`prefix(email = 10)` for a composite index. A prefix must be positive and can only name a column.
+
+```rust
+#[besu(index(columns(email), prefix = 10, unique))]
+#[besu(index(columns(team_id, created_at), prefix(team_id = 4)))]
+```
 
 Without a `name`, the index is called `{table}_{column}_idx` for a single column (the same name
 `#[besu(index)]` uses), `{table}_{col1}_{col2}_idx` for several, and an expression contributes
@@ -141,15 +149,16 @@ schema.table_mut("users").unwrap().indexes.push(Index {
 db.push_schema(&schema).await?;
 ```
 
-`IndexColumn::expression("lower(email)")` is the expression spelling, and
-`IndexColumn::column("email").with_opclass("text_pattern_ops")` attaches an operator class.
-`From<&str>` and `From<String>` produce a plain column, so `vec!["name".into()]` still works.
+`IndexColumn::expression("lower(email)")` is the expression spelling,
+`IndexColumn::column("email").with_opclass("text_pattern_ops")` attaches an operator class, and
+`IndexColumn::column("email").with_prefix(10)` attaches a MySQL prefix length. `From<&str>` and
+`From<String>` produce a plain column, so `vec!["name".into()]` still works.
 
 A `TableDef` is also a plain public struct, so a hand-written const can carry a composite,
 expression or operator-class index, and a check. It cannot carry a predicate: that lives only in
 the `Schema` IR. An access method is part of `Index`, so a hand-written `TableDef` can declare
-one. Its entries are `besu::IndexEntry`, which has `column`, `expression` and `with_opclass`
-`const fn` constructors; checks are `besu::CheckDef::new(name, expression)`.
+one. Its entries are `besu::IndexEntry`, which has `column`, `expression`, `with_opclass`
+and `with_prefix` `const fn` constructors; checks are `besu::CheckDef::new(name, expression)`.
 
 ### Access methods
 
@@ -215,6 +224,11 @@ The prefix is part of the table, so adding an index to an existing `TEXT` column
 types too. `push` looks the table up in the schemas it is diffing, which is why
 `CREATE INDEX users_email_idx ON users (email(255))` works rather than failing with MySQL error
 1170 ("BLOB/TEXT column used in key specification without a key length").
+
+An explicit `prefix` overrides that automatic length. Introspection reads `STATISTICS.SUB_PART`
+back into the same field, and a prefixed single-column `UNIQUE` remains an index rather than
+folding into the column's whole-value `unique` flag. Recreating a snapshot therefore preserves
+the exact uniqueness scope instead of widening a ten-character key to 255 characters.
 
 ### Partial indexes
 
