@@ -33,7 +33,7 @@
 
 use core::marker::PhantomData;
 
-use crate::condition::Contains;
+use crate::condition::{Contains, PathNullability};
 use crate::expr::{Expr, ExprKind};
 use crate::query::{DerivedSource, From, IntoQueryBody, QueryBody};
 use crate::table::{Table, TableRef};
@@ -160,11 +160,15 @@ impl<R: 'static> Derived<R> {
     /// from does not compile. A presence check is all the compiler can do: two expressions
     /// over the same row type are different values of the same type, so the compiler cannot
     /// tell them apart. The database checks the column name itself.
-    pub fn column<RowSet, P, T, S, N>(&self, column: Column<T, S, N>) -> Expr<RowSet, S>
+    pub fn column<RowSet, P, T, S, N>(
+        &self,
+        column: Column<T, S, N>,
+    ) -> Expr<RowSet, S, N, P, Derived<R>>
     where
         T: Table,
         S: SqlType,
         N: Nullability,
+        P: PathNullability,
         RowSet: Contains<P, Derived<R>>,
     {
         let _ = PhantomData::<P>;
@@ -199,6 +203,7 @@ impl<R: 'static> Derived<R> {
     where
         S: SqlType,
         W: TypeWitness<S>,
+        P: PathNullability,
         RowSet: Contains<P, Derived<R>>,
     {
         let _ = (witness, PhantomData::<P>);
@@ -231,6 +236,8 @@ impl<R: 'static> TableRef for Derived<R> {
     }
 }
 
+impl<R: 'static> crate::sealed::TableRef for Derived<R> {}
+
 impl<R: 'static> TableRef for &Derived<R> {
     type Marker = Derived<R>;
     type Model = R;
@@ -239,3 +246,5 @@ impl<R: 'static> TableRef for &Derived<R> {
         self.source()
     }
 }
+
+impl<R: 'static> crate::sealed::TableRef for &Derived<R> {}

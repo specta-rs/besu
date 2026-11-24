@@ -129,6 +129,45 @@
 //! // `sql!` counts its placeholders against its arguments at compile time.
 //! let _ = besu::sql!("SELECT * FROM users WHERE id = ?");
 //! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64 }
+//! # #[derive(Table)] #[besu(table = "posts")] struct Post { pub id: i64, pub title: String }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // Ordering and grouping are scoped to the query's joined tables.
+//! let _ = db.select(users).order_by(posts.title);
+//! let _ = db.select(users).group_by(posts.title);
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64 }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // A direction is not a grouping expression.
+//! let _ = db.select(users).group_by(users.id.asc());
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64 }
+//! # #[derive(Table)] #[besu(table = "posts")] struct Post { pub id: i64 }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // The conflict target must name a column of the inserted table.
+//! let _ = db.insert(users).on_conflict(posts.id);
+//! # }
+//! ```
+//!
+//! ```compile_fail
+//! use besu::prelude::*;
+//! # #[derive(Table)] #[besu(table = "users")] struct User { pub id: i64 }
+//! # fn demo(db: &besu_sqlite::Database) {
+//! // BETWEEN bounds are checked against the column's SQL type.
+//! let _ = db.select(users).filter(users.id.between("1", "2"));
+//! # }
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 

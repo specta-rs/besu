@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use besu_core::{Decode, Dialect, DialectOf, Driver, Error, ErrorOf, Executor, Sql};
 
-use crate::expr::{IntoOrder, OrderClause};
+use crate::expr::{IntoQueryOrder, OrderClause};
 use crate::query::{
     Cte, CteColumns, CteRoot, IntoQueryBody, QueryBody, Select, SelectQuery, WithClause,
     render_limit, render_order, select::decode_rows,
@@ -490,14 +490,20 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
     /// because PostgreSQL and MySQL accept nothing else there. An expression other than a
     /// column is written as given and may be rejected by those databases: they allow only
     /// result column names.
-    pub fn order_by<O: IntoOrder>(mut self, order: O) -> Self {
-        self.query.order_by.push(order.into_order());
+    pub fn order_by<O, P, K>(mut self, order: O) -> Self
+    where
+        O: IntoQueryOrder<M, P, K>,
+    {
+        self.query.order_by.push(order.into_query_order());
         self
     }
 
     /// Add a descending `ORDER BY` term for the whole compound.
-    pub fn order_by_desc<O: IntoOrder>(mut self, order: O) -> Self {
-        self.query.order_by.push(order.into_order().reverse());
+    pub fn order_by_desc<O, P, K>(mut self, order: O) -> Self
+    where
+        O: IntoQueryOrder<M, P, K>,
+    {
+        self.query.order_by.push(order.into_query_order().reverse());
         self
     }
 
@@ -650,3 +656,5 @@ impl<'a, E: Executor, M, R> IntoQueryBody for SetQuery<'a, E, M, R> {
         QueryBody::Set(self.query)
     }
 }
+
+impl<'a, E: Executor, M, R> crate::sealed::IntoQueryBody for SetQuery<'a, E, M, R> {}

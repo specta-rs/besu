@@ -69,7 +69,7 @@ pub trait Table: Copy + 'static {
 /// let author = totals.column(posts.author_id);
 /// db.select(&totals).pick((author.clone(), count_all())).group_by(author)
 /// ```
-pub trait TableRef {
+pub trait TableRef: crate::sealed::TableRef {
     /// The type that appears in the query's row set.
     type Marker: 'static;
 
@@ -88,6 +88,8 @@ impl<T: Table> TableRef for T {
         crate::query::From::Table(T::DEF)
     }
 }
+
+impl<T: Table> crate::sealed::TableRef for T {}
 
 /// A new row to be inserted.
 ///

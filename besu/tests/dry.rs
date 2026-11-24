@@ -2605,3 +2605,131 @@ fn a_compound_orders_by_a_derived_column_without_qualifying_it() {
     );
     assert!(sql.error().is_none(), "{:?}", sql.error());
 }
+
+fn assert_select<M, Row>(
+    _query: besu::Select<'_, &besu::Database<besu::besu_core::DryDriver<TestDialect>>, M, Row>,
+) {
+}
+
+#[test]
+fn outer_join_projections_widen_every_accumulated_source() {
+    let db = dry::<TestDialect>();
+
+    assert_select::<_, Option<i64>>(db.select(users).pick(max(users.id)));
+
+    assert_select::<_, (Option<String>, String)>(
+        db.select(users)
+            .right_join(posts, eq(users.id, posts.author_id))
+            .pick((users.name, posts.title)),
+    );
+    assert_select::<_, (Option<User>, Post)>(
+        db.select(users)
+            .right_join(posts, eq(users.id, posts.author_id))
+            .pick((users, posts)),
+    );
+    assert_select::<_, (Option<String>, Option<String>)>(
+        db.select(users)
+            .full_join(posts, eq(users.id, posts.author_id))
+            .pick((users.name, posts.title)),
+    );
+}
+
+#[test]
+fn source_accessors_preserve_column_and_join_nullability() {
+    let db = dry::<TestDialect>();
+    let adults = db.select(users).filter(users.age.gte(18)).cte("adults");
+    let posts_cte = db.select(posts).cte("posts_cte");
+    let bios = derived(db.select(users).pick(users.bio), "bios");
+    let manager = alias(users, "manager");
+
+    assert_select::<_, Option<String>>(db.from(&adults).pick(adults.column(users.bio)));
+    assert_select::<_, Option<String>>(
+        db.select(users)
+            .left_join_cte(&posts_cte, eq(users.id, posts_cte.column(posts.author_id)))
+            .pick(posts_cte.column(posts.title)),
+    );
+    assert_select::<_, Option<String>>(db.select(&bios).pick(bios.column(users.bio)));
+    assert_select::<_, Option<String>>(
+        db.select(users)
+            .left_join(&manager, eq(users.id, manager.column(users.id)))
+            .pick(manager.column(users.bio)),
+    );
+}
+
+#[test]
+fn sealed_proof_traits_keep_fluent_inference() {
+    let db = dry::<TestDialect>();
+    let adults = db.select(users).filter(users.age.gt(18)).cte("adults");
+    let bios = derived(db.select(users).pick(users.bio), "bios");
+    let manager = alias(users, "manager");
+    let raw_true: besu::Expr<(UserTable,), besu::types::Bool> = raw("TRUE");
+
+    let _ = db
+        .select(users)
+        .filter(users.age.gt(18))
+        .filter(raw_true)
+        .pick((users.id, upper(users.name)))
+        .to_sql()
+        .unwrap();
+    let _ = db
+        .select(users)
+        .left_join(posts, eq(users.id, posts.author_id))
+        .filter(posts.title.eq("Rust"))
+        .to_sql()
+        .unwrap();
+    let _ = db
+        .select(&manager)
+        .filter(manager.column(users.age).gt(18))
+        .to_sql()
+        .unwrap();
+    let _ = db
+        .select(&bios)
+        .pick(bios.column(users.bio))
+        .to_sql()
+        .unwrap();
+    let _ = db
+        .from(&adults)
+        .filter(exists(
+            db.select(posts)
+                .correlate(users)
+                .filter(posts.author_id.eq(users.id)),
+        ))
+        .to_sql()
+        .unwrap();
+    let _ = db
+        .select(users)
+        .pick(users.id)
+        .union(db.select(posts).pick(posts.author_id))
+        .to_sql()
+        .unwrap();
+}
+
+#[test]
+fn ordering_grouping_conflicts_and_between_keep_their_type_checks() {
+    let db = dry::<TestDialect>();
+    let sql = db
+        .select(users)
+        .left_join(posts, eq(users.id, posts.author_id))
+        .order_by(posts.title)
+        .order_by_desc(users.name.asc().nulls_last())
+        .group_by(posts.author_id)
+        .to_sql()
+        .unwrap();
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+
+    let _ = db.select(users).order_by(users.name.desc().nulls_last());
+    let _ = db.insert(users).on_conflict(users.email);
+    let _ = db.insert(users).on_conflict((users.email, users.name));
+    let _ = db.insert(users).on_conflict(());
+
+    let sql = db
+        .select(users)
+        .filter(users.age.between(18_i32, 65_i32))
+        .filter(users.age.not_between(18_i32, 65_i32))
+        .filter(users.name.between("A", "Z".to_owned()))
+        .filter(not_between(users.id, 1_i64, 2_i64))
+        .to_sql()
+        .unwrap();
+    assert!(sql.error().is_none(), "{:?}", sql.error());
+    assert_eq!(sql.args().len(), 8);
+}

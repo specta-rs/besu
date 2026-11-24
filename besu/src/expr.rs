@@ -17,12 +17,13 @@ use besu_core::{Dialect, Executor, Sql, TypeDef, Value};
 
 use crate::types::{
     Array, Bit, BitString, Bool, Bytes, Char, Cidr, Column, Date, Decimal, Float4, Float8, I128,
-    Inet, Int1, Int2, Int4, Int8, Json, Jsonb, Nullability, SqlInterval, SqlType, Text, Time,
-    Timestamp, TimestampTz, TypeWitness, U128, UInt1, UInt2, UInt4, UInt8, Uuid, VarBit, VarChar,
+    Inet, Int1, Int2, Int4, Int8, Json, Jsonb, NonNull, Nullability, Nullable, SqlInterval,
+    SqlType, Text, Time, Timestamp, TimestampTz, TypeWitness, U128, UInt1, UInt2, UInt4, UInt8,
+    Uuid, VarBit, VarChar,
 };
 use crate::types::{GeographyOf, Geometry, GeometryOf, Range, Vector, VectorOf};
 
-use crate::condition::Contains;
+use crate::condition::{Contains, Literal, LiteralPath, PathNullability};
 
 macro_rules! expr_comparisons {
     ($( $(#[$attr:meta])* fn $name:ident => $op:literal ),* $(,)?) => {
@@ -2274,12 +2275,22 @@ impl Window {
 /// `T` is the row set the expression belongs to and `S` is the SQL type it produces. Both
 /// are erased before SQL is rendered; they only exist to make invalid queries fail to
 /// compile.
-pub struct Expr<T, S: SqlType = Bool> {
+///
+/// The defaulted `N`, `P` and `X` parameters carry projection nullability for expressions
+/// reached through an alias, CTE or derived table. Ordinary computed expressions default to
+/// non-null; use a direct source accessor when the projection must preserve that proof.
+pub struct Expr<
+    T,
+    S: SqlType = Bool,
+    N: Nullability = NonNull,
+    P: PathNullability = LiteralPath,
+    X: 'static = Literal,
+> {
     pub(crate) kind: ExprKind,
-    phantom: PhantomData<fn() -> (T, S)>,
+    phantom: PhantomData<fn() -> (T, S, N, P, X)>,
 }
 
-impl<T, S: SqlType> Expr<T, S> {
+impl<T, S: SqlType, N: Nullability, P: PathNullability, X: 'static> Expr<T, S, N, P, X> {
     pub(crate) fn from_kind(kind: ExprKind) -> Self {
         Self {
             kind,
@@ -2374,7 +2385,7 @@ impl<T, S: SqlType> Expr<T, S> {
         self.binary("%", other.into_expr().into_kind())
     }
 
-    fn binary(self, op: &'static str, right: ExprKind) -> Self {
+    fn binary(self, op: &'static str, right: ExprKind) -> Expr<T, S> {
         Expr::from_kind(ExprKind::Binary {
             op,
             left: Operand::new(self.into_kind()),
@@ -2472,11 +2483,11 @@ impl<T, S: SqlType> Expr<T, S> {
     ///     .group_by(orders.customer_id)
     ///     .await?;
     /// ```
-    pub fn filter<F, P>(self, condition: F) -> Expr<T, S>
+    pub fn filter<F, PF>(self, condition: F) -> Expr<T, S>
     where
-        F: IntoCondition<T, P>,
+        F: IntoCondition<T, PF>,
     {
-        let _ = core::marker::PhantomData::<P>;
+        let _ = core::marker::PhantomData::<PF>;
         let condition = Operand::new(condition.into_condition());
         Expr::from_kind(wrap_outside_cast(self.into_kind(), |expr| {
             ExprKind::Filter { expr, condition }
@@ -2532,13 +2543,15 @@ impl<T, S: SqlType> Expr<T, S> {
     }
 }
 
-impl<T, S: SqlType> Clone for Expr<T, S> {
+impl<T, S: SqlType, N: Nullability, P: PathNullability, X: 'static> Clone for Expr<T, S, N, P, X> {
     fn clone(&self) -> Self {
         Self::from_kind(self.kind.clone())
     }
 }
 
-impl<T, S: SqlType> core::fmt::Debug for Expr<T, S> {
+impl<T, S: SqlType, N: Nullability, P: PathNullability, X: 'static> core::fmt::Debug
+    for Expr<T, S, N, P, X>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Expr").field("kind", &self.kind).finish()
     }
@@ -2588,9 +2601,11 @@ where
     }
 }
 
-impl<T, S: SqlType> IntoExpr<T, S, ExprMarker> for Expr<T, S> {
+impl<T, S: SqlType, N: Nullability, P: PathNullability, X: 'static> IntoExpr<T, S, ExprMarker>
+    for Expr<T, S, N, P, X>
+{
     fn into_expr(self) -> Expr<T, S> {
-        self
+        Expr::from_kind(self.into_kind())
     }
 }
 
@@ -3185,29 +3200,31 @@ where
 }
 
 /// `a BETWEEN low AND high`.
-pub fn between<RowSet, A, V, MA>(a: A, low: V, high: V) -> Expr<RowSet, Bool>
+pub fn between<RowSet, A, V1, V2, MA>(a: A, low: V1, high: V2) -> Expr<RowSet, Bool>
 where
     A: TypedExpr<RowSet, MA>,
-    V: Into<Value>,
+    V1: IntoSqlValue<A::SqlType>,
+    V2: IntoSqlValue<A::SqlType>,
 {
     Expr::from_kind(ExprKind::Between {
         expr: Operand::new(a.into_typed().into_kind()),
-        low: Operand::new(ExprKind::Value(low.into())),
-        high: Operand::new(ExprKind::Value(high.into())),
+        low: Operand::new(ExprKind::Value(low.into_sql_value())),
+        high: Operand::new(ExprKind::Value(high.into_sql_value())),
         negated: false,
     })
 }
 
 /// `a NOT BETWEEN low AND high`.
-pub fn not_between<RowSet, A, V, MA>(a: A, low: V, high: V) -> Expr<RowSet, Bool>
+pub fn not_between<RowSet, A, V1, V2, MA>(a: A, low: V1, high: V2) -> Expr<RowSet, Bool>
 where
     A: TypedExpr<RowSet, MA>,
-    V: Into<Value>,
+    V1: IntoSqlValue<A::SqlType>,
+    V2: IntoSqlValue<A::SqlType>,
 {
     Expr::from_kind(ExprKind::Between {
         expr: Operand::new(a.into_typed().into_kind()),
-        low: Operand::new(ExprKind::Value(low.into())),
-        high: Operand::new(ExprKind::Value(high.into())),
+        low: Operand::new(ExprKind::Value(low.into_sql_value())),
+        high: Operand::new(ExprKind::Value(high.into_sql_value())),
         negated: true,
     })
 }
@@ -3220,15 +3237,41 @@ where
 ///
 /// Both `Expr<T, Bool>` and a boolean column work, so `filter(users.active)` and
 /// `filter(users.active.eq(true))` are both valid.
-pub trait IntoCondition<T, M> {
+///
+/// This trait is sealed so a downstream type cannot inject an unchecked condition.
+///
+/// ```compile_fail
+/// use besu::prelude::*;
+/// # #[derive(Table)] #[besu(table = "users")] struct User { id: i64 }
+/// # #[derive(Table)] #[besu(table = "posts")] struct Post { id: i64 }
+/// struct MyMarker;
+/// struct Every;
+/// impl besu::IntoCondition<(PostTable,), MyMarker> for Every {
+///     fn into_condition(self) -> besu::ExprKind {
+///         besu::ExprKind::Raw("users.id = 1".into())
+///     }
+/// }
+/// fn require<C: besu::IntoCondition<(PostTable,), MyMarker>>(_: C) {}
+/// require(Every);
+/// ```
+pub trait IntoCondition<T, M>: crate::sealed::IntoCondition {
     /// Convert into a boolean expression.
     fn into_condition(self) -> ExprKind;
 }
 
-impl<T> IntoCondition<T, ExprMarker> for Expr<T, Bool> {
+impl<T, N: Nullability, P: PathNullability, X: 'static> IntoCondition<T, ExprMarker>
+    for Expr<T, Bool, N, P, X>
+where
+    T: Contains<P, X>,
+{
     fn into_condition(self) -> ExprKind {
         self.into_kind()
     }
+}
+
+impl<T, N: Nullability, P: PathNullability, X: 'static> crate::sealed::IntoCondition
+    for Expr<T, Bool, N, P, X>
+{
 }
 
 impl<RowSet, T: Table, N: Nullability, P> IntoCondition<RowSet, ColumnCondition<P>>
@@ -3243,6 +3286,8 @@ where
         }
     }
 }
+
+impl<T: Table, N: Nullability> crate::sealed::IntoCondition for Column<T, Bool, N> {}
 
 /// `a AND b`.
 pub fn and<RowSet, PA, PB, A, B>(a: A, b: B) -> Expr<RowSet, Bool>
@@ -3311,7 +3356,7 @@ pub struct Subquery {
 /// the subquery is built. Correlating requires [`Select::correlate`](crate::Select::correlate)
 /// to put the outer table in the subquery's row set, which is what makes the reference
 /// compile; the reverse check is left to the database.
-pub trait IntoSubquery {
+pub trait IntoSubquery: crate::sealed::IntoSubquery {
     /// The row type the subquery produces.
     ///
     /// `in_query` uses it to require the subquery to produce one value of the column's Rust
@@ -3332,6 +3377,8 @@ impl<'a, E: Executor, M, R> IntoSubquery for crate::query::Select<'a, E, M, R> {
     }
 }
 
+impl<'a, E: Executor, M, R> crate::sealed::IntoSubquery for crate::query::Select<'a, E, M, R> {}
+
 impl<'a, E: Executor, M, R> IntoSubquery for crate::query::SetQuery<'a, E, M, R> {
     type Row = R;
 
@@ -3341,6 +3388,8 @@ impl<'a, E: Executor, M, R> IntoSubquery for crate::query::SetQuery<'a, E, M, R>
         }
     }
 }
+
+impl<'a, E: Executor, M, R> crate::sealed::IntoSubquery for crate::query::SetQuery<'a, E, M, R> {}
 
 /// `EXISTS (subquery)`: whether the subquery returns at least one row.
 ///
@@ -3482,11 +3531,13 @@ where
     }
 }
 
-impl<RowSet, S: SqlType> TypedExpr<RowSet, ExprMarker> for Expr<RowSet, S> {
+impl<RowSet, S: SqlType, N: Nullability, P: PathNullability, X: 'static>
+    TypedExpr<RowSet, ExprMarker> for Expr<RowSet, S, N, P, X>
+{
     type SqlType = S;
 
     fn into_typed(self) -> Expr<RowSet, S> {
-        self
+        Expr::from_kind(self.into_kind())
     }
 }
 
@@ -3708,12 +3759,38 @@ where
 }
 
 unary_same! {
-    /// `MIN(expr)`.
-    min = "min",
-    /// `MAX(expr)`.
-    max = "max",
     /// `ABS(expr)`.
     abs = "abs",
+}
+
+/// `MIN(expr)`.
+///
+/// An aggregate over no rows (or only NULLs) produces SQL NULL, so its projection is
+/// `Option<S::Rust>` rather than `S::Rust`.
+pub fn min<RowSet, A, MA>(value: A) -> Expr<RowSet, A::SqlType, Nullable>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::Function {
+        name: "min",
+        args: alloc::vec![value.into_typed().into_kind()],
+        distinct: false,
+    })
+}
+
+/// `MAX(expr)`.
+///
+/// An aggregate over no rows (or only NULLs) produces SQL NULL, so its projection is
+/// `Option<S::Rust>` rather than `S::Rust`.
+pub fn max<RowSet, A, MA>(value: A) -> Expr<RowSet, A::SqlType, Nullable>
+where
+    A: TypedExpr<RowSet, MA>,
+{
+    Expr::from_kind(ExprKind::Function {
+        name: "max",
+        args: alloc::vec![value.into_typed().into_kind()],
+        distinct: false,
+    })
 }
 
 /// `ROUND(expr)`.
@@ -5495,7 +5572,9 @@ impl IntoOrder for OrderClause {
     }
 }
 
-impl<T, S: SqlType> IntoOrder for Expr<T, S> {
+impl<T, S: SqlType, N: Nullability, P: PathNullability, X: 'static> IntoOrder
+    for Expr<T, S, N, P, X>
+{
     fn into_order(self) -> OrderClause {
         self.asc()
     }
@@ -5513,6 +5592,82 @@ impl<T: Table, S: SqlType, N: Nullability> IntoOrder for Column<T, S, N> {
         }
     }
 }
+
+/// A typed expression that may be used to order a query over row set `M`.
+///
+/// `P` is the inferred containment path. `OrderClause` remains an erased escape hatch.
+pub trait IntoQueryOrder<M, P, K>: crate::sealed::QueryOrder {
+    /// Convert into an order clause.
+    fn into_query_order(self) -> OrderClause;
+}
+
+/// Anything usable in `GROUP BY` for a query over row set `M`.
+///
+/// Unlike ordering, this deliberately does not accept an `OrderClause`: direction and
+/// `NULLS` placement have no meaning in a grouping expression.
+pub trait IntoGroupBy<M, P, K>: crate::sealed::QueryOrder {
+    /// Convert into a grouping expression.
+    fn into_group_by(self) -> ExprKind;
+}
+
+/// Internal marker: an already erased ordering clause.
+pub enum OrderClauseMarker {}
+
+impl<M> IntoQueryOrder<M, LiteralPath, OrderClauseMarker> for OrderClause {
+    fn into_query_order(self) -> OrderClause {
+        self
+    }
+}
+
+impl<M, S: SqlType, N: Nullability, P: PathNullability, X: 'static> IntoQueryOrder<M, P, ExprMarker>
+    for Expr<M, S, N, P, X>
+where
+    M: Contains<P, X>,
+{
+    fn into_query_order(self) -> OrderClause {
+        self.asc()
+    }
+}
+
+impl<M, T: Table, S: SqlType, N: Nullability, P> IntoQueryOrder<M, P, ColumnMarker<P>>
+    for Column<T, S, N>
+where
+    M: Contains<P, T>,
+{
+    fn into_query_order(self) -> OrderClause {
+        self.into_order()
+    }
+}
+
+impl<M, S: SqlType, N: Nullability, P: PathNullability, X: 'static> IntoGroupBy<M, P, ExprMarker>
+    for Expr<M, S, N, P, X>
+where
+    M: Contains<P, X>,
+{
+    fn into_group_by(self) -> ExprKind {
+        self.into_kind()
+    }
+}
+
+impl<M, T: Table, S: SqlType, N: Nullability, P> IntoGroupBy<M, P, ColumnMarker<P>>
+    for Column<T, S, N>
+where
+    M: Contains<P, T>,
+{
+    fn into_group_by(self) -> ExprKind {
+        ExprKind::Column {
+            table: T::DEF.name,
+            column: self.name(),
+        }
+    }
+}
+
+impl crate::sealed::QueryOrder for OrderClause {}
+impl<M, S: SqlType, N: Nullability, P: PathNullability, X: 'static> crate::sealed::QueryOrder
+    for Expr<M, S, N, P, X>
+{
+}
+impl<T: Table, S: SqlType, N: Nullability> crate::sealed::QueryOrder for Column<T, S, N> {}
 
 // ---------------------------------------------------------------------------------------
 // Column conveniences
@@ -5762,16 +5917,32 @@ impl<T: Table, S: SqlType, N: Nullability> Column<T, S, N> {
     }
 
     /// `BETWEEN low AND high`.
-    pub fn between<RowSet, P, V>(self, low: V, high: V) -> Expr<RowSet, Bool>
+    pub fn between<RowSet, P, V1, V2>(self, low: V1, high: V2) -> Expr<RowSet, Bool>
     where
         RowSet: Contains<P, T>,
-        V: Into<Value>,
+        V1: IntoSqlValue<S>,
+        V2: IntoSqlValue<S>,
     {
         Expr::from_kind(ExprKind::Between {
             expr: Operand::new(self.into_expr_kind()),
-            low: Operand::new(ExprKind::Value(low.into())),
-            high: Operand::new(ExprKind::Value(high.into())),
+            low: Operand::new(ExprKind::Value(low.into_sql_value())),
+            high: Operand::new(ExprKind::Value(high.into_sql_value())),
             negated: false,
+        })
+    }
+
+    /// this NOT BETWEEN low AND high.
+    pub fn not_between<RowSet, P, V1, V2>(self, low: V1, high: V2) -> Expr<RowSet, Bool>
+    where
+        RowSet: Contains<P, T>,
+        V1: IntoSqlValue<S>,
+        V2: IntoSqlValue<S>,
+    {
+        Expr::from_kind(ExprKind::Between {
+            expr: Operand::new(self.into_expr_kind()),
+            low: Operand::new(ExprKind::Value(low.into_sql_value())),
+            high: Operand::new(ExprKind::Value(high.into_sql_value())),
+            negated: true,
         })
     }
 

@@ -9,7 +9,7 @@ use alloc::borrow::Cow;
 use crate::types::Bool;
 use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
 
-use crate::expr::{Expr, IntoCondition, IntoOrder};
+use crate::expr::{Expr, IntoCondition, IntoGroupBy, IntoQueryOrder};
 use crate::query::{
     Cte, CteColumns, DerivedSource, DynamicSelect, From, IntoQueryBody, JoinClause, JoinKind,
     QueryBody, SelectQuery, SetOp, SetQuery, validate_cte,
@@ -71,20 +71,29 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
     }
 
     /// Add an `ORDER BY` term.
-    pub fn order_by<O: IntoOrder>(mut self, order: O) -> Self {
-        self.query.order_by.push(order.into_order());
+    pub fn order_by<O, P, K>(mut self, order: O) -> Self
+    where
+        O: IntoQueryOrder<M, P, K>,
+    {
+        self.query.order_by.push(order.into_query_order());
         self
     }
 
     /// Add a descending `ORDER BY` term.
-    pub fn order_by_desc<O: IntoOrder>(mut self, order: O) -> Self {
-        self.query.order_by.push(order.into_order().reverse());
+    pub fn order_by_desc<O, P, K>(mut self, order: O) -> Self
+    where
+        O: IntoQueryOrder<M, P, K>,
+    {
+        self.query.order_by.push(order.into_query_order().reverse());
         self
     }
 
     /// Add a `GROUP BY` expression.
-    pub fn group_by<O: IntoOrder>(mut self, expr: O) -> Self {
-        self.query.group_by.push(expr.into_order().expr);
+    pub fn group_by<O, P, K>(mut self, expr: O) -> Self
+    where
+        O: IntoGroupBy<M, P, K>,
+    {
+        self.query.group_by.push(expr.into_group_by());
         self
     }
 
@@ -514,7 +523,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
         mut self,
         table: T,
         on: Expr<(M, T::Marker), Bool>,
-    ) -> Select<'a, E, (M, T::Marker), (Option<R>, T::Model)> {
+    ) -> Select<'a, E, (Option<M>, T::Marker), (Option<R>, T::Model)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Right,
             source: table.into_source(),
@@ -533,7 +542,7 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
         mut self,
         table: T,
         on: Expr<(M, Option<T::Marker>), Bool>,
-    ) -> Select<'a, E, (M, Option<T::Marker>), (Option<R>, Option<T::Model>)> {
+    ) -> Select<'a, E, (Option<M>, Option<T::Marker>), (Option<R>, Option<T::Model>)> {
         self.query.joins.push(JoinClause {
             kind: JoinKind::Full,
             source: table.into_source(),
@@ -681,3 +690,5 @@ impl<'a, E: Executor, M, R> IntoQueryBody for Select<'a, E, M, R> {
         QueryBody::Select(self.query)
     }
 }
+
+impl<'a, E: Executor, M, R> crate::sealed::IntoQueryBody for Select<'a, E, M, R> {}

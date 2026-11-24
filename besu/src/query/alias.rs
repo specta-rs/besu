@@ -83,7 +83,7 @@
 
 use core::marker::PhantomData;
 
-use crate::condition::Contains;
+use crate::condition::{Contains, PathNullability};
 use crate::expr::{Expr, ExprKind};
 use crate::query::{AliasSource, From};
 use crate::table::{Table, TableRef};
@@ -227,10 +227,14 @@ impl<T: Table, const TAG: u64> Alias<T, TAG> {
     /// the table it belongs to, and an alias is not a table. Being an expression, it can be
     /// compared, ordered, grouped and projected, which is everything a column can do in a
     /// query that only reads.
-    pub fn column<RowSet, P, S, N>(&self, column: Column<T, S, N>) -> Expr<RowSet, S>
+    pub fn column<RowSet, P, S, N>(
+        &self,
+        column: Column<T, S, N>,
+    ) -> Expr<RowSet, S, N, P, Alias<T, TAG>>
     where
         S: SqlType,
         N: Nullability,
+        P: PathNullability,
         RowSet: Contains<P, Alias<T, TAG>>,
     {
         let _ = PhantomData::<P>;
@@ -260,6 +264,8 @@ impl<T: Table, const TAG: u64> TableRef for Alias<T, TAG> {
     }
 }
 
+impl<T: Table, const TAG: u64> crate::sealed::TableRef for Alias<T, TAG> {}
+
 /// Implemented for the borrowed handle as well, so a join can name the alias without
 /// giving it up — the join condition usually needs the alias too.
 impl<T: Table, const TAG: u64> TableRef for &Alias<T, TAG> {
@@ -270,3 +276,5 @@ impl<T: Table, const TAG: u64> TableRef for &Alias<T, TAG> {
         self.source()
     }
 }
+
+impl<T: Table, const TAG: u64> crate::sealed::TableRef for &Alias<T, TAG> {}

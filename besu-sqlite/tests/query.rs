@@ -44,6 +44,22 @@ pub struct Employee {
     pub manager_id: Option<i64>,
 }
 
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "left_items")]
+pub struct LeftItem {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "right_items")]
+pub struct RightItem {
+    #[besu(primary_key)]
+    pub id: i64,
+    pub name: String,
+}
+
 async fn setup() -> besu::Database<Sqlx> {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
     db.execute(sql!(
@@ -72,6 +88,16 @@ async fn setup() -> besu::Database<Sqlx> {
             "name" TEXT NOT NULL,
             "manager_id" INTEGER
         )"#
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        r#"CREATE TABLE "left_items" ("id" INTEGER PRIMARY KEY, "name" TEXT NOT NULL)"#
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        r#"CREATE TABLE "right_items" ("id" INTEGER PRIMARY KEY, "name" TEXT NOT NULL)"#
     ))
     .await
     .unwrap();
@@ -170,6 +196,15 @@ async fn projection_and_aggregates() {
     let counts: Vec<i64> = db.select(users).pick(count_all()).await.unwrap();
     assert_eq!(counts, [2]);
 
+    let empty_max: Vec<Option<i64>> = db
+        .select(users)
+        .filter(users.id.eq(-1_i64))
+        .pick(max(users.id))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(empty_max, vec![None]);
+
     let ages: Vec<f64> = db.select(users).pick(sum(users.age)).await.unwrap();
     assert_eq!(ages, [50.0]);
 }
@@ -235,6 +270,53 @@ async fn joins() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test]
+async fn right_and_full_joins_decode_the_absent_accumulated_side() {
+    let db = setup().await;
+    db.insert(left_items)
+        .value(left_items.insert(1, "left only".to_owned()))
+        .await
+        .unwrap();
+    db.insert(right_items)
+        .value(right_items.insert(2, "right only".to_owned()))
+        .await
+        .unwrap();
+
+    let right: Vec<(Option<String>, String)> = db
+        .select(left_items)
+        .right_join(right_items, eq(left_items.id, right_items.id))
+        .pick((left_items.name, right_items.name))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(right, vec![(None, "right only".to_owned())]);
+
+    let right_rows: Vec<(Option<LeftItem>, RightItem)> = db
+        .select(left_items)
+        .right_join(right_items, eq(left_items.id, right_items.id))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(right_rows[0].0, None);
+    assert_eq!(right_rows[0].1.name, "right only");
+
+    let mut full: Vec<(Option<String>, Option<String>)> = db
+        .select(left_items)
+        .full_join(right_items, eq(left_items.id, right_items.id))
+        .pick((left_items.name, right_items.name))
+        .all()
+        .await
+        .unwrap();
+    full.sort();
+    assert_eq!(
+        full,
+        vec![
+            (None, Some("right only".to_owned())),
+            (Some("left only".to_owned()), None),
+        ]
+    );
 }
 
 #[tokio::test]
