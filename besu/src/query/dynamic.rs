@@ -38,10 +38,10 @@ use core::{
     pin::Pin,
 };
 
-use besu_core::{Decode, DialectOf, Driver, Error, ErrorOf, Executor};
+use besu_core::{Decode, DialectOf, Error, ErrorOf, Executor};
 
 use crate::expr::{ExprKind, OrderClause};
-use crate::query::{Select, SelectQuery, select::decode_rows};
+use crate::query::{QueryBody, Select, SelectQuery};
 
 /// A [`Select`] with the row-set type-state erased from its clauses.
 ///
@@ -182,15 +182,7 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
-        let prefix = self.exec.table_prefix();
-        let mut exec = self.exec;
-        let sql = self
-            .query
-            .build::<DialectOf<E>>(prefix)
-            .finish()
-            .map_err(<E::Driver as Driver>::error)?;
-        let rows = exec.query(&sql).await?;
-        decode_rows::<E::Driver, R>(&rows)
+        crate::query::select::execute_query(self.exec, QueryBody::Select(self.query)).await
     }
 
     /// Run the query and return the first row, if any.

@@ -13,12 +13,12 @@ use core::{
 
 use alloc::vec::Vec;
 
-use besu_core::{Decode, Dialect, DialectOf, Driver, Error, ErrorOf, Executor, Sql};
+use besu_core::{Decode, Dialect, DialectOf, Error, ErrorOf, Executor, Sql};
 
 use crate::expr::{IntoQueryOrder, OrderClause};
 use crate::query::{
     Cte, CteColumns, CteRoot, IntoQueryBody, QueryBody, Select, SelectQuery, WithClause,
-    render_limit, render_order, select::decode_rows,
+    render_limit, render_order,
 };
 
 /// Which set operator joins two `SELECT`s.
@@ -597,14 +597,19 @@ impl<'a, E: Executor, M, R> SetQuery<'a, E, M, R> {
     }
 
     fn render(&self) -> Sql<DialectOf<E>> {
-        let mut query = self.query.clone();
-        let mut out = Sql::with_capacity(query.capacity_hint());
-        out.set_table_prefix(self.exec.table_prefix());
-        query.render_into(&mut out);
-        // Sealed here, so the text `to_sql` shows and the text the driver runs are the same
-        // string — which is what the prepared-statement cache key depends on.
+        self.query.clone().build(self.exec.table_prefix())
+    }
+}
+
+impl SetParts {
+    /// Render the compound as a complete statement.
+    pub(crate) fn build<D: Dialect>(mut self, prefix: Option<alloc::sync::Arc<str>>) -> Sql<D> {
+        let mut out = Sql::with_capacity(self.capacity_hint());
+        out.set_table_prefix(prefix);
+        self.render_into(&mut out);
+        // Keep the text shown by `to_sql` identical to the text the driver runs.
         let mut out = out.seal();
-        crate::query::render_comment(&mut out, self.query.comment.as_deref());
+        crate::query::render_comment(&mut out, self.comment.as_deref());
         out
     }
 }
@@ -615,13 +620,7 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<Vec<R>, ErrorOf<E>> {
-        let sql = self
-            .render()
-            .finish()
-            .map_err(<E::Driver as Driver>::error)?;
-        let mut exec = self.exec;
-        let rows = exec.query(&sql).await?;
-        decode_rows::<E::Driver, R>(&rows)
+        crate::query::select::execute_query(self.exec, QueryBody::Set(self.query)).await
     }
 
     /// Run the query and return the first row, if any.

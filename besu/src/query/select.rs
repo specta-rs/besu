@@ -211,10 +211,6 @@ impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
                 .inspect(),
         ))
     }
-
-    fn into_parts(self) -> (E, SelectQuery) {
-        (self.exec, self.query)
-    }
 }
 
 impl<'a, E: Executor, M, R> Select<'a, E, M, R> {
@@ -628,29 +624,33 @@ where
 {
     /// Run the query and return every row.
     pub async fn all(self) -> Result<alloc::vec::Vec<R>, ErrorOf<E>> {
-        let prefix = self.exec.table_prefix();
-        let (mut exec, query) = self.into_parts();
-        let sql = query
-            .build::<DialectOf<E>>(prefix)
-            .finish()
-            .map_err(<E::Driver as Driver>::error)?;
-        let rows = exec.query(&sql).await?;
-        decode_rows::<E::Driver, R>(&rows)
+        execute_query(self.exec, QueryBody::Select(self.query)).await
     }
 
     /// Run the query and return the first row, if any.
     pub async fn first(mut self) -> Result<Option<R>, ErrorOf<E>> {
         self.query.limit = Some(1);
-        let prefix = self.exec.table_prefix();
-        let (mut exec, query) = self.into_parts();
-        let sql = query
-            .build::<DialectOf<E>>(prefix)
-            .finish()
-            .map_err(<E::Driver as Driver>::error)?;
-        let rows = exec.query(&sql).await?;
-        let mut decoded = decode_rows::<E::Driver, R>(&rows)?;
-        Ok(decoded.pop())
+        let mut rows = self.all().await?;
+        Ok(rows.pop())
     }
+}
+
+/// Render, run and decode a query body without its builder's row-set parameter.
+pub(crate) async fn execute_query<E, R>(
+    mut exec: E,
+    body: QueryBody,
+) -> Result<alloc::vec::Vec<R>, ErrorOf<E>>
+where
+    E: Executor,
+    R: Decode<E::Driver>,
+{
+    let prefix = exec.table_prefix();
+    let sql = body
+        .build::<DialectOf<E>>(prefix)
+        .finish()
+        .map_err(<E::Driver as Driver>::error)?;
+    let rows = exec.query(&sql).await?;
+    decode_rows::<E::Driver, R>(&rows)
 }
 
 /// Decode every row into `R`, one allocation for the whole result.

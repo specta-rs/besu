@@ -11,3 +11,9 @@
   `min` and `max` now project as optional because empty aggregates return SQL `NULL` (#110).
 - Ordering, grouping and conflict targets are checked against the query's row set, and
   `between` bounds must use the column's SQL type (#118).
+
+### Internal
+
+- Share statement rendering, execution and row decoding across `Select`, `SetQuery` and
+  `DynamicSelect`. `SetQuery` keeps its row-set parameter because it now proves compound
+  ordering scope; noisy local build timings did not justify a public API break (#119).
