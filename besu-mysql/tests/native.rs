@@ -1256,3 +1256,142 @@ async fn a_changed_enum_is_one_alter_column() {
         changes.changes
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// DDL literals are data, even when they contain quotes and backslashes
+// ---------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn enum_and_set_labels_cannot_close_their_type_literal() {
+    use besu::schema::{Column as ColumnIr, Schema, Table as TableIr};
+
+    let db = fresh("besu_native_enum_set_escaping").await;
+    let mode: (String,) = db
+        .execute(sql!("SELECT @@session.sql_mode"))
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!mode.0.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES"));
+
+    let label = "x\\') NOT NULL, owner INT DEFAULT 7) --";
+    let set_label = "x\\')";
+    let column = |name: &str, ty| ColumnIr {
+        name: name.into(),
+        ty,
+        nullable: false,
+        auto_increment: false,
+        primary_key: false,
+        unique: false,
+        default: None,
+        generated: None,
+        comment: None,
+        renamed_from: None,
+    };
+    let table = |name: &str, ty| TableIr {
+        name: name.into(),
+        schema: None,
+        columns: vec![column("mood", ty)],
+        indexes: Vec::new(),
+        uniques: Vec::new(),
+        foreign_keys: Vec::new(),
+        checks: Vec::new(),
+        comment: None,
+    };
+    let desired = Schema {
+        tables: vec![
+            table(
+                "enum_labels",
+                TypeDef::Enum(EnumDef::owned("mood", [label])),
+            ),
+            table(
+                "set_labels",
+                TypeDef::Set(EnumLabels::owned(vec![set_label.into()])),
+            ),
+        ],
+        ..Schema::default()
+    };
+
+    db.push_schema(&desired).await.unwrap();
+    let actual = db.introspect().await.unwrap();
+    for name in ["enum_labels", "set_labels"] {
+        let table = actual.table(name).unwrap();
+        assert_eq!(table.columns.len(), 1, "{name}: {:?}", table.columns);
+        assert_eq!(table.columns[0].name, "mood");
+        assert_eq!(
+            table.columns[0].ty,
+            if name == "enum_labels" {
+                TypeDef::Enum(EnumDef::owned("", [label]))
+            } else {
+                TypeDef::Set(EnumLabels::owned(vec![set_label.into()]))
+            },
+            "{name}"
+        );
+    }
+
+    // A SET member cannot contain a comma, so the server rejects this payload once it is
+    // quoted as data. The important part is that it does not create the injected column.
+    let rejected = Schema {
+        tables: vec![table(
+            "rejected_set_labels",
+            TypeDef::Set(EnumLabels::owned(vec![label.into()])),
+        )],
+        ..Schema::default()
+    };
+    assert!(db.push_schema(&rejected).await.is_err());
+    assert!(
+        db.introspect()
+            .await
+            .unwrap()
+            .table("rejected_set_labels")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_text_default_cannot_inject_another_column() {
+    use besu::schema::{Schema, Table as TableIr};
+
+    let db = fresh("besu_native_default_escaping").await;
+    let payload = "\\') , injected INT DEFAULT 5) #";
+    let column = besu::schema::Column::from_def(&besu::ColumnDef {
+        name: "note",
+        ty: TypeDef::Text,
+        nullable: false,
+        auto_increment: false,
+        primary_key: false,
+        unique: false,
+        default: Some(besu::DefaultValue::Text(payload)),
+        generated: None,
+        renamed_from: None,
+    });
+    let desired = Schema {
+        tables: vec![TableIr {
+            name: "text_defaults".into(),
+            schema: None,
+            columns: vec![column],
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            comment: None,
+        }],
+        ..Schema::default()
+    };
+
+    db.push_schema(&desired).await.unwrap();
+    let actual = db.introspect().await.unwrap();
+    let table = actual.table("text_defaults").unwrap();
+    assert_eq!(table.columns.len(), 1, "{:?}", table.columns);
+    assert_eq!(table.columns[0].name, "note");
+
+    db.execute(Fragment::new("INSERT INTO text_defaults () VALUES ()"))
+        .await
+        .unwrap();
+    let stored: Vec<(String,)> = db
+        .execute(sql!("SELECT note FROM text_defaults"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(stored, [(payload.to_owned(),)]);
+}

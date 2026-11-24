@@ -964,3 +964,54 @@ async fn a_time_keeps_its_nanoseconds() {
     let stored: Vec<Clock> = db.select(clocks).await.unwrap();
     assert_eq!(stored[0].at, value);
 }
+
+/// Native text widths stay Custom in the IR, but a literal default still has to be quoted
+/// and rendered as an expression when the snapshot is replayed.
+#[tokio::test]
+async fn native_text_widths_replay_their_literal_defaults() {
+    let db = fresh("besu_test_native_text_defaults").await;
+    db.execute(sql!(
+        "CREATE TABLE native_text_defaults (\
+             tiny_note TINYTEXT NOT NULL DEFAULT ('hello'), \
+             medium_note MEDIUMTEXT NOT NULL DEFAULT ('hello'), \
+             long_note LONGTEXT NOT NULL DEFAULT ('hello'))"
+    ))
+    .await
+    .unwrap();
+
+    let mut snapshot = db.introspect().await.unwrap();
+    let source = snapshot.table("native_text_defaults").unwrap();
+    for name in ["tiny_note", "medium_note", "long_note"] {
+        let column = source.column(name).unwrap();
+        assert_eq!(column.default.as_deref(), Some("_utf8mb4'hello'"), "{name}");
+    }
+
+    // Model the literal information_schema shape from the regression: COLUMN_DEFAULT is
+    // hello and EXTRA has no DEFAULT_GENERATED. The fixed mapper quotes that value.
+    for column in &mut snapshot.tables[0].columns {
+        column.default = Some("'hello'".into());
+    }
+
+    db.execute(sql!("DROP TABLE native_text_defaults"))
+        .await
+        .unwrap();
+    db.push_schema(&snapshot).await.unwrap();
+
+    let replayed = db.introspect().await.unwrap();
+    let table = replayed.table("native_text_defaults").unwrap();
+    for name in ["tiny_note", "medium_note", "long_note"] {
+        let column = table.column(name).unwrap();
+        assert_eq!(column.default.as_deref(), Some("_utf8mb4'hello'"), "{name}");
+    }
+    db.execute(sql!("INSERT INTO native_text_defaults () VALUES ()"))
+        .await
+        .unwrap();
+    let rows: Vec<(String, String, String)> = db
+        .execute(sql!(
+            "SELECT tiny_note, medium_note, long_note FROM native_text_defaults"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [("hello".into(), "hello".into(), "hello".into())]);
+}

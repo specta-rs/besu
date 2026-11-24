@@ -673,6 +673,14 @@ fn parse_labels(column_type: &str, keyword: &str) -> Option<EnumLabels> {
         let mut label = String::new();
         loop {
             match chars.next()? {
+                '\\' => match chars.next() {
+                    Some(escaped @ ('\'' | '"' | '\\')) => label.push(escaped),
+                    Some(other) => {
+                        label.push('\\');
+                        label.push(other);
+                    }
+                    None => label.push('\\'),
+                },
                 '\'' if chars.peek() == Some(&'\'') => {
                     chars.next();
                     label.push('\'');
@@ -770,6 +778,18 @@ fn literal_default_needs_quotes(ty: &TypeDef) -> bool {
     match ty {
         TypeDef::Collated(inner, _) => literal_default_needs_quotes(inner),
         TypeDef::Domain(def) => literal_default_needs_quotes(def.base.as_type()),
+        TypeDef::Custom(name)
+            if matches!(
+                name.split('(')
+                    .next()
+                    .unwrap_or(name)
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "tinytext" | "mediumtext" | "longtext"
+            ) =>
+        {
+            true
+        }
         TypeDef::Char(_)
         | TypeDef::VarChar(_)
         | TypeDef::Text
@@ -882,6 +902,15 @@ mod tests {
             parse_type("set", "set(a,b)"),
             TypeDef::Custom("set(a,b)".into())
         );
+        // MySQL's COLUMN_TYPE uses backslash escapes under its default SQL mode.
+        assert_eq!(
+            parse_type("enum", r"enum('x\\''')"),
+            TypeDef::Enum(EnumDef::owned("", ["x\\'"]))
+        );
+        assert_eq!(
+            parse_type("set", r"set('x\\''')"),
+            TypeDef::Set(EnumLabels::owned(vec!["x\\'".into()]))
+        );
     }
 
     #[test]
@@ -905,6 +934,17 @@ mod tests {
             parse_default(Some("back\\slash"), "", &TypeDef::Text),
             Some("'back\\\\slash'".into())
         );
+        // Native text widths remain Custom after parsing, but their literal defaults need
+        // the same quoting as TEXT.
+        for name in ["tinytext", "mediumtext", "longtext"] {
+            let ty = parse_type(name, name);
+            assert_eq!(ty, TypeDef::Custom(name.into()));
+            assert_eq!(
+                parse_default(Some("hello"), "", &ty),
+                Some("'hello'".into()),
+                "{name}"
+            );
+        }
         // A literal that happens to spell `NULL` is not a SQL NULL; the latter arrives as
         // `None` from `information_schema`.
         assert_eq!(

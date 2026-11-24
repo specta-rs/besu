@@ -48,6 +48,18 @@ fn bare_type(ty: &TypeDef) -> &TypeDef {
 fn uniqueness(ty: &TypeDef) -> Uniqueness {
     match bare_type(ty) {
         TypeDef::Text | TypeDef::Bytes => Uniqueness::Prefix(INDEX_PREFIX),
+        TypeDef::Custom(name)
+            if matches!(
+                name.split('(')
+                    .next()
+                    .unwrap_or(name)
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob"
+            ) =>
+        {
+            Uniqueness::Prefix(INDEX_PREFIX)
+        }
         // A string type is indexable only while its worst-case byte length fits. `utf8mb4`
         // uses up to four bytes per character, so anything wider than 768 characters needs
         // a prefix or InnoDB rejects the key with "Specified key was too long".
@@ -100,6 +112,13 @@ impl MySqlDdl {
         if matches!(
             bare_type(ty),
             TypeDef::Text | TypeDef::Bytes | TypeDef::Json | TypeDef::Jsonb
+        ) || matches!(
+            bare_type(ty),
+            TypeDef::Custom(name)
+                if matches!(
+                    name.split('(').next().unwrap_or(name).to_ascii_lowercase().as_str(),
+                    "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob"
+                )
         ) {
             return true;
         }
@@ -927,12 +946,21 @@ mod tests {
                 )
                 .ends_with("DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)")
         );
-        // A text column can only take its default as an expression.
+        // A text column can only take its default as an expression. The native text
+        // widths stay Custom in the IR, but have the same grammar requirement.
         assert!(
             MySqlDdl
                 .column_sql(&column(TypeDef::Text, "'hi'"), false)
                 .ends_with("DEFAULT ('hi')")
         );
+        for name in ["tinytext", "mediumtext", "longtext"] {
+            assert!(
+                MySqlDdl
+                    .column_sql(&column(TypeDef::Custom(name.into()), "'hello'"), false)
+                    .ends_with("DEFAULT ('hello')"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
