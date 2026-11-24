@@ -4,6 +4,7 @@ use besu_core::{
     BitString, Cidr, Decode, Driver, Error, Geometry, Inet, Range, Sql, SqlInterval,
     TransactionDriver, Value, Vector,
 };
+use besu_schema::Ddl;
 use sqlx::{
     Arguments, Column as _, Row, Sqlite, SqlitePool,
     pool::PoolConnection,
@@ -13,8 +14,10 @@ use sqlx::{
 };
 
 use crate::SQLite;
+use crate::SQLiteDdl;
 use crate::ddl::{
-    REBUILD_BEGIN, REBUILD_COMMIT, REBUILD_FOREIGN_KEYS_OFF, REBUILD_FOREIGN_KEYS_ON, split_rebuild,
+    REBUILD_BEGIN, REBUILD_COMMIT, REBUILD_FOREIGN_KEYS_OFF, REBUILD_FOREIGN_KEYS_ON,
+    is_foreign_key_check, split_rebuild,
 };
 
 /// A [`besu_core::Driver`] for SQLite, backed by [`sqlx`].
@@ -323,17 +326,23 @@ async fn run_rebuild(
     let foreign_keys: bool = sqlx::query_scalar("PRAGMA foreign_keys")
         .fetch_one(&mut **connection)
         .await?;
+    let legacy_alter_table: bool = sqlx::query_scalar("PRAGMA legacy_alter_table")
+        .fetch_one(&mut **connection)
+        .await?;
     let mut guard = RebuildConnection {
         connection,
         close_on_drop: true,
     };
     guard.execute(REBUILD_FOREIGN_KEYS_OFF).await?;
+    guard.execute("PRAGMA legacy_alter_table = ON").await?;
     let result = match guard.execute(REBUILD_BEGIN).await {
         Ok(()) => {
             let result = async {
+                let views = valid_views(guard.connection).await?;
                 for statement in statements {
-                    guard.execute(statement).await?;
+                    execute_rebuild_statement(&mut guard, statement).await?;
                 }
+                validate_views(&mut guard, &views).await?;
                 guard.execute(REBUILD_COMMIT).await
             }
             .await;
@@ -346,15 +355,81 @@ async fn run_rebuild(
         }
         Err(err) => Err(err),
     };
-    let restore = guard
+    let restore_legacy = guard
+        .execute(if legacy_alter_table {
+            "PRAGMA legacy_alter_table = ON"
+        } else {
+            "PRAGMA legacy_alter_table = OFF"
+        })
+        .await;
+    let restore_foreign_keys = guard
         .execute(if foreign_keys {
             REBUILD_FOREIGN_KEYS_ON
         } else {
             REBUILD_FOREIGN_KEYS_OFF
         })
         .await;
-    guard.close_on_drop = restore.is_err();
-    result.and(restore)
+    guard.close_on_drop = restore_legacy.is_err() || restore_foreign_keys.is_err();
+    result.and(restore_legacy).and(restore_foreign_keys)
+}
+
+/// Views that can be prepared before a rebuild. Invalid pre-existing views are ignored;
+/// only a view that used to work and is broken by the rebuild should fail the push.
+async fn valid_views(connection: &mut PoolConnection<Sqlite>) -> Result<Vec<String>, sqlx::Error> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .fetch_all(&mut **connection)
+    .await?;
+    let mut views = Vec::new();
+    for name in names {
+        let sql = format!("SELECT * FROM {} LIMIT 0", SQLiteDdl.quote(&name));
+        if sqlx::query(&sql).fetch_all(&mut **connection).await.is_ok() {
+            views.push(name);
+        }
+    }
+    Ok(views)
+}
+
+async fn validate_views(
+    guard: &mut RebuildConnection<'_>,
+    views: &[String],
+) -> Result<(), sqlx::Error> {
+    for view in views {
+        let sql = format!("SELECT * FROM {} LIMIT 0", SQLiteDdl.quote(view));
+        sqlx::query(&sql)
+            .fetch_all(&mut **guard.connection)
+            .await
+            .map_err(|error| {
+                sqlx::Error::Protocol(format!(
+                    "view {view:?} is incompatible with the rebuilt table: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+async fn execute_rebuild_statement(
+    guard: &mut RebuildConnection<'_>,
+    statement: &str,
+) -> Result<(), sqlx::Error> {
+    if !is_foreign_key_check(statement) {
+        return guard.execute(statement).await;
+    }
+
+    let rows: Vec<(String, Option<i64>, String, i64)> = sqlx::query_as(statement)
+        .fetch_all(&mut **guard.connection)
+        .await?;
+    if let Some((table, rowid, parent, constraint)) = rows.into_iter().next() {
+        let rowid = match rowid {
+            Some(rowid) => rowid.to_string(),
+            None => "<without rowid>".to_owned(),
+        };
+        return Err(sqlx::Error::Protocol(format!(
+            "foreign key check failed for table {table:?}: row {rowid} references missing parent {parent:?} (constraint {constraint})"
+        )));
+    }
+    Ok(())
 }
 
 impl TransactionDriver for Sqlx {

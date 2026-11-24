@@ -143,8 +143,9 @@ mod sqlx;
 
 /// The suffix a table rebuild gives its scratch copy.
 ///
-/// `ddl` creates the new table under this name and renames it into place at the end, and
-/// `introspect` recognises a leftover one after a rebuild that failed part way through.
+/// `ddl` appends this suffix and a unique per-rebuild nonce, then renames the table into
+/// place at the end. The rebuild is transactional, so it never has to delete a stale object
+/// with this name.
 pub(crate) const REBUILD_SUFFIX: &str = "__besu_tmp";
 
 pub use ddl::SQLiteDdl;

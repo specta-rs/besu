@@ -685,6 +685,17 @@ fn same_index_column(a: &crate::IndexColumn, b: &crate::IndexColumn) -> bool {
     if a.opclass != b.opclass || a.prefix != b.prefix {
         return false;
     }
+    if a.descending != b.descending {
+        return false;
+    }
+    let same_collation = match (&a.collation, &b.collation) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    };
+    if !same_collation {
+        return false;
+    }
     match (&a.target, &b.target) {
         (crate::IndexTarget::Column(a), crate::IndexTarget::Column(b)) => a == b,
         (crate::IndexTarget::Expression(a), crate::IndexTarget::Expression(b)) => {
@@ -957,6 +968,8 @@ mod tests {
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
             checks: Vec::new(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         }
     }
@@ -1858,12 +1871,14 @@ mod tests {
     }
 
     #[test]
-    fn an_index_prefix_is_part_of_the_index() {
+    fn index_prefix_collation_and_order_are_part_of_the_index() {
         let mut before = table("users", vec![column("email", TypeDef::Text)]);
         before.indexes.push(crate::Index {
-            name: "email".into(),
-            columns: vec![IndexColumn::column("email").with_prefix(10)],
-            unique: true,
+            name: "users_email_idx".into(),
+            columns: vec![IndexColumn::column("email")
+                .with_prefix(10)
+                .with_collation("NOCASE")],
+            unique: false,
             kind: crate::IndexKind::Btree,
             predicate: None,
         });
@@ -1875,6 +1890,14 @@ mod tests {
         assert!(matches!(&changes[0], Change::DropIndex { .. }));
         assert!(matches!(&changes[1], Change::AddIndex { .. }));
         assert!(diff(&after, &after).is_empty());
+
+        let mut lower_case = after.clone();
+        lower_case.tables[0].indexes[0].columns[0].collation = Some("nocase".into());
+        assert!(diff(&after, &lower_case).is_empty());
+
+        let mut descending = after.clone();
+        descending.tables[0].indexes[0].columns[0].descending = true;
+        assert!(matches!(&diff(&after, &descending)[0], Change::DropIndex { .. }));
     }
 
     #[test]

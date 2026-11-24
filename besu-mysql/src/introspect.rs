@@ -296,6 +296,8 @@ where
                 expression: normalise_check_expression(&expression),
             })
             .collect(),
+        strict: false,
+        without_rowid: false,
         comment: None,
     };
 

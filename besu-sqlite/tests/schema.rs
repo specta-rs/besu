@@ -147,10 +147,10 @@ fn derived_indexes_carry_composite_expression_and_opclass_entries() {
     );
 }
 
-/// A partial index is skipped, because the IR cannot express its predicate. An expression
-/// index is read back from the `CREATE INDEX` text in `sqlite_master`, so it round-trips.
+/// A partial index keeps the predicate from its `CREATE INDEX` text. An expression index
+/// reads its key expression from the same catalogue text, so both round-trip.
 #[tokio::test]
-async fn a_partial_index_is_skipped_and_an_expression_index_round_trips() {
+async fn a_partial_index_and_an_expression_index_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir).await;
 
@@ -177,14 +177,23 @@ async fn a_partial_index_is_skipped_and_an_expression_index_round_trips() {
     let events_ir = introspected.table("events").unwrap();
     assert_eq!(
         events_ir.indexes,
-        [Index {
-            name: "events_lower_payload_idx".into(),
-            columns: vec![IndexColumn::expression("lower(payload)")],
-            unique: false,
-            kind: IndexKind::Btree,
-            predicate: None,
-        }],
-        "the expression index is modelled and the partial one is skipped"
+        [
+            Index {
+                name: "events_kind_idx".into(),
+                columns: vec![IndexColumn::column("kind")],
+                unique: false,
+                kind: IndexKind::Btree,
+                predicate: Some("kind = 'error'".into()),
+            },
+            Index {
+                name: "events_lower_payload_idx".into(),
+                columns: vec![IndexColumn::expression("lower(payload)")],
+                unique: false,
+                kind: IndexKind::Btree,
+                predicate: None,
+            },
+        ],
+        "both the partial and expression indexes are modelled"
     );
 
     // Pushing the declaration that matches what is there is a no-op, so nothing is dropped.
@@ -627,8 +636,8 @@ async fn a_failed_rebuild_restores_foreign_keys() {
         .await;
     assert!(violation.is_err(), "foreign keys must still be enforced");
 
-    // The scratch table is not reported while the table it copies still exists, so a fixed
-    // diff can be pushed without dropping it by hand.
+    // The failed transaction leaves no scratch table, so a fixed diff can be pushed without
+    // dropping it by hand.
     let introspected: Schema = db.introspect().await.unwrap();
     assert!(introspected.table("people__besu_tmp").is_none());
     let mut fixed = current.clone();

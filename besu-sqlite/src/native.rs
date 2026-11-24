@@ -31,6 +31,7 @@ use besu_core::{
     TransactionDriver, Value, Vector,
 };
 // `fix` and `from_utc_datetime` are trait methods on `chrono`'s offsets.
+use besu_schema::Ddl;
 use chrono::{Offset as _, TimeZone as _};
 use futures_channel::oneshot;
 use rusqlite::params_from_iter;
@@ -40,7 +41,8 @@ use rusqlite::{
 };
 
 use crate::SQLite;
-use crate::ddl::split_rebuild;
+use crate::SQLiteDdl;
+use crate::ddl::{is_foreign_key_check, split_rebuild};
 
 /// Everything the native SQLite driver can fail with.
 ///
@@ -419,25 +421,95 @@ fn run_schema_statements(
             }
             let foreign_keys: bool =
                 connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+            let legacy_alter_table: bool =
+                connection.pragma_query_value(None, "legacy_alter_table", |row| row.get(0))?;
             connection.pragma_update(None, "foreign_keys", false)?;
-            let result = (|| {
+            let result: Result<(), NativeError> = (|| {
+                connection.pragma_update(None, "legacy_alter_table", true)?;
                 let transaction = rusqlite::Transaction::new_unchecked(
                     connection,
                     rusqlite::TransactionBehavior::Immediate,
                 )?;
+                let views = valid_views(&transaction)?;
                 for statement in body {
-                    transaction.execute_batch(statement)?;
+                    execute_rebuild_statement(&transaction, statement)?;
                 }
-                transaction.commit()
+                validate_views(&transaction, &views)?;
+                transaction.commit().map_err(NativeError::from)
             })();
-            // The transaction has committed or dropped (and rolled back) before this PRAGMA.
-            let restore = connection.pragma_update(None, "foreign_keys", foreign_keys);
-            result.and(restore)?;
+            // The transaction has committed or dropped (and rolled back) before these
+            // PRAGMAs. Restore both connection-local settings on success and failure.
+            let restore_legacy = connection
+                .pragma_update(None, "legacy_alter_table", legacy_alter_table)
+                .map_err(NativeError::from);
+            let restore_foreign_keys = connection
+                .pragma_update(None, "foreign_keys", foreign_keys)
+                .map_err(NativeError::from);
+            result.and(restore_legacy).and(restore_foreign_keys)?;
             statements = rest;
         } else {
             connection.execute_batch(statement)?;
             statements = rest;
         }
+    }
+    Ok(())
+}
+
+/// Views that can be prepared before a rebuild. Invalid pre-existing views are ignored;
+/// only a view that used to work and is broken by the rebuild should fail the push.
+fn valid_views(connection: &Connection) -> Result<Vec<String>, NativeError> {
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut views = Vec::new();
+    for row in rows {
+        let name = row?;
+        let sql = format!("SELECT * FROM {} LIMIT 0", SQLiteDdl.quote(&name));
+        if connection.prepare(&sql).is_ok() {
+            views.push(name);
+        }
+    }
+    Ok(views)
+}
+
+fn validate_views(
+    transaction: &rusqlite::Transaction<'_>,
+    views: &[String],
+) -> Result<(), NativeError> {
+    for view in views {
+        let sql = format!("SELECT * FROM {} LIMIT 0", SQLiteDdl.quote(view));
+        transaction.prepare(&sql).map_err(|error| {
+            NativeError::Core(Error::invalid_query(format!(
+                "view {view:?} is incompatible with the rebuilt table: {error}"
+            )))
+        })?;
+    }
+    Ok(())
+}
+
+fn execute_rebuild_statement(
+    transaction: &rusqlite::Transaction<'_>,
+    statement: &str,
+) -> Result<(), NativeError> {
+    if !is_foreign_key_check(statement) {
+        return Ok(transaction.execute_batch(statement)?);
+    }
+
+    let mut query = transaction.prepare(statement)?;
+    let mut rows = query.query([])?;
+    if let Some(row) = rows.next()? {
+        let table: String = row.get(0)?;
+        let rowid: Option<i64> = row.get(1)?;
+        let parent: String = row.get(2)?;
+        let constraint: i64 = row.get(3)?;
+        let rowid = match rowid {
+            Some(rowid) => rowid.to_string(),
+            None => "<without rowid>".to_owned(),
+        };
+        return Err(NativeError::Core(Error::invalid_query(format!(
+            "foreign key check failed for table {table:?}: row {rowid} references missing parent {parent:?} (constraint {constraint})"
+        ))));
     }
     Ok(())
 }
