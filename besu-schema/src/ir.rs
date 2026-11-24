@@ -1046,6 +1046,7 @@ impl Table {
                             IndexColumn {
                                 target,
                                 opclass: entry.opclass.map(Into::into),
+                                prefix: entry.prefix,
                             }
                         })
                         .collect(),
@@ -1389,7 +1390,7 @@ pub enum IndexTarget {
 /// expression, is serialised as an object:
 ///
 /// ```json
-/// ["email", {"column": "name", "opclass": "text_pattern_ops"}, {"expression": "lower(email)"}]
+/// ["email", {"column": "name", "opclass": "text_pattern_ops"}, {"column": "email", "prefix": 10}, {"expression": "lower(email)"}]
 /// ```
 ///
 /// Deserialisation accepts the bare string as a column with the default operator class, so
@@ -1400,6 +1401,8 @@ pub struct IndexColumn {
     pub target: IndexTarget,
     /// The operator class, if the index names one.
     pub opclass: Option<String>,
+    /// The number of leading characters to index, for dialects with prefix keys.
+    pub prefix: Option<u32>,
 }
 
 impl IndexColumn {
@@ -1408,6 +1411,7 @@ impl IndexColumn {
         Self {
             target: IndexTarget::Column(name.into()),
             opclass: None,
+            prefix: None,
         }
     }
 
@@ -1416,12 +1420,19 @@ impl IndexColumn {
         Self {
             target: IndexTarget::Expression(expression.into()),
             opclass: None,
+            prefix: None,
         }
     }
 
     /// Attach an operator class to this entry.
     pub fn with_opclass(mut self, opclass: impl Into<String>) -> Self {
         self.opclass = Some(opclass.into());
+        self
+    }
+
+    /// Attach a prefix length to this entry.
+    pub fn with_prefix(mut self, prefix: u32) -> Self {
+        self.prefix = Some(prefix);
         self
     }
 
@@ -1456,30 +1467,39 @@ impl From<String> for IndexColumn {
 
 impl Serialize for IndexColumn {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match (&self.target, &self.opclass) {
-            (IndexTarget::Column(name), None) => serializer.serialize_str(name),
-            (IndexTarget::Column(name), Some(opclass)) => {
+        match &self.target {
+            IndexTarget::Column(name) if self.opclass.is_none() && self.prefix.is_none() => {
+                serializer.serialize_str(name)
+            }
+            IndexTarget::Column(name) => {
                 #[derive(Serialize)]
                 struct Entry<'a> {
                     column: &'a str,
-                    opclass: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    opclass: Option<&'a str>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    prefix: Option<u32>,
                 }
                 Entry {
                     column: name,
-                    opclass,
+                    opclass: self.opclass.as_deref(),
+                    prefix: self.prefix,
                 }
                 .serialize(serializer)
             }
-            (IndexTarget::Expression(expression), opclass) => {
+            IndexTarget::Expression(expression) => {
                 #[derive(Serialize)]
                 struct Entry<'a> {
                     expression: &'a str,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     opclass: Option<&'a str>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    prefix: Option<u32>,
                 }
                 Entry {
                     expression,
-                    opclass: opclass.as_deref(),
+                    opclass: self.opclass.as_deref(),
+                    prefix: self.prefix,
                 }
                 .serialize(serializer)
             }
@@ -1498,26 +1518,37 @@ impl<'de> Deserialize<'de> for IndexColumn {
                 column: String,
                 #[serde(default)]
                 opclass: Option<String>,
+                #[serde(default)]
+                prefix: Option<u32>,
             },
             Expression {
                 expression: String,
                 #[serde(default)]
                 opclass: Option<String>,
+                #[serde(default)]
+                prefix: Option<u32>,
             },
         }
 
         Ok(match Raw::deserialize(deserializer)? {
             Raw::Plain(name) => Self::column(name),
-            Raw::Column { column, opclass } => Self {
+            Raw::Column {
+                column,
+                opclass,
+                prefix,
+            } => Self {
                 target: IndexTarget::Column(column),
                 opclass,
+                prefix,
             },
             Raw::Expression {
                 expression,
                 opclass,
+                prefix,
             } => Self {
                 target: IndexTarget::Expression(expression),
                 opclass,
+                prefix,
             },
         })
     }
@@ -2486,7 +2517,9 @@ mod tests {
         let index = Index {
             name: "users_search_idx".into(),
             columns: vec![
-                IndexColumn::column("email").with_opclass("text_pattern_ops"),
+                IndexColumn::column("email")
+                    .with_opclass("text_pattern_ops")
+                    .with_prefix(10),
                 IndexColumn::expression("lower(name)"),
             ],
             unique: true,
@@ -2507,6 +2540,10 @@ mod tests {
         let value =
             serde_json::to_value(IndexColumn::column("email")).expect("a column must serialise");
         assert_eq!(value, serde_json::json!("email"));
+
+        let value = serde_json::to_value(IndexColumn::column("email").with_prefix(10))
+            .expect("a prefixed column must serialise");
+        assert_eq!(value, serde_json::json!({"column": "email", "prefix": 10}));
 
         let value =
             serde_json::to_value(IndexColumn::column("email").with_opclass("text_pattern_ops"))
@@ -2529,10 +2566,14 @@ mod tests {
                 .expect("an object entry must load");
         assert_eq!(old.target, IndexTarget::Column("email".into()));
         assert_eq!(old.opclass, None);
+        assert_eq!(old.prefix, None);
         assert_eq!(
             new,
             IndexColumn::column("email").with_opclass("text_pattern_ops")
         );
+        let prefixed: IndexColumn = serde_json::from_str(r#"{"column":"email","prefix":10}"#)
+            .expect("a prefixed object entry must load");
+        assert_eq!(prefixed, IndexColumn::column("email").with_prefix(10));
     }
 
     #[test]

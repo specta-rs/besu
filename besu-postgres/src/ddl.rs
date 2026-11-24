@@ -91,6 +91,16 @@ impl Ddl for PostgresDdl {
         }
     }
 
+    /// PostgreSQL has no MySQL-style prefix keys. Keep operator classes and partial
+    /// indexes, which it does support, but fold the prefix away before comparison.
+    fn normalise_index(&self, index: &Index) -> Index {
+        let mut index = index.clone();
+        for column in &mut index.columns {
+            column.prefix = None;
+        }
+        index
+    }
+
     fn column_sql(&self, column: &Column, inline_pk: bool) -> String {
         let mut sql = format!(
             "{} {}",

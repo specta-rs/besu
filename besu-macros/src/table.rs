@@ -3,8 +3,8 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitStr, Result, Token, Type,
-    Visibility, parse::Parse, spanned::Spanned,
+    Attribute, Data, DeriveInput, Error, Expr, Fields, Ident, Lit, LitInt, LitStr, Result, Token,
+    Type, Visibility, parse::Parse, spanned::Spanned,
 };
 
 /// Resolve the path to the `besu` crate, so generated code keeps working when the
@@ -287,6 +287,7 @@ enum IndexTargetDecl {
 struct IndexEntryDecl {
     target: IndexTargetDecl,
     opclass: Option<LitStr>,
+    prefix: Option<LitInt>,
     span: Span,
 }
 
@@ -298,6 +299,7 @@ struct IndexDecl {
     /// The `IndexKind` variant, when `using = "..."` names one.
     kind: Option<TokenStream>,
     bare_opclass: Option<LitStr>,
+    bare_prefix: Option<LitInt>,
 }
 
 impl IndexDecl {
@@ -308,8 +310,10 @@ impl IndexDecl {
             unique: false,
             kind: None,
             bare_opclass: None,
+            bare_prefix: None,
         };
         let mut opclasses: Vec<(Ident, LitStr)> = Vec::new();
+        let mut prefixes: Vec<(Ident, LitInt)> = Vec::new();
 
         while !input.is_empty() {
             let keyword: Ident = input.parse()?;
@@ -355,12 +359,31 @@ impl IndexDecl {
                         }
                     }
                 }
+            } else if keyword == "prefix" {
+                // prefix = 10 names the only entry; prefix(column = 10) names one per
+                // column. As with opclass, the two spellings cannot be mixed.
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    this.bare_prefix = Some(index_prefix(&input.parse()?)?);
+                } else {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    while !content.is_empty() {
+                        let column: Ident = content.parse()?;
+                        content.parse::<Token![=]>()?;
+                        let value: LitInt = content.parse()?;
+                        prefixes.push((column, index_prefix(&value)?));
+                        if content.peek(Token![,]) {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
             } else {
                 return Err(Error::new(
                     keyword.span(),
                     format!(
                         "besu: unrecognised index attribute `{keyword}`; expected `columns`, \
-                         `name`, `unique`, `using` or `opclass`"
+                         `name`, `unique`, `using`, `opclass` or `prefix`"
                     ),
                 ));
             }
@@ -410,6 +433,46 @@ impl IndexDecl {
             entry.opclass = Some(opclass);
         }
 
+        if let Some(prefix) = &this.bare_prefix {
+            if this.entries.len() != 1 {
+                return Err(Error::new(
+                    prefix.span(),
+                    "besu: a bare `prefix` needs an index with exactly one entry; use \
+                     `prefix(column = 10)` for a composite index",
+                ));
+            }
+            if !matches!(this.entries[0].target, IndexTargetDecl::Column(_)) {
+                return Err(Error::new(
+                    prefix.span(),
+                    "besu: a `prefix` can only be attached to a column",
+                ));
+            }
+            this.entries[0].prefix = Some(prefix.clone());
+        }
+
+        for (column, prefix) in prefixes {
+            let column = ident_str(&column);
+            let entry = this
+                .entries
+                .iter_mut()
+                .find(|entry| {
+                    matches!(&entry.target, IndexTargetDecl::Column(name) if name == &column)
+                })
+                .ok_or_else(|| {
+                    Error::new(
+                        prefix.span(),
+                        format!("besu: no index column named `{column}`"),
+                    )
+                })?;
+            if entry.prefix.is_some() {
+                return Err(Error::new(
+                    prefix.span(),
+                    format!("besu: the prefix for `{column}` is given twice"),
+                ));
+            }
+            entry.prefix = Some(prefix);
+        }
+
         Ok(this)
     }
 }
@@ -430,6 +493,7 @@ fn index_entry(expr: &Expr) -> Result<IndexEntryDecl> {
             Ok(IndexEntryDecl {
                 target: IndexTargetDecl::Column(ident_str(&path.path.segments[0].ident)),
                 opclass: None,
+                prefix: None,
                 span: path.span(),
             })
         }
@@ -437,17 +501,20 @@ fn index_entry(expr: &Expr) -> Result<IndexEntryDecl> {
             Lit::Str(value) => Ok(IndexEntryDecl {
                 target: IndexTargetDecl::Expression(value.value()),
                 opclass: None,
+                prefix: None,
                 span: value.span(),
             }),
             _ => Ok(IndexEntryDecl {
                 target: IndexTargetDecl::Expression(render_expression(expr)),
                 opclass: None,
+                prefix: None,
                 span: lit.span(),
             }),
         },
         other => Ok(IndexEntryDecl {
             target: IndexTargetDecl::Expression(render_expression(other)),
             opclass: None,
+            prefix: None,
             span: other.span(),
         }),
     }
@@ -518,6 +585,20 @@ fn render_expression(expr: &Expr) -> String {
     }
 
     out.trim().to_owned()
+}
+
+/// Validate a positive MySQL prefix length.
+fn index_prefix(lit: &LitInt) -> Result<LitInt> {
+    let prefix = lit
+        .base10_parse::<u32>()
+        .map_err(|_| Error::new(lit.span(), "besu: an index prefix must fit in u32"))?;
+    if prefix == 0 {
+        return Err(Error::new(
+            lit.span(),
+            "besu: an index prefix must be positive",
+        ));
+    }
+    Ok(lit.clone())
 }
 
 /// Map `using = "..."` onto an `IndexKind` variant.
@@ -1313,6 +1394,7 @@ impl Codegen {
                 .as_ref()
                 .map_or_else(|| quote!(Btree), |kind| quote!(#kind));
             let entries = index.entries.iter().map(|entry| {
+                let entry_prefix = &entry.prefix;
                 let base = match &entry.target {
                     IndexTargetDecl::Column(column) => {
                         let column = LitStr::new(column, entry.span);
@@ -1323,9 +1405,13 @@ impl Codegen {
                         quote!(#besu::IndexEntry::expression(#expression))
                     }
                 };
-                match &entry.opclass {
+                let entry = match &entry.opclass {
                     Some(opclass) => quote!(#base.with_opclass(#opclass)),
                     None => base,
+                };
+                match &entry_prefix {
+                    Some(prefix) => quote!(#entry.with_prefix(#prefix)),
+                    None => entry,
                 }
             });
             quote! {
@@ -1848,6 +1934,58 @@ mod tests {
         let text = tokens.to_string();
         assert!(text.contains("DefaultValue :: Int (- 1)"), "{text}");
         assert_parses(tokens);
+    }
+
+    #[test]
+    fn an_index_prefix_is_emitted() {
+        let tokens = expand(parse_quote! {
+            #[besu(table = "posts", index(columns(email), prefix = 10, unique))]
+            pub struct Post {
+                #[besu(primary_key)]
+                pub id: i64,
+                pub email: String,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("with_prefix (10)"), "{text}");
+        assert_parses(tokens);
+
+        let tokens = expand(parse_quote! {
+            #[besu(table = "posts", index(columns(team_id, created_at), prefix(team_id = 4)))]
+            pub struct Membership {
+                pub team_id: i64,
+                pub created_at: i64,
+            }
+        })
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("with_prefix (4)"), "{text}");
+        assert_parses(tokens);
+    }
+
+    #[test]
+    fn an_index_prefix_must_be_positive_and_name_a_column() {
+        let error = expand(parse_quote! {
+            #[besu(table = "posts", index(columns(email), prefix = 0))]
+            pub struct Post {
+                pub email: String,
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("must be positive"), "{error}");
+
+        let error = expand(parse_quote! {
+            #[besu(table = "posts", index(columns(lower(email)), prefix = 10))]
+            pub struct Post {
+                pub email: String,
+            }
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("only be attached to a column"),
+            "{error}"
+        );
     }
 
     #[test]

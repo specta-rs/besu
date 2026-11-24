@@ -509,6 +509,37 @@ fn decode_integer(row: &MySqlRow, offset: &mut usize) -> Result<i64, sqlx::Error
     decode_via_sqlx::<i64>(row, offset)
 }
 
+/// Decode a real integer column as i128, preserving the full unsigned u64 range.
+fn decode_i128_integer(row: &MySqlRow, offset: &mut usize) -> Result<i128, sqlx::Error> {
+    let index = *offset;
+    let value = row.try_get_raw(index)?;
+    if <u64 as Type<MySql>>::compatible(value.type_info().as_ref()) {
+        *offset += 1;
+        let value: u64 = decode_checked(value, index)?;
+        return Ok(i128::from(value));
+    }
+    decode_integer(row, offset).map(i128::from)
+}
+
+/// Decode a real integer column as u128, preserving the full unsigned u64 range.
+fn decode_u128_integer(row: &MySqlRow, offset: &mut usize) -> Result<u128, sqlx::Error> {
+    let index = *offset;
+    let value = row.try_get_raw(index)?;
+    if <u64 as Type<MySql>>::compatible(value.type_info().as_ref()) {
+        *offset += 1;
+        let value: u64 = decode_checked(value, index)?;
+        return Ok(u128::from(value));
+    }
+
+    let value = decode_integer(row, offset)?;
+    u128::try_from(value).map_err(|_| {
+        <Sqlx as Driver>::error(Error::decode(
+            index,
+            "a negative MySQL integer cannot be decoded as u128",
+        ))
+    })
+}
+
 /// MySQL narrows integers on the wire: a `BIGINT` and a `TINYINT` both arrive as a
 /// little-endian buffer of one to eight bytes. Decoding through `i64` and range-checking
 /// keeps a wrong-width value an error rather than a silent truncation.
@@ -644,13 +675,7 @@ impl Decode<Sqlx> for u128 {
         }
 
         // A value held in a real integer column still decodes through the integer path.
-        let value = decode_integer(row, offset)?;
-        u128::try_from(value).map_err(|_| {
-            <Sqlx as Driver>::error(Error::decode(
-                index,
-                "a negative MySQL integer cannot be decoded as u128",
-            ))
-        })
+        decode_u128_integer(row, offset)
     }
 }
 
@@ -678,7 +703,7 @@ impl Decode<Sqlx> for i128 {
             });
         }
 
-        decode_integer(row, offset).map(i128::from)
+        decode_i128_integer(row, offset)
     }
 }
 

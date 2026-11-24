@@ -1256,3 +1256,253 @@ async fn a_changed_enum_is_one_alter_column() {
         changes.changes
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// DDL literals are data, even when they contain quotes and backslashes
+// ---------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn enum_and_set_labels_cannot_close_their_type_literal() {
+    use besu::schema::{Column as ColumnIr, Schema, Table as TableIr};
+
+    let db = fresh("besu_native_enum_set_escaping").await;
+    let mode: (String,) = db
+        .execute(sql!("SELECT @@session.sql_mode"))
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!mode.0.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES"));
+
+    let label = "x\\') NOT NULL, owner INT DEFAULT 7) --";
+    let set_label = "x\\')";
+    let column = |name: &str, ty| ColumnIr {
+        name: name.into(),
+        ty,
+        nullable: false,
+        auto_increment: false,
+        primary_key: false,
+        unique: false,
+        default: None,
+        generated: None,
+        comment: None,
+        renamed_from: None,
+    };
+    let table = |name: &str, ty| TableIr {
+        name: name.into(),
+        schema: None,
+        columns: vec![column("mood", ty)],
+        indexes: Vec::new(),
+        uniques: Vec::new(),
+        foreign_keys: Vec::new(),
+        checks: Vec::new(),
+        comment: None,
+    };
+    let desired = Schema {
+        tables: vec![
+            table(
+                "enum_labels",
+                TypeDef::Enum(EnumDef::owned("mood", [label])),
+            ),
+            table(
+                "set_labels",
+                TypeDef::Set(EnumLabels::owned(vec![set_label.into()])),
+            ),
+        ],
+        ..Schema::default()
+    };
+
+    db.push_schema(&desired).await.unwrap();
+    let actual = db.introspect().await.unwrap();
+    for name in ["enum_labels", "set_labels"] {
+        let table = actual.table(name).unwrap();
+        assert_eq!(table.columns.len(), 1, "{name}: {:?}", table.columns);
+        assert_eq!(table.columns[0].name, "mood");
+        assert_eq!(
+            table.columns[0].ty,
+            if name == "enum_labels" {
+                TypeDef::Enum(EnumDef::owned("", [label]))
+            } else {
+                TypeDef::Set(EnumLabels::owned(vec![set_label.into()]))
+            },
+            "{name}"
+        );
+    }
+
+    // A SET member cannot contain a comma, so the server rejects this payload once it is
+    // quoted as data. The important part is that it does not create the injected column.
+    let rejected = Schema {
+        tables: vec![table(
+            "rejected_set_labels",
+            TypeDef::Set(EnumLabels::owned(vec![label.into()])),
+        )],
+        ..Schema::default()
+    };
+    assert!(db.push_schema(&rejected).await.is_err());
+    assert!(
+        db.introspect()
+            .await
+            .unwrap()
+            .table("rejected_set_labels")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_text_default_cannot_inject_another_column() {
+    use besu::schema::{Schema, Table as TableIr};
+
+    let db = fresh("besu_native_default_escaping").await;
+    let payload = "\\') , injected INT DEFAULT 5) #";
+    let column = besu::schema::Column::from_def(&besu::ColumnDef {
+        name: "note",
+        ty: TypeDef::Text,
+        nullable: false,
+        auto_increment: false,
+        primary_key: false,
+        unique: false,
+        default: Some(besu::DefaultValue::Text(payload)),
+        generated: None,
+        renamed_from: None,
+    });
+    let desired = Schema {
+        tables: vec![TableIr {
+            name: "text_defaults".into(),
+            schema: None,
+            columns: vec![column],
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            comment: None,
+        }],
+        ..Schema::default()
+    };
+
+    db.push_schema(&desired).await.unwrap();
+    let actual = db.introspect().await.unwrap();
+    let table = actual.table("text_defaults").unwrap();
+    assert_eq!(table.columns.len(), 1, "{:?}", table.columns);
+    assert_eq!(table.columns[0].name, "note");
+
+    db.execute(Fragment::new("INSERT INTO text_defaults () VALUES ()"))
+        .await
+        .unwrap();
+    let stored: Vec<(String,)> = db
+        .execute(sql!("SELECT note FROM text_defaults"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(stored, [(payload.to_owned(),)]);
+}
+
+// ---------------------------------------------------------------------------------------
+// Wide integer columns and parameters keep their full range
+// ---------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unsigned_bigints_widen_to_i128_without_narrowing() {
+    let db = fresh("besu_native_unsigned_i128").await;
+    db.execute(sql!(
+        "CREATE TABLE unsigned_big (value BIGINT UNSIGNED NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    let values = [0, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX];
+    for value in values {
+        db.execute(Fragment::with_args(
+            "INSERT INTO unsigned_big (value) VALUES (?)",
+            vec![Value::UInt(value)],
+        ))
+        .await
+        .unwrap();
+        let cast: Vec<(i128,)> = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS UNSIGNED)",
+                vec![Value::UInt(value)],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(cast, [(i128::from(value),)]);
+    }
+
+    let stored: Vec<(i128,)> = db
+        .execute(sql!("SELECT value FROM unsigned_big ORDER BY value"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        values
+            .into_iter()
+            .map(|value| (i128::from(value),))
+            .collect::<Vec<_>>()
+    );
+
+    let signed: Vec<(i128,)> = db
+        .execute(sql!("SELECT CAST(-9223372036854775808 AS SIGNED)"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(signed, [(i128::from(i64::MIN),)]);
+}
+
+#[tokio::test]
+async fn wide_integer_parameters_round_trip_through_select() {
+    let db = fresh("besu_native_wide_parameters").await;
+
+    for value in [42, u128::MAX] {
+        let rows: Vec<(u128,)> = db
+            .execute(Fragment::with_args("SELECT ?", vec![Value::UInt128(value)]))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, [(value,)]);
+    }
+    for value in [-42, i128::MIN] {
+        let rows: Vec<(i128,)> = db
+            .execute(Fragment::with_args("SELECT ?", vec![Value::Int128(value)]))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, [(value,)]);
+    }
+}
+
+#[tokio::test]
+async fn negative_fractional_decimals_are_not_decoded_as_u128_zero() {
+    let db = fresh("besu_native_negative_decimal_u128").await;
+
+    for text in ["-0.50", "-0.99", "-0.01", "-0.000001", "-1.50"] {
+        let result = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS DECIMAL(10,6))",
+                vec![Value::Text(text.into())],
+            ))
+            .all::<(u128,)>()
+            .await;
+        assert!(result.is_err(), "{text} decoded as {:?}", result.ok());
+    }
+    for (text, expected) in [("0.50", 0), ("1.90", 1), ("-0.00", 0)] {
+        let rows: Vec<(u128,)> = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS DECIMAL(10,6))",
+                vec![Value::Text(text.into())],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, [(expected,)], "{text}");
+    }
+
+    let too_wide = db
+        .execute(Fragment::with_args(
+            "SELECT CAST(? AS DECIMAL(39,0))",
+            vec![Value::Text((i128::MAX as u128 + 1).to_string())],
+        ))
+        .all::<(i128,)>()
+        .await;
+    assert!(too_wide.is_err(), "got {too_wide:?}");
+}

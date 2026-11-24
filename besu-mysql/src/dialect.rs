@@ -14,6 +14,30 @@ use besu_core::{Dialect, Error, JsonPathStyle, Placeholder, TypeDef, UpsertStyle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MySql;
 
+/// Quote a string for MySQL's default SQL mode.
+///
+/// Backslashes must be escaped before apostrophes: in a sequence like backslash-apostrophe,
+/// doubling only the apostrophe leaves the first one escaped and lets the second one close
+/// the literal. Control characters use MySQL's named escapes so they never reach the SQL
+/// text as raw bytes.
+pub(crate) fn mysql_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("''"),
+            '\0' => out.push_str("\\0"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{1a}' => out.push_str("\\Z"),
+            other => out.push(other),
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// MySQL's spelling of a spatial column: `POINT`, optionally narrowed by `SRID n`.
 ///
 /// MySQL has no `GEOGRAPHY`, and no `GEOMETRY(...)` typmod wrapper: the shape *is* the type
@@ -120,17 +144,14 @@ impl Dialect for MySql {
                 Cow::Owned(format!("DECIMAL({precision},{scale})"))
             }
             // An enum is inline: MySQL has no named type, so only the labels are rendered.
-            // A quote inside a label is escaped by doubling it, exactly as the server spells
-            // it back.
+            // Labels are quoted with MySQL's backslash-aware literal rules.
             TypeDef::Enum(def) => {
                 let mut out = String::from("ENUM(");
                 for (i, label) in def.iter().enumerate() {
                     if i != 0 {
                         out.push(',');
                     }
-                    out.push('\'');
-                    out.push_str(&label.replace('\'', "''"));
-                    out.push('\'');
+                    out.push_str(&crate::dialect::mysql_literal(label));
                 }
                 out.push(')');
                 Cow::Owned(out)
@@ -143,9 +164,7 @@ impl Dialect for MySql {
                     if i != 0 {
                         out.push(',');
                     }
-                    out.push('\'');
-                    out.push_str(&label.replace('\'', "''"));
-                    out.push('\'');
+                    out.push_str(&crate::dialect::mysql_literal(label));
                 }
                 out.push(')');
                 Cow::Owned(out)
@@ -412,6 +431,24 @@ mod tests {
             MySql::type_name(TypeDef::Set(labels)),
             "SET('read','write')"
         );
+    }
+
+    #[test]
+    fn enum_and_set_labels_escape_backslash_quote_sequences() {
+        let label = "x\\') NOT NULL, owner INT DEFAULT 7) -- ";
+        let literal = r"'x\\'') NOT NULL, owner INT DEFAULT 7) -- '";
+        assert_eq!(mysql_literal(label), literal);
+        assert_eq!(
+            MySql::type_name(TypeDef::Enum(besu_core::EnumDef::owned("mood", [label]))),
+            format!("ENUM({literal})")
+        );
+        assert_eq!(
+            MySql::type_name(TypeDef::Set(besu_core::EnumLabels::owned(vec![
+                label.into()
+            ]))),
+            format!("SET({literal})")
+        );
+        assert_eq!(mysql_literal("tail\\"), r"'tail\\'");
     }
 
     #[test]

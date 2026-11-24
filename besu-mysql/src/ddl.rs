@@ -48,6 +48,18 @@ fn bare_type(ty: &TypeDef) -> &TypeDef {
 fn uniqueness(ty: &TypeDef) -> Uniqueness {
     match bare_type(ty) {
         TypeDef::Text | TypeDef::Bytes => Uniqueness::Prefix(INDEX_PREFIX),
+        TypeDef::Custom(name)
+            if matches!(
+                name.split('(')
+                    .next()
+                    .unwrap_or(name)
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob"
+            ) =>
+        {
+            Uniqueness::Prefix(INDEX_PREFIX)
+        }
         // A string type is indexable only while its worst-case byte length fits. `utf8mb4`
         // uses up to four bytes per character, so anything wider than 768 characters needs
         // a prefix or InnoDB rejects the key with "Specified key was too long".
@@ -61,6 +73,14 @@ fn uniqueness(ty: &TypeDef) -> Uniqueness {
         }
         TypeDef::Json | TypeDef::Jsonb => Uniqueness::Unsupported,
         _ => Uniqueness::Inline,
+    }
+}
+
+/// The prefix MySQL needs for a whole-column key of this type, if any.
+pub(crate) fn default_index_prefix(ty: &TypeDef) -> Option<u32> {
+    match uniqueness(ty) {
+        Uniqueness::Prefix(prefix) => Some(prefix),
+        _ => None,
     }
 }
 
@@ -100,6 +120,13 @@ impl MySqlDdl {
         if matches!(
             bare_type(ty),
             TypeDef::Text | TypeDef::Bytes | TypeDef::Json | TypeDef::Jsonb
+        ) || matches!(
+            bare_type(ty),
+            TypeDef::Custom(name)
+                if matches!(
+                    name.split('(').next().unwrap_or(name).to_ascii_lowercase().as_str(),
+                    "tinytext" | "mediumtext" | "longtext" | "tinyblob" | "mediumblob" | "longblob"
+                )
         ) {
             return true;
         }
@@ -128,7 +155,12 @@ impl MySqlDdl {
     /// MySQL 8 spells a functional key part as `(expression)`, with the parentheses part of
     /// the key-part syntax rather than the surrounding key list. Operator classes do not
     /// exist here, so they are omitted.
-    fn key_columns(&self, table: Option<&Table>, columns: &[IndexColumn]) -> String {
+    fn key_columns(
+        &self,
+        table: Option<&Table>,
+        columns: &[IndexColumn],
+        allow_prefixes: bool,
+    ) -> String {
         let mut out = String::new();
         for (i, entry) in columns.iter().enumerate() {
             if i != 0 {
@@ -137,9 +169,19 @@ impl MySqlDdl {
             match &entry.target {
                 IndexTarget::Column(name) => {
                     out.push_str(&self.quote(name));
-                    if let Some(column) = table.and_then(|table| table.column(name))
-                        && let Uniqueness::Prefix(prefix) = uniqueness(&column.ty)
-                    {
+                    let prefix = if allow_prefixes {
+                        entry.prefix.or_else(|| {
+                            table
+                                .and_then(|table| table.column(name))
+                                .and_then(|column| match uniqueness(&column.ty) {
+                                    Uniqueness::Prefix(prefix) => Some(prefix),
+                                    _ => None,
+                                })
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(prefix) = prefix {
                         out.push_str(&format!("({prefix})"));
                     }
                 }
@@ -157,17 +199,17 @@ impl MySqlDdl {
     fn add_index(&self, table: &str, index: &Index, definition: Option<&Table>) -> Vec<String> {
         let name = self.quote(&index.name);
         let table = self.quote_table(table);
-        let columns = self.key_columns(definition, &index.columns);
+        let columns = self.key_columns(definition, &index.columns, true);
         match index.kind {
             // A full-text or spatial index takes no prefix and no `UNIQUE`: MySQL indexes
             // the whole value and has no unique full-text index.
             IndexKind::FullText => vec![format!(
                 "CREATE FULLTEXT INDEX {name} ON {table} ({})",
-                self.key_columns(None, &index.columns)
+                self.key_columns(None, &index.columns, false)
             )],
             IndexKind::Spatial => vec![format!(
                 "CREATE SPATIAL INDEX {name} ON {table} ({})",
-                self.key_columns(None, &index.columns)
+                self.key_columns(None, &index.columns, false)
             )],
             // MySQL has no GIN, GiST or BRIN. The closest thing it has is a plain key, and
             // reporting the drift on every push is better than dropping the column's index.
@@ -208,6 +250,9 @@ impl Ddl for MySqlDdl {
         index.predicate = None;
         for column in &mut index.columns {
             column.opclass = None;
+            if !matches!(index.kind, IndexKind::Btree) {
+                column.prefix = None;
+            }
         }
         index
     }
@@ -439,14 +484,14 @@ impl Ddl for MySqlDdl {
                     sql.push_str("FULLTEXT KEY ");
                     sql.push_str(&name);
                     sql.push_str(" (");
-                    sql.push_str(&self.key_columns(None, &index.columns));
+                    sql.push_str(&self.key_columns(None, &index.columns, false));
                     sql.push(')');
                 }
                 IndexKind::Spatial => {
                     sql.push_str("SPATIAL KEY ");
                     sql.push_str(&name);
                     sql.push_str(" (");
-                    sql.push_str(&self.key_columns(None, &index.columns));
+                    sql.push_str(&self.key_columns(None, &index.columns, false));
                     sql.push(')');
                 }
                 _ => {
@@ -456,7 +501,7 @@ impl Ddl for MySqlDdl {
                     sql.push_str("KEY ");
                     sql.push_str(&name);
                     sql.push_str(" (");
-                    sql.push_str(&self.key_columns(Some(table), &index.columns));
+                    sql.push_str(&self.key_columns(Some(table), &index.columns, true));
                     sql.push(')');
                 }
             }
@@ -590,6 +635,32 @@ impl Ddl for MySqlDdl {
     }
 }
 
+/// Re-encode a dialect-neutral quoted default with MySQL's backslash-aware rules.
+///
+/// DefaultValue::render quotes apostrophes for PostgreSQL/SQLite, where backslashes are
+/// ordinary characters. MySQL needs the same value spelled differently. Raw expression
+/// defaults, or literals this parser cannot prove are a single quoted string, pass through.
+fn mysql_default(default: &str) -> String {
+    let bytes = default.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'\'' || bytes[bytes.len() - 1] != b'\'' {
+        return default.to_owned();
+    }
+    let inner = &default[1..default.len() - 1];
+    let mut chars = inner.chars();
+    let mut value = String::with_capacity(inner.len());
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.next() != Some('\'') {
+                return default.to_owned();
+            }
+            value.push('\'');
+        } else {
+            value.push(ch);
+        }
+    }
+    crate::dialect::mysql_literal(&value)
+}
+
 /// Render one column definition, optionally repeating its `UNIQUE` clause.
 ///
 /// `MODIFY COLUMN` replaces the column definition but leaves its indexes in place, so
@@ -644,13 +715,14 @@ fn column_definition(column: &Column, inline_pk: bool, inline_unique: bool) -> S
     if column.generated.is_none()
         && let Some(default) = &column.default
     {
+        let default = mysql_default(default);
         sql.push_str(" DEFAULT ");
-        if MySqlDdl::default_needs_expression(&column.ty, default) {
+        if MySqlDdl::default_needs_expression(&column.ty, &default) {
             sql.push('(');
-            sql.push_str(default);
+            sql.push_str(&default);
             sql.push(')');
         } else {
-            sql.push_str(default);
+            sql.push_str(&default);
         }
     }
 
@@ -927,12 +999,44 @@ mod tests {
                 )
                 .ends_with("DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)")
         );
-        // A text column can only take its default as an expression.
+        // A text column can only take its default as an expression. The native text
+        // widths stay Custom in the IR, but have the same grammar requirement.
         assert!(
             MySqlDdl
                 .column_sql(&column(TypeDef::Text, "'hi'"), false)
                 .ends_with("DEFAULT ('hi')")
         );
+        for name in ["tinytext", "mediumtext", "longtext"] {
+            assert!(
+                MySqlDdl
+                    .column_sql(&column(TypeDef::Custom(name.into()), "'hello'"), false)
+                    .ends_with("DEFAULT ('hello')"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_defaults_are_reencoded_for_mysql_without_changing_other_dialects() {
+        assert_eq!(mysql_default(r"'back\slash'"), r"'back\\slash'");
+        assert_eq!(mysql_default(r"'tail\'"), r"'tail\\'");
+        assert_eq!(mysql_default(r"'\'''"), r"'\\'''");
+        assert_eq!(mysql_default("curdate()"), "curdate()");
+
+        let column = Column {
+            name: "note".into(),
+            ty: TypeDef::Text,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: Some(r"'back\slash'".into()),
+            generated: None,
+            comment: None,
+            renamed_from: None,
+        };
+        let sql = MySqlDdl.column_sql(&column, false);
+        assert!(sql.ends_with("DEFAULT ('back\\\\slash')"), "{sql}");
     }
 
     #[test]
@@ -1008,7 +1112,8 @@ mod tests {
     #[test]
     fn a_fulltext_key_takes_no_prefix_and_no_unique() {
         // MySQL indexes the whole value for `FULLTEXT`, and has no unique full-text index.
-        let (table, _) = indexed("title", TypeDef::Text, IndexKind::FullText, true);
+        let (mut table, _) = indexed("title", TypeDef::Text, IndexKind::FullText, true);
+        table.indexes[0].columns[0].prefix = Some(10);
         let sql = MySqlDdl.create_table(&table);
         assert!(
             sql.contains("FULLTEXT KEY `events_kind_idx` (`title`)"),
@@ -1043,6 +1148,42 @@ mod tests {
         assert!(
             sql.contains("UNIQUE KEY `events_kind_idx` (`email`(768))"),
             "{sql}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_prefix_overrides_the_type_default() {
+        let (mut table, mut index) = indexed("email", TypeDef::Text, IndexKind::Btree, true);
+        table.indexes[0].columns[0].prefix = Some(10);
+        index.columns[0].prefix = Some(10);
+
+        let sql = MySqlDdl.create_table(&table);
+        assert!(
+            sql.contains("UNIQUE KEY `events_kind_idx` (`email`(10))"),
+            "{sql}"
+        );
+        assert!(!sql.contains("`email`(255)"), "{sql}");
+        assert!(
+            MySqlDdl
+                .create_index("events", &index)
+                .contains("(`email`(10))")
+        );
+
+        let desired = Schema {
+            tables: vec![table],
+            ..Schema::default()
+        };
+        let statements = MySqlDdl.apply_with(
+            &[Change::AddIndex {
+                table: "events".into(),
+                index,
+            }],
+            &Schema::default(),
+            &desired,
+        );
+        assert_eq!(
+            statements,
+            ["CREATE UNIQUE INDEX `events_kind_idx` ON `events` (`email`(10))"]
         );
     }
 

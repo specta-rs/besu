@@ -695,6 +695,15 @@ impl ColumnRef<'_> {
         )
     }
 
+    /// Whether byte-string integer text is valid for a 128-bit decode.
+    ///
+    /// Native binds 128-bit parameters as decimal bytes for a stable prepared-statement
+    /// type. MySQL reports a direct SELECT ? of those bytes as VAR_STRING, so they need
+    /// the same digit parser as a declared DECIMAL column.
+    fn has_integer_text(&self) -> bool {
+        self.is_decimal() || self.ty == Some(ColumnType::MYSQL_TYPE_VAR_STRING)
+    }
+
     fn bytes(&self) -> Result<&[u8], NativeError> {
         match self.value {
             MySqlValue::Bytes(bytes) => Ok(bytes),
@@ -787,6 +796,15 @@ fn parse_u64(column: &ColumnRef<'_>) -> Result<u64, NativeError> {
     }
 }
 
+/// Decode a real integer column as i128 without narrowing through i64.
+fn parse_i128_integer(column: &ColumnRef<'_>) -> Result<i128, NativeError> {
+    match column.value {
+        MySqlValue::Int(value) => Ok(i128::from(*value)),
+        MySqlValue::UInt(value) => Ok(i128::from(*value)),
+        _ => Err(column.not_a("an integer")),
+    }
+}
+
 /// Decode decimal text into the digits of its integer part.
 ///
 /// MySQL always sends a `DECIMAL` as text with the column's own scale. A scaled value is
@@ -808,6 +826,10 @@ fn decimal_integer(text: &str) -> Option<(bool, &str)> {
     {
         return None;
     }
+    // MySQL normalises negative zero to an unsigned zero. A negative fraction is
+    // not zero, even though its integer part is zero.
+    let negative = negative
+        && !(integer.bytes().all(|byte| byte == b'0') && fraction.bytes().all(|byte| byte == b'0'));
     Some((negative, integer))
 }
 
@@ -969,19 +991,19 @@ impl Decode<Native> for u128 {
     fn decode(row: &NativeRow, offset: &mut usize) -> Result<Self, NativeError> {
         let column = next_column(row, offset)?;
 
-        // A `DECIMAL(39,0)` column, which is what a `u128` column is declared as, arrives as
-        // text. A negative or scaled value follows the same truncation rule as sqlx.
-        if column.is_decimal()
+        // A DECIMAL(39,0) column, which is what a u128 column is declared as, arrives as
+        // text. Positive scaled values truncate toward zero; negative values are errors.
+        if column.has_integer_text()
             && let MySqlValue::Bytes(bytes) = column.value
         {
             let text = std::str::from_utf8(bytes).map_err(|err| column.error(err.to_string()))?;
             let digits = decimal_integer(text)
-                // A negative value is an error, unless every digit is zero: a normalised
-                // zero has no sign, which is what a decimal type reports for `-0`.
-                .filter(|(negative, digits)| !negative || digits.bytes().all(|byte| byte == b'0'))
+                // decimal_integer normalises negative zero to an unsigned zero, so every
+                // remaining negative value is genuinely below zero.
+                .filter(|(negative, _)| !negative)
                 .and_then(|(_, digits)| parse_u128(digits));
             return digits.ok_or_else(|| {
-                column.error("the DECIMAL value is not a non-negative integer that fits in u128")
+                column.error("the MySQL value is not a non-negative integer that fits in u128")
             });
         }
 
@@ -994,7 +1016,7 @@ impl Decode<Native> for i128 {
     fn decode(row: &NativeRow, offset: &mut usize) -> Result<Self, NativeError> {
         let column = next_column(row, offset)?;
 
-        if column.is_decimal()
+        if column.has_integer_text()
             && let MySqlValue::Bytes(bytes) = column.value
         {
             let text = std::str::from_utf8(bytes).map_err(|err| column.error(err.to_string()))?;
@@ -1005,7 +1027,7 @@ impl Decode<Native> for i128 {
                 });
         }
 
-        parse_i64(&column).map(i128::from)
+        parse_i128_integer(&column)
     }
 }
 
@@ -1170,8 +1192,32 @@ mod tests {
         // A scale is dropped, not rounded.
         assert_eq!(decimal_integer("1.90"), Some((false, "1")));
         assert_eq!(decimal_integer("-98765432.99"), Some((true, "98765432")));
+        // A negative fraction is not zero, while a normalised negative zero is.
+        assert_eq!(decimal_integer("-0.50"), Some((true, "0")));
+        assert_eq!(decimal_integer("-0.99"), Some((true, "0")));
+        assert_eq!(decimal_integer("-0.000001"), Some((true, "0")));
+        assert_eq!(decimal_integer("-0.00"), Some((false, "0")));
         assert_eq!(decimal_integer("1e10"), None);
         assert_eq!(decimal_integer(""), None);
+    }
+
+    #[test]
+    fn a_real_integer_widens_to_i128_without_narrowing() {
+        let signed = ColumnRef {
+            index: 0,
+            value: &MySqlValue::Int(i64::MIN),
+            ty: Some(ColumnType::MYSQL_TYPE_LONGLONG),
+        };
+        assert_eq!(parse_i128_integer(&signed).unwrap(), i128::from(i64::MIN));
+
+        for value in [i64::MAX as u64 + 1, u64::MAX] {
+            let unsigned = ColumnRef {
+                index: 0,
+                value: &MySqlValue::UInt(value),
+                ty: Some(ColumnType::MYSQL_TYPE_LONGLONG),
+            };
+            assert_eq!(parse_i128_integer(&unsigned).unwrap(), i128::from(value));
+        }
     }
 
     #[test]

@@ -281,3 +281,93 @@ async fn a_decimal_round_trips_exactly() {
         .unwrap();
     assert_eq!(sum[0], "-98765430.87");
 }
+
+/// Both 128-bit targets can widen a real unsigned BIGINT; neither may narrow it through i64.
+#[tokio::test]
+async fn unsigned_bigints_widen_to_i128_and_u128() {
+    let db = fresh("besu_sqlx_unsigned_wide").await;
+    db.execute(sql!(
+        "CREATE TABLE unsigned_big (value BIGINT UNSIGNED NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    let values = [0, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX];
+    for value in values {
+        db.execute(Fragment::with_args(
+            "INSERT INTO unsigned_big (value) VALUES (?)",
+            vec![Value::UInt(value)],
+        ))
+        .await
+        .unwrap();
+        let signed: Vec<(i128,)> = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS UNSIGNED)",
+                vec![Value::UInt(value)],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(signed, [(i128::from(value),)]);
+        let unsigned: Vec<(u128,)> = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS UNSIGNED)",
+                vec![Value::UInt(value)],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(unsigned, [(u128::from(value),)]);
+    }
+
+    let signed: Vec<(i128,)> = db
+        .execute(sql!("SELECT value FROM unsigned_big ORDER BY value"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        signed,
+        values
+            .into_iter()
+            .map(|value| (i128::from(value),))
+            .collect::<Vec<_>>()
+    );
+    let unsigned: Vec<(u128,)> = db
+        .execute(sql!("SELECT value FROM unsigned_big ORDER BY value"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        unsigned,
+        values
+            .into_iter()
+            .map(|value| (u128::from(value),))
+            .collect::<Vec<_>>()
+    );
+
+    let decimal: Vec<(u128,)> = db
+        .execute(Fragment::with_args(
+            "SELECT CAST(? AS DECIMAL(39,0))",
+            vec![Value::Text(u128::MAX.to_string())],
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(decimal, [(u128::MAX,)]);
+}
+
+/// The sqlx driver rejects negative fractions rather than truncating them to zero.
+#[tokio::test]
+async fn negative_fractional_decimals_are_not_decoded_as_u128_zero() {
+    let db = fresh("besu_sqlx_negative_decimal_u128").await;
+    for text in ["-0.50", "-0.99", "-0.01", "-0.000001", "-1.50"] {
+        let result = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS DECIMAL(10,6))",
+                vec![Value::Text(text.into())],
+            ))
+            .all::<(u128,)>()
+            .await;
+        assert!(result.is_err(), "{text} decoded as {:?}", result.ok());
+    }
+}
