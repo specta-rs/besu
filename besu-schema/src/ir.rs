@@ -287,13 +287,17 @@ pub fn normalise_view_definition(definition: &str) -> String {
         }
     }
 
-    /// Whether the tokens read more than one table in a comma-separated `FROM` clause.
-    ///
-    /// Only a comma at the clause's own nesting level counts, so the arguments of a function
-    /// called in `FROM` and the select list's own commas do not look like sources.
-    fn comma_join(tokens: &[Token]) -> bool {
-        // Clauses that end a `FROM` list. A comma after one of them belongs to something
-        // else (a `GROUP BY` list, a window's `ORDER BY`, ...).
+    let tokens = tokenise(view_body(definition));
+
+    struct Scope {
+        relations: Vec<String>,
+        joined: bool,
+    }
+
+    /// Assign tokens to query scopes and collect each scope's `FROM` relations. A scalar
+    /// subquery is a new scope: its qualifiers must never be folded using the outer query's
+    /// table, and outer qualifiers inside it must not be folded using the inner table.
+    fn query_scopes(tokens: &[Token]) -> (Vec<usize>, Vec<Scope>) {
         fn ends_from(word: &str) -> bool {
             matches!(
                 word,
@@ -313,46 +317,199 @@ pub fn normalise_view_definition(definition: &str) -> String {
             )
         }
 
-        let mut depth = 0usize;
-        let mut in_from = false;
-        for token in tokens {
+        fn starts_query(tokens: &[Token], index: usize) -> bool {
+            tokens.get(index + 1).is_some_and(|token| {
+                matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("select") || word.eq_ignore_ascii_case("with"))
+            })
+        }
+
+        fn relation(
+            tokens: &[Token],
+            token_scopes: &[usize],
+            mut index: usize,
+            end: usize,
+            scope: usize,
+        ) -> Option<String> {
+            match tokens.get(index)? {
+                Token::Word(word) if token_scopes[index] == scope => {
+                    let mut next = index + 1;
+                    if matches!(tokens.get(next), Some(Token::Word(word)) if word.eq_ignore_ascii_case("as"))
+                        && token_scopes.get(next) == Some(&scope)
+                    {
+                        next += 1;
+                    }
+                    if let Some(Token::Word(alias)) = tokens.get(next)
+                        && token_scopes.get(next) == Some(&scope)
+                        && !matches!(
+                            alias.to_ascii_lowercase().as_str(),
+                            "join"
+                                | "left"
+                                | "right"
+                                | "full"
+                                | "inner"
+                                | "cross"
+                                | "on"
+                                | "using"
+                                | "where"
+                                | "group"
+                                | "having"
+                                | "order"
+                                | "limit"
+                                | "offset"
+                                | "union"
+                                | "except"
+                                | "intersect"
+                                | "window"
+                                | "fetch"
+                                | "for"
+                                | "returning"
+                        )
+                    {
+                        return Some(alias.clone());
+                    }
+                    Some(word.clone())
+                }
+                Token::Punct('(') if token_scopes[index] == scope => {
+                    // A derived table is one relation named by the alias after its `)`.
+                    let mut depth = 0usize;
+                    while index < end {
+                        match &tokens[index] {
+                            Token::Punct('(') => depth += 1,
+                            Token::Punct(')') => {
+                                depth = depth.saturating_sub(1);
+                                if depth == 0 {
+                                    index += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                    if matches!(tokens.get(index), Some(Token::Word(word)) if word.eq_ignore_ascii_case("as"))
+                    {
+                        index += 1;
+                    }
+                    match tokens.get(index) {
+                        Some(Token::Word(alias)) if token_scopes.get(index) == Some(&scope) => {
+                            Some(alias.clone())
+                        }
+                        _ => Some("(derived)".into()),
+                    }
+                }
+                _ => None,
+            }
+        }
+
+        let mut scopes_for_token = vec![0; tokens.len()];
+        let mut ranges = vec![(0, tokens.len())];
+        let mut active = vec![0usize];
+        let mut parens: Vec<(usize, Option<usize>)> = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            scopes_for_token[index] = *active.last().unwrap_or(&0);
             match token {
-                Token::Punct('(') => depth += 1,
-                Token::Punct(')') => depth = depth.saturating_sub(1),
-                Token::Punct(',') if in_from && depth == 0 => return true,
-                Token::Word(word) if depth == 0 => {
-                    let word = word.rsplit('.').next().unwrap_or(word);
-                    if word.eq_ignore_ascii_case("from") {
-                        in_from = true;
-                    } else if ends_from(&word.to_ascii_lowercase()) {
-                        in_from = false;
+                Token::Punct('(') => {
+                    let child = starts_query(tokens, index).then(|| {
+                        ranges.push((index + 1, tokens.len()));
+                        active.push(ranges.len() - 1);
+                        ranges.len() - 1
+                    });
+                    parens.push((index, child));
+                }
+                Token::Punct(')') => {
+                    if let Some((_, Some(child))) = parens.pop() {
+                        ranges[child].1 = index;
+                        active.pop();
+                        // The closing delimiter belongs to the containing query.
+                        scopes_for_token[index] = *active.last().unwrap_or(&0);
                     }
                 }
                 _ => {}
             }
         }
-        false
+
+        let mut scopes = vec![Scope {
+            relations: Vec::new(),
+            joined: false,
+        }];
+        for _ in ranges.iter().skip(1) {
+            scopes.push(Scope {
+                relations: Vec::new(),
+                joined: false,
+            });
+        }
+
+        for (scope, &(start, end)) in ranges.iter().enumerate() {
+            let mut depth = 0usize;
+            let mut in_from = false;
+            for index in start..end {
+                if scopes_for_token[index] != scope {
+                    continue;
+                }
+                match &tokens[index] {
+                    Token::Punct('(') => depth += 1,
+                    Token::Punct(')') => depth = depth.saturating_sub(1),
+                    Token::Punct(',') if in_from && depth == 0 => {
+                        scopes[scope].joined = true;
+                        if let Some(name) =
+                            relation(tokens, &scopes_for_token, index + 1, end, scope)
+                        {
+                            scopes[scope].relations.push(name);
+                        }
+                    }
+                    Token::Word(word) if depth == 0 => {
+                        let bare = word.rsplit('.').next().unwrap_or(word);
+                        if bare.eq_ignore_ascii_case("from") {
+                            in_from = true;
+                            if let Some(name) =
+                                relation(tokens, &scopes_for_token, index + 1, end, scope)
+                            {
+                                scopes[scope].relations.push(name);
+                            }
+                        } else if bare.eq_ignore_ascii_case("join") {
+                            in_from = true;
+                            scopes[scope].joined = true;
+                            if let Some(name) =
+                                relation(tokens, &scopes_for_token, index + 1, end, scope)
+                            {
+                                scopes[scope].relations.push(name);
+                            }
+                        } else if ends_from(&bare.to_ascii_lowercase()) {
+                            in_from = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        (scopes_for_token, scopes)
     }
 
-    let tokens = tokenise(view_body(definition));
+    let (token_scopes, scopes) = query_scopes(&tokens);
 
-    // A qualifier says which table a name belongs to, which only matters once there is more
-    // than one. In a single-table view it is redundant, so PostgreSQL's `users.id` folds to
-    // `id`. Keeping it in a join is what stops `a.id` and `b.id` from looking equal.
-    //
-    // `JOIN` is not the only spelling of a join: `FROM a, b` reads two tables as well, and
-    // folding the qualifiers there would make `SELECT a.id FROM a, b` and `SELECT b.id FROM
-    // a, b` compare equal. A comma seen while inside a `FROM` clause is therefore treated
-    // the same way.
-    let joined = tokens
-        .iter()
-        .any(|token| name(token).is_some_and(|word| word.eq_ignore_ascii_case("join")))
-        || comma_join(&tokens);
-    fn bare(word: &str, joined: bool) -> &str {
-        if joined {
-            word
+    // A qualifier is redundant only when it names the single relation in its own query
+    // scope. Correlated subqueries therefore keep outer qualifiers, while an inner table's
+    // qualifier can still fold inside the subquery.
+    fn bare<'a>(word: &'a str, scope: Option<&'a Scope>) -> &'a str {
+        let Some(scope) = scope.filter(|scope| !scope.joined && scope.relations.len() == 1) else {
+            return word;
+        };
+        let relation = &scope.relations[0];
+        let relation_name = relation
+            .rsplit_once('.')
+            .map_or(relation.as_str(), |(_, name)| name);
+        if word.eq_ignore_ascii_case(relation) {
+            return relation_name;
+        }
+        let Some((qualifier, column)) = word.rsplit_once('.') else {
+            return word;
+        };
+        if qualifier.eq_ignore_ascii_case(relation) || qualifier.eq_ignore_ascii_case(relation_name)
+        {
+            column
         } else {
-            word.rsplit('.').next().unwrap_or(word)
+            word
         }
     }
 
@@ -403,6 +560,11 @@ pub fn normalise_view_definition(definition: &str) -> String {
                 let Some(open) = stack.pop() else {
                     continue;
                 };
+                // Parentheses that open a subquery are syntax, not a redundant comparison
+                // grouping. Removing them would turn `EXISTS (SELECT ...)` into invalid SQL.
+                if token_scopes.get(open + 1) != token_scopes.get(open) {
+                    continue;
+                }
                 let mut depth = 0usize;
                 let mut comparison = false;
                 let mut boolean = false;
@@ -453,7 +615,7 @@ pub fn normalise_view_definition(definition: &str) -> String {
                 {
                     out.push_str(word);
                 } else {
-                    out.push_str(&bare(word, joined).to_lowercase());
+                    out.push_str(&bare(word, scopes.get(token_scopes[index])).to_lowercase());
                 }
             }
         }
@@ -2288,6 +2450,37 @@ mod tests {
         assert_eq!(
             normalise_view_definition("select `users`.`id` from `besu`.`users`"),
             normalise_view_definition("SELECT id FROM users")
+        );
+    }
+
+    #[test]
+    fn a_correlated_subquery_keeps_outer_qualifiers() {
+        let correlated = "SELECT outer_t.id FROM outer_t WHERE EXISTS (\
+             SELECT 1 FROM inner_t WHERE inner_t.id = outer_t.id)";
+        let uncorrelated = "SELECT outer_t.id FROM outer_t WHERE EXISTS (\
+             SELECT 1 FROM inner_t WHERE inner_t.id = inner_t.id)";
+
+        assert_ne!(
+            normalise_view_definition(correlated),
+            normalise_view_definition(uncorrelated)
+        );
+        // The inner table is still the single relation in its own scope, so its redundant
+        // qualifier folds without swallowing the outer correlation.
+        assert_eq!(
+            normalise_view_definition(correlated),
+            "selectidfromouter_twhereexists(select1frominner_twhereid=outer_t.id)"
+        );
+    }
+
+    #[test]
+    fn a_join_inside_a_subquery_keeps_that_scopes_qualifiers() {
+        let left = "SELECT t.id FROM t WHERE EXISTS (\
+             SELECT 1 FROM a JOIN b ON a.id = b.id WHERE a.id = t.id)";
+        let right = "SELECT t.id FROM t WHERE EXISTS (\
+             SELECT 1 FROM a JOIN b ON a.id = b.id WHERE b.id = t.id)";
+        assert_ne!(
+            normalise_view_definition(left),
+            normalise_view_definition(right)
         );
     }
 

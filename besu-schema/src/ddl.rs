@@ -399,6 +399,14 @@ pub trait Ddl {
         Vec::new()
     }
 
+    /// Statements that reorder an enum's labels.
+    ///
+    /// The default returns nothing; PostgreSQL overrides it by replacing the type while
+    /// retargeting its columns.
+    fn reorder_enum(&self, _from: &Enum, _to: &Enum) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether the dialect has named types that are not part of a column.
     ///
     /// Only PostgreSQL does; MySQL and SQLite render a [`Domain`] as its base type and have
@@ -579,6 +587,7 @@ pub trait Ddl {
             Change::DropEnum { name } => self.drop_enum(name),
             Change::AddEnumValue { name, value } => self.add_enum_value(name, value),
             Change::RemoveEnumValue { name, value } => self.remove_enum_value(name, value),
+            Change::ReorderEnum { from, to, .. } => self.reorder_enum(from, to),
             Change::CreateDomain(domain) => self.create_domain(domain),
             Change::DropDomain { name } => self.drop_domain(name),
             Change::AddColumn { table, column } => vec![self.add_column(table, column)],

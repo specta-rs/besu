@@ -768,7 +768,7 @@ fn length(column_type: &str) -> Option<u32> {
 }
 
 /// The precision and scale of `decimal(10,2)`.
-fn decimal_parts(column_type: &str) -> Option<(u8, u8)> {
+fn decimal_parts(column_type: &str) -> Option<(u16, u16)> {
     let start = column_type.find('(')? + 1;
     let end = column_type[start..].find(')')? + start;
     let mut parts = column_type[start..end].split(',');

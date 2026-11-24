@@ -747,12 +747,13 @@ fn number(modifier: Option<&str>) -> Option<u32> {
 }
 
 /// The `(precision, scale)` in a `numeric` modifier such as `10,2`.
-fn decimal_parts(modifier: &str) -> Option<(u8, u8)> {
+fn decimal_parts(modifier: &str) -> Option<(u16, u16)> {
     let mut parts = modifier.split(',');
     let precision = parts.next()?.trim().parse().ok()?;
-    let scale = parts
-        .next()
-        .map_or(0, |part| part.trim().parse().unwrap_or_default());
+    let scale = match parts.next() {
+        Some(part) => part.trim().parse().ok()?,
+        None => 0,
+    };
     Some((precision, scale))
 }
 

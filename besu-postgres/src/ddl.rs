@@ -310,6 +310,105 @@ impl Ddl for PostgresDdl {
         )]
     }
 
+    /// Replace an enum with one whose labels are in the desired order.
+    ///
+    /// PostgreSQL has no direct reorder operation. A temporary type is created in the same
+    /// schema, table columns (including arrays of the enum) are converted through text, and
+    /// the old type is dropped before the temporary one takes its name. Unsupported direct
+    /// dependencies, such as domains or defaults that name the enum, fail explicitly rather
+    /// than leaving a partially applied change.
+    fn reorder_enum(&self, from: &Enum, to: &Enum) -> Vec<String> {
+        let values = to
+            .values
+            .iter()
+            .map(|value| format!("'{}'", value.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let old_type = self.quote_table(&from.name);
+        let (_, name) = from
+            .name
+            .rsplit_once('.')
+            .unwrap_or(("", from.name.as_str()));
+        let suffix = "__besu_reorder";
+        let mut temporary = name.to_owned();
+        while temporary.len() > 63 - suffix.len() {
+            temporary.pop();
+        }
+        temporary.push_str(suffix);
+        let temporary_name = escape_string_literal(&temporary);
+        let values = escape_string_literal(&values);
+
+        vec![format!(
+            "DO $besu$\n\
+             DECLARE\n\
+               old_type regtype := {old_type};\n\
+               old_schema text;\n\
+               old_name text;\n\
+               temporary_name constant text := {temporary_name};\n\
+               temporary_type regtype;\n\
+               dependency record;\n\
+             BEGIN\n\
+               SELECT n.nspname, t.typname INTO old_schema, old_name\n\
+               FROM pg_catalog.pg_type t\n\
+               JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n\
+               WHERE t.oid = old_type;\n\
+\n\
+               IF EXISTS (\n\
+                 SELECT 1 FROM pg_catalog.pg_depend d\n\
+                 WHERE d.refclassid = 'pg_type'::regclass\n\
+                   AND d.refobjid = old_type\n\
+                   AND d.deptype = 'n'\n\
+                   AND NOT (d.classid = 'pg_class'::regclass AND d.objsubid > 0)\n\
+               ) THEN\n\
+                 RAISE EXCEPTION 'enum % has an unsupported dependency; use an explicit migration', old_type;\n\
+               END IF;\n\
+\n\
+               EXECUTE pg_catalog.format(\n\
+                 'CREATE TYPE %I.%I AS ENUM (%s)', old_schema, temporary_name, {values}\n\
+               );\n\
+               SELECT pg_catalog.format('%I.%I', old_schema, temporary_name)::regtype\n\
+               INTO temporary_type;\n\
+\n\
+               FOR dependency IN\n\
+                 SELECT n.nspname AS schema_name, c.relname AS table_name,\n\
+                        a.attname AS column_name, t.oid = old_type AS direct,\n\
+                        t.typelem = old_type AS array_element\n\
+                 FROM pg_catalog.pg_depend d\n\
+                 JOIN pg_catalog.pg_class c ON c.oid = d.objid\n\
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n\
+                 JOIN pg_catalog.pg_attribute a\n\
+                   ON a.attrelid = c.oid AND a.attnum = d.objsubid\n\
+                 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid\n\
+                 WHERE d.classid = 'pg_class'::regclass\n\
+                   AND d.refclassid = 'pg_type'::regclass\n\
+                   AND d.refobjid = old_type\n\
+                   AND d.deptype = 'n'\n\
+                   AND (t.oid = old_type OR t.typelem = old_type)\n\
+               LOOP\n\
+                 IF dependency.direct THEN\n\
+                   EXECUTE pg_catalog.format(\n\
+                     'ALTER TABLE ONLY %I.%I ALTER COLUMN %I TYPE %s USING %I::text::%s',\n\
+                     dependency.schema_name, dependency.table_name, dependency.column_name,\n\
+                     temporary_type, dependency.column_name, temporary_type\n\
+                   );\n\
+                 ELSE\n\
+                   EXECUTE pg_catalog.format(\n\
+                     'ALTER TABLE ONLY %I.%I ALTER COLUMN %I TYPE %s[] USING %I::text[]::%s[]',\n\
+                     dependency.schema_name, dependency.table_name, dependency.column_name,\n\
+                     temporary_type, dependency.column_name, temporary_type\n\
+                   );\n\
+                 END IF;\n\
+               END LOOP;\n\
+\n\
+               EXECUTE pg_catalog.format('DROP TYPE %s', old_type);\n\
+               EXECUTE pg_catalog.format(\n\
+                 'ALTER TYPE %I.%I RENAME TO %I', old_schema, temporary_name, old_name\n\
+               );\n\
+             END\n\
+             $besu$"
+        )]
+    }
+
     /// `CREATE [MATERIALIZED] VIEW`.
     fn create_view(&self, view: &View) -> Vec<String> {
         let materialised = if view.materialised {

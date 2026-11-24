@@ -897,7 +897,7 @@ macro_rules! string_length_seed {
 string_length_seed!(Char, N);
 string_length_seed!(VarChar, N);
 
-impl<const PRECISION: u8, const SCALE: u8> SeedValue for Decimal<PRECISION, SCALE> {
+impl<const PRECISION: u16, const SCALE: u16> SeedValue for Decimal<PRECISION, SCALE> {
     fn generate(rng: &mut Rng, _column: &SeedColumn) -> String {
         decimal_text(rng, PRECISION, SCALE, None)
     }
@@ -1258,7 +1258,7 @@ fn clamp(text: String, max: Option<usize>) -> String {
 /// value has to stay inside the declaration the schema will enforce. `unique_row` makes the
 /// integer part the row number, which is what keeps a unique decimal column distinct without
 /// abandoning the requested scale.
-fn decimal_text(rng: &mut Rng, precision: u8, scale: u8, unique_row: Option<usize>) -> String {
+fn decimal_text(rng: &mut Rng, precision: u16, scale: u16, unique_row: Option<usize>) -> String {
     let whole_limit = decimal_whole_limit(precision, scale);
     let whole = match unique_row {
         // The row number is the discriminator. A type too narrow to hold every row is the
@@ -1290,7 +1290,7 @@ fn decimal_text(rng: &mut Rng, precision: u8, scale: u8, unique_row: Option<usiz
 ///
 /// A precision of zero is a dialect's "unconstrained numeric", so it keeps the old, wider
 /// range instead of collapsing every value to zero.
-fn decimal_whole_limit(precision: u8, scale: u8) -> u64 {
+fn decimal_whole_limit(precision: u16, scale: u16) -> u64 {
     if precision == 0 {
         return 100_000;
     }
@@ -1307,7 +1307,7 @@ mod tests {
     use std::collections::HashSet;
 
     /// A generated decimal must be representable by the declaration it was generated for.
-    fn assert_fits(text: &str, precision: u8, scale: u8) {
+    fn assert_fits(text: &str, precision: u16, scale: u16) {
         let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
         assert_eq!(
             fraction.len(),

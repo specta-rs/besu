@@ -2674,7 +2674,7 @@ text_values!(alloc::borrow::Cow<'_, str>);
 macro_rules! decimal_values {
     ($($ty:ty),* $(,)?) => {
         $(
-            impl<const PRECISION: u8, const SCALE: u8> IntoSqlValue<Decimal<PRECISION, SCALE>>
+            impl<const PRECISION: u16, const SCALE: u16> IntoSqlValue<Decimal<PRECISION, SCALE>>
                 for $ty
             {
                 fn into_sql_value(self) -> Value {
@@ -2839,7 +2839,7 @@ range_values! {
     Date, chrono::NaiveDate => TypeDef::Date, Value::Date;
 }
 
-impl<const PRECISION: u8, const SCALE: u8> IntoSqlValue<Range<Decimal<PRECISION, SCALE>>>
+impl<const PRECISION: u16, const SCALE: u16> IntoSqlValue<Range<Decimal<PRECISION, SCALE>>>
     for Range<String>
 {
     fn into_sql_value(self) -> Value {
