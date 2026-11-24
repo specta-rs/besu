@@ -18,6 +18,12 @@
   encoders surface that error instead of silently truncating components (#122).
 - The table derive rejects duplicate SQL column names at compile time (#156).
 
+### Fixes
+
+- Native PostgreSQL parameters now follow the type PostgreSQL infers: native values use
+  canonical text for text casts, and decimals bound to floats are converted numerically
+  instead of reinterpreting `NUMERIC` wire bytes (#160).
+
 ### Internal
 
 - Share statement rendering, execution and row decoding across `Select`, `SetQuery` and

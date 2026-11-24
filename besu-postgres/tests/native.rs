@@ -1006,6 +1006,129 @@ async fn postgis_and_pgvector_round_trip_when_installed() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Raw parameters follow PostgreSQL's inferred type
+// ---------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn raw_parameters_use_the_format_of_the_inferred_type() {
+    let db = database().await;
+    let key = uuid::Uuid::from_bytes([b'A'; 16]);
+    let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+    let clock = chrono::NaiveTime::from_hms_micro_opt(12, 34, 56, 123_456).unwrap();
+    let stamp = day.and_time(clock);
+    let stamp_tz = stamp.and_utc();
+    let host = Inet::new("192.0.2.1/24").unwrap();
+    let network = Cidr::new("192.0.2.0/24").unwrap();
+    let bits = BitString::new("101").unwrap();
+    let span = SqlInterval::new(1, 2, 3_000_000);
+
+    let cases = [
+        (Value::Bool(true), "true".to_owned()),
+        (
+            Value::Bytes(vec![0, 1, 0xfe, 0xff]),
+            "\\x0001feff".to_owned(),
+        ),
+        (Value::Interval(span), span.to_string()),
+        (Value::Uuid(key), key.to_string()),
+        (Value::Date(day), day.to_string()),
+        (Value::Time(clock), clock.to_string()),
+        (Value::Timestamp(stamp), stamp.to_string()),
+        (Value::TimestampTz(stamp_tz), stamp_tz.to_string()),
+        (Value::Decimal("0.00".to_owned()), "0.00".to_owned()),
+        (Value::Decimal("1.23".to_owned()), "1.23".to_owned()),
+        (Value::Inet(host.clone()), host.as_str().to_owned()),
+        (Value::Cidr(network.clone()), network.as_str().to_owned()),
+        (Value::Bit(bits), "101".to_owned()),
+    ];
+
+    for (value, expected) in cases {
+        let actual: Vec<String> = db
+            .execute(besu::Fragment::with_args(
+                "SELECT ?::text".to_owned(),
+                vec![value],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(actual, [expected]);
+    }
+
+    // BYTEA parameters use the binary format, so text contributes its UTF-8 bytes rather
+    // than PostgreSQL's `\x...` input spelling.
+    let bytea: Vec<String> = db
+        .execute(besu::Fragment::with_args(
+            "SELECT encode(?::bytea, 'hex')".to_owned(),
+            vec![Value::Text("AB".to_owned())],
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(bytea, ["4142"]);
+
+    // A decimal bound to a float must be converted as a number, not have its NUMERIC wire
+    // bytes reinterpreted. Compare both widths with PostgreSQL's own conversion, including
+    // zero and a value that distinguishes direct f32 rounding from an f64 intermediate.
+    for text in [
+        "0.00",
+        "-0.00",
+        "1.23",
+        "-2.5",
+        "0.00000000000000000001",
+        "1.0000000596046447753906250000001",
+    ] {
+        let direct: Vec<f64> = db
+            .execute(besu::Fragment::with_args(
+                "SELECT ?::float8".to_owned(),
+                vec![Value::Decimal(text.to_owned())],
+            ))
+            .all()
+            .await
+            .unwrap();
+        let control: Vec<f64> = db
+            .execute(besu::Fragment::with_args(
+                "SELECT ?::numeric::float8".to_owned(),
+                vec![Value::Decimal(text.to_owned())],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(direct[0].to_bits(), control[0].to_bits(), "{text}");
+
+        let direct: Vec<f32> = db
+            .execute(besu::Fragment::with_args(
+                "SELECT ?::float4".to_owned(),
+                vec![Value::Decimal(text.to_owned())],
+            ))
+            .all()
+            .await
+            .unwrap();
+        let control: Vec<f32> = db
+            .execute(besu::Fragment::with_args(
+                "SELECT ?::numeric::float4".to_owned(),
+                vec![Value::Decimal(text.to_owned())],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(direct[0].to_bits(), control[0].to_bits(), "{text}");
+    }
+
+    let overflow = format!("1{}", "0".repeat(40));
+    let error = db
+        .execute(besu::Fragment::with_args(
+            "SELECT ?::float4".to_owned(),
+            vec![Value::Decimal(overflow)],
+        ))
+        .all::<f32>()
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("outside the real range"),
+        "unexpected error: {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // Decode failures are errors, not nonsense
 // ---------------------------------------------------------------------------------------
 
