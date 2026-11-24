@@ -2,15 +2,14 @@ use besu_core::TypeDef;
 use besu_core::schema::ReferenceAction;
 use besu_schema::{Check, Column, ForeignKey, Index, IndexColumn, Schema, Table, Unique, View};
 
+use crate::SQLite;
 use crate::ddl::is_simple_default;
-use crate::{REBUILD_SUFFIX, SQLite};
 
 /// Read the database's schema from SQLite's own catalogue.
 ///
 /// Objects the IR cannot express are skipped rather than reported as a lossy version of
 /// themselves, because `push` would then try to drop or replace them:
 ///
-/// - partial indexes, whose `WHERE` clause has no representation here,
 /// - triggers, which are not read at all.
 ///
 /// A `CHECK` constraint has no catalogue view either, so it is read out of the `CREATE TABLE`
@@ -25,11 +24,9 @@ use crate::{REBUILD_SUFFIX, SQLite};
 /// Views are read into [`Schema::views`] so a `besu pull` snapshot names them, but the differ
 /// ignores that list, so they never appear as tables and `push` never touches them.
 ///
-/// A table whose name carries the rebuild's `__besu_tmp` suffix is a leftover from a rebuild
-/// that failed part way through. While the table it was copying still exists, the leftover is
-/// only a stale copy and is skipped, so a failed push can be retried rather than being
-/// reported as a destructive table to drop. If the original table is gone the leftover is the
-/// only copy of the rows, so it is reported like any other table.
+/// Every ordinary table is reported, including one whose name happens to contain Besu's
+/// rebuild suffix. A name is not evidence that Besu owns an object, and hiding a real table
+/// would keep it out of the destructive-change gate.
 pub async fn introspect<Dr>(db: &besu::Database<Dr>) -> Result<Schema, Dr::Error>
 where
     Dr: besu::Driver<Dialect = SQLite>,
@@ -44,17 +41,6 @@ where
         ))
         .all::<(String, Option<String>)>()
         .await?;
-
-    let names = tables
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    let tables = tables.into_iter().filter(|(name, _)| {
-        let Some(original) = rebuild_original(name) else {
-            return true;
-        };
-        !names.iter().any(|existing| existing == original)
-    });
 
     let mut schema = Schema::new();
     for (name, create_sql) in tables {
@@ -159,6 +145,8 @@ where
             .as_deref()
             .map(|sql| check_constraints(sql, &name))
             .unwrap_or_default(),
+        strict: create_sql.as_deref().is_some_and(table_is_strict),
+        without_rowid: create_sql.as_deref().is_some_and(table_is_without_rowid),
         comment: None,
     };
 
@@ -516,7 +504,8 @@ where
         .all::<(i64, String, i64, String, i64)>()
         .await?;
 
-    // The only place SQLite says what an expression key part is, is the `CREATE INDEX` text.
+    // The only place SQLite says what an expression key part is, and the predicate of a
+    // partial index, is the `CREATE INDEX` text.
     // It is read once for the whole table rather than once per index.
     let definitions = db
         .execute(besu::Fragment::new(format!(
@@ -527,34 +516,43 @@ where
         .await?;
 
     for (_, name, unique, origin, partial) in indexes {
-        // SQLite knows partial indexes, but the IR has no predicate for one here, and a
-        // partial index reported as a plain index would make `push` drop it or believe it
-        // covers rows it does not.
-        if partial != 0 {
-            continue;
-        }
+        let definition = definitions
+            .iter()
+            .find(|(index, _)| index == &name)
+            .and_then(|(_, sql)| sql.as_deref());
+        let predicate = if partial == 0 {
+            None
+        } else {
+            let Some(predicate) = definition.and_then(index_predicate) else {
+                // A partial index must never be reported as a plain one: a rebuild would
+                // either enforce it over every row or silently drop its condition.
+                continue;
+            };
+            Some(predicate.to_owned())
+        };
 
-        let info = format!("PRAGMA index_info({})", quote_literal(&name));
+        // Unlike index_info, index_xinfo reports each key's collation and sort order. Its
+        // auxiliary key=0 rows are not part of the index definition and are discarded.
+        let info = format!("PRAGMA index_xinfo({})", quote_literal(&name));
         let columns = db
             .execute(besu::Fragment::new(info))
-            .all::<(i64, i64, Option<String>)>()
+            .all::<(i64, i64, Option<String>, i64, String, i64)>()
             .await?;
+        let columns: Vec<_> = columns
+            .into_iter()
+            .filter(|(_, _, _, _, _, key)| *key != 0)
+            .collect();
 
         if columns.is_empty() {
             continue;
         }
 
-        let has_expression = columns.iter().any(|(_, _, name)| name.is_none());
-        let definition = definitions
-            .iter()
-            .find(|(index, _)| index == &name)
-            .and_then(|(_, sql)| sql.as_deref());
-
+        let has_expression = columns.iter().any(|(_, _, name, _, _, _)| name.is_none());
         // An expression key part has no column name in `index_info`; the key parts are read
         // from the statement instead. Without the statement there is no honest way to
         // describe the index, so it is skipped rather than reported as an index over its
         // plain columns only.
-        let entries = if has_expression {
+        let mut entries = if has_expression {
             let Some(parts) = definition.and_then(index_key_parts) else {
                 continue;
             };
@@ -564,18 +562,33 @@ where
             parts
                 .into_iter()
                 .zip(&columns)
-                .map(|(part, (_, _, name))| match name {
+                .map(|(part, (_, _, name, _, _, _))| match name {
                     Some(name) => IndexColumn::column(name.clone()),
-                    None => IndexColumn::expression(part),
+                    None => IndexColumn::expression(index_expression(&part)),
                 })
                 .collect::<Vec<_>>()
         } else {
             columns
                 .iter()
-                .filter_map(|(_, _, name)| name.clone())
-                .map(IndexColumn::column)
+                .filter_map(|(_, _, name, descending, collation, _)| {
+                    let mut entry = IndexColumn::column(name.clone()?);
+                    entry.collation =
+                        (!collation.eq_ignore_ascii_case("BINARY")).then_some(collation.clone());
+                    entry.descending = *descending != 0;
+                    Some(entry)
+                })
                 .collect::<Vec<_>>()
         };
+
+        // Expression entries get their target from sqlite_master and their collation and
+        // order from index_xinfo, just like plain column entries.
+        if has_expression {
+            for (entry, (_, _, _, descending, collation, _)) in entries.iter_mut().zip(&columns) {
+                entry.collation =
+                    (!collation.eq_ignore_ascii_case("BINARY")).then_some(collation.clone());
+                entry.descending = *descending != 0;
+            }
+        }
 
         let column_names: Option<Vec<String>> = entries
             .iter()
@@ -607,7 +620,7 @@ where
                     columns: entries,
                     unique: true,
                     kind: besu_schema::IndexKind::Btree,
-                    predicate: None,
+                    predicate,
                 }),
             },
             // `PRIMARY KEY` automatic indexes.
@@ -618,7 +631,7 @@ where
                 unique: unique != 0,
                 // SQLite has one access method; everything it creates is a b-tree.
                 kind: besu_schema::IndexKind::Btree,
-                predicate: None,
+                predicate,
             }),
         }
     }
@@ -675,6 +688,171 @@ fn index_key_parts(sql: &str) -> Option<Vec<String>> {
     }
 
     None
+}
+
+/// The predicate after a partial index's key list.
+fn index_predicate(sql: &str) -> Option<&str> {
+    let (_start, end) = top_level_tokens(sql)
+        .into_iter()
+        .find(|&(start, end)| bare_keyword(sql, start, end, "where"))?;
+    Some(sql[end..].trim())
+}
+
+/// Strip the outer COLLATE and sort-order suffixes from an expression key part.
+fn index_expression(part: &str) -> String {
+    let mut end = part.len();
+    if let Some(&(start, token_end)) = top_level_tokens(part).last()
+        && (bare_keyword(part, start, token_end, "asc")
+            || bare_keyword(part, start, token_end, "desc"))
+    {
+        end = start;
+    }
+
+    let prefix = &part[..end];
+    let tokens = top_level_tokens(prefix);
+    if let [.., collate, _] = tokens.as_slice()
+        && bare_keyword(prefix, collate.0, collate.1, "collate")
+    {
+        end = collate.0;
+    }
+    part[..end].trim().to_owned()
+}
+
+/// Byte spans of tokens outside parentheses and quoted text.
+fn top_level_tokens(sql: &str) -> Vec<(usize, usize)> {
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut start = None;
+    let mut chars = sql.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        if let Some(open) = quote {
+            if ch == open {
+                if chars.peek().is_some_and(|(_, next)| *next == open) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' | '[' => {
+                if depth == 0 {
+                    start.get_or_insert(index);
+                }
+                quote = Some(if ch == '[' { ']' } else { ch });
+            }
+            '(' => {
+                if depth == 0
+                    && let Some(start) = start.take()
+                {
+                    tokens.push((start, index));
+                }
+                depth += 1;
+            }
+            ')' => {
+                if depth == 0
+                    && let Some(start) = start.take()
+                {
+                    tokens.push((start, index));
+                }
+                depth = depth.saturating_sub(1);
+            }
+            ',' if depth == 0 => {
+                if let Some(start) = start.take() {
+                    tokens.push((start, index));
+                }
+                tokens.push((index, index + ch.len_utf8()));
+            }
+            ch if ch.is_whitespace() && depth == 0 => {
+                if let Some(start) = start.take() {
+                    tokens.push((start, index));
+                }
+            }
+            _ if depth == 0 => {
+                start.get_or_insert(index);
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = start {
+        tokens.push((start, sql.len()));
+    }
+    tokens
+}
+
+fn bare_keyword(sql: &str, start: usize, end: usize, keyword: &str) -> bool {
+    let token = &sql[start..end];
+    token.eq_ignore_ascii_case(keyword)
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// The closing parenthesis of a CREATE TABLE body, ignoring quoted text.
+fn table_body_end(sql: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut chars = sql.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if let Some(open) = quote {
+            if ch == open {
+                if chars.peek().is_some_and(|(_, next)| *next == open) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' | '[' => quote = Some(if ch == '[' { ']' } else { ch }),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn table_options(create_sql: &str) -> (bool, bool) {
+    let Some(end) = table_body_end(create_sql) else {
+        return (false, false);
+    };
+    let suffix = &create_sql[end + 1..];
+    let words: Vec<_> = top_level_tokens(suffix)
+        .into_iter()
+        .filter(|&(start, end)| {
+            let token = &suffix[start..end];
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+        .collect();
+    let strict = words
+        .iter()
+        .any(|&(start, end)| bare_keyword(suffix, start, end, "strict"));
+    let without_rowid = words.windows(2).any(|pair| {
+        bare_keyword(suffix, pair[0].0, pair[0].1, "without")
+            && bare_keyword(suffix, pair[1].0, pair[1].1, "rowid")
+    });
+    (strict, without_rowid)
+}
+
+fn table_is_strict(create_sql: &str) -> bool {
+    table_options(create_sql).0
+}
+
+fn table_is_without_rowid(create_sql: &str) -> bool {
+    table_options(create_sql).1
 }
 
 /// The byte offset of a bare keyword, ignoring text inside quotes.
@@ -979,19 +1157,11 @@ fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Whether `name` is a table rebuild's scratch table.
-fn is_leftover_rebuild(name: &str) -> bool {
-    name.len() > REBUILD_SUFFIX.len() && name.ends_with(REBUILD_SUFFIX)
-}
-
-/// The name of the table a rebuild scratch table was copying, if `name` is one.
-fn rebuild_original(name: &str) -> Option<&str> {
-    is_leftover_rebuild(name).then(|| &name[..name.len() - REBUILD_SUFFIX.len()])
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Check, check_constraints, index_key_parts};
+    use super::{
+        Check, check_constraints, index_expression, index_key_parts, index_predicate, table_options,
+    };
 
     #[test]
     fn key_parts_split_on_top_level_commas() {
@@ -1008,6 +1178,39 @@ mod tests {
             index_key_parts("CREATE INDEX x\nON t\n(lower(email))")
                 .expect("the key list must parse"),
             ["lower(email)"]
+        );
+    }
+
+    #[test]
+    fn expression_keys_strip_outer_collation_and_order() {
+        assert_eq!(
+            index_expression("lower(email) COLLATE NOCASE DESC"),
+            "lower(email)"
+        );
+        assert_eq!(index_expression("(email + 1) ASC"), "(email + 1)");
+    }
+
+    #[test]
+    fn a_partial_index_predicate_is_read_after_the_key_list() {
+        assert_eq!(
+            index_predicate(
+                r#"CREATE INDEX x ON t ("where", lower(name)) WHERE active = 1 AND name <> 'where'"#
+            ),
+            Some("active = 1 AND name <> 'where'")
+        );
+    }
+
+    #[test]
+    fn table_options_are_read_only_after_the_body() {
+        assert_eq!(
+            table_options(
+                "CREATE TABLE t (strict TEXT, note TEXT DEFAULT 'WITHOUT ROWID') STRICT, WITHOUT ROWID"
+            ),
+            (true, true)
+        );
+        assert_eq!(
+            table_options("CREATE TABLE t (id INTEGER PRIMARY KEY)"),
+            (false, false)
         );
     }
 

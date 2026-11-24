@@ -40,6 +40,8 @@ fn table(name: &str, columns: Vec<Column>) -> TableIr {
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
         checks: Vec::new(),
+        strict: false,
+        without_rowid: false,
         comment: None,
     }
 }

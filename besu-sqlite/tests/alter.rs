@@ -132,13 +132,16 @@ async fn altering_a_column_rebuilds_the_table_without_losing_rows() {
         result
             .statements
             .iter()
-            .any(|s| s.starts_with(r#"CREATE TABLE "users__besu_tmp""#)),
+            .any(|s| s.starts_with(r#"CREATE TABLE "users__besu_tmp_"#)),
         "{:?}",
         result.statements
     );
     assert!(
         result.statements.iter().any(|s| s
-            == r#"INSERT INTO "users__besu_tmp" ("id", "name", "email", "age", "bio") SELECT "id", "name", "email", "age", "bio" FROM "users""#),
+            .starts_with(r#"INSERT INTO "users__besu_tmp_"#)
+            && s.ends_with(
+                r#"("id", "name", "email", "age", "bio") SELECT "id", "name", "email", "age", "bio" FROM "users""#
+            )),
         "every shared column must be copied by name: {:?}",
         result.statements
     );
@@ -152,7 +155,8 @@ async fn altering_a_column_rebuilds_the_table_without_losing_rows() {
         result
             .statements
             .iter()
-            .any(|s| s == r#"ALTER TABLE "users__besu_tmp" RENAME TO "users""#)
+            .any(|s| s.starts_with(r#"ALTER TABLE "users__besu_tmp_"#)
+                && s.ends_with(r#" RENAME TO "users""#))
     );
 
     // The row survived, and SQLite converted the integer to the column's new TEXT affinity.
@@ -203,7 +207,7 @@ async fn rebuilding_an_empty_table_copies_nothing() {
         result
             .statements
             .iter()
-            .any(|s| s.starts_with(r#"INSERT INTO "users__besu_tmp""#)),
+            .any(|s| s.starts_with(r#"INSERT INTO "users__besu_tmp_"#)),
         "{:?}",
         result.statements
     );
@@ -332,7 +336,7 @@ async fn a_rebuild_absorbs_the_other_changes_for_the_same_table() {
     let insert = result
         .statements
         .iter()
-        .find(|s| s.starts_with(r#"INSERT INTO "users__besu_tmp""#))
+        .find(|s| s.starts_with(r#"INSERT INTO "users__besu_tmp_"#))
         .unwrap_or_else(|| panic!("no copy statement in {:?}", result.statements));
     assert!(
         insert.contains(r#""age""#) && insert.contains(r#""name""#),
@@ -491,7 +495,7 @@ async fn rebuilding_a_parent_table_does_not_disturb_its_children() {
 }
 
 #[tokio::test]
-async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
+async fn a_compatible_view_survives_a_rebuild() {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
     db.execute(sql!(
         "CREATE TABLE sqlx_rebuild_parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
@@ -509,14 +513,14 @@ async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
 
     let mut desired = db.introspect().await.unwrap();
     desired.table_mut("sqlx_rebuild_parent").unwrap().columns[1].nullable = true;
-    let err = db.push_schema(&desired).await.unwrap_err();
-    assert!(err.to_string().contains("error in view"), "{err}");
+    db.push_schema(&desired).await.unwrap();
 
     let table_rows: Vec<String> = db
         .execute(sql!("SELECT name FROM sqlx_rebuild_parent"))
         .all()
         .await
         .unwrap();
+    assert_eq!(table_rows, ["Ada"]);
     let view_rows: Vec<String> = db
         .execute(sql!("SELECT name FROM sqlx_rebuild_parent_view"))
         .all()
@@ -526,14 +530,91 @@ async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
     assert_eq!(view_rows, ["Ada"]);
     let current = db.introspect().await.unwrap();
     assert!(
-        !current
+        current
             .table("sqlx_rebuild_parent")
             .unwrap()
             .column("name")
             .unwrap()
             .nullable
     );
-    assert!(current.table("sqlx_rebuild_parent__besu_tmp").is_none());
+    assert!(current.view("sqlx_rebuild_parent_view").is_some());
+    let legacy: Vec<i64> = db
+        .execute(sql!("PRAGMA legacy_alter_table"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(legacy, [0]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_incompatible_view_rolls_back_a_rebuild_and_names_the_view() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_incompatible_view_table (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO sqlx_incompatible_view_table VALUES (1, 'Ada')"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE VIEW sqlx_incompatible_view AS SELECT name FROM sqlx_incompatible_view_table"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("PRAGMA legacy_alter_table = ON"))
+        .await
+        .unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired
+        .table_mut("sqlx_incompatible_view_table")
+        .unwrap()
+        .columns
+        .remove(1);
+    desired
+        .table_mut("sqlx_incompatible_view_table")
+        .unwrap()
+        .checks
+        .push(besu::schema::Check {
+            name: "sqlx_incompatible_view_table_id_check".into(),
+            expression: "id > 0".into(),
+        });
+    let err = db.push_schema_destructive(&desired).await.unwrap_err();
+    assert!(err.to_string().contains("sqlx_incompatible_view"), "{err}");
+
+    let table_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM sqlx_incompatible_view_table"))
+        .all()
+        .await
+        .unwrap();
+    let view_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM sqlx_incompatible_view"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(table_rows, ["Ada"]);
+    assert_eq!(view_rows, ["Ada"]);
+    let current = db.introspect().await.unwrap();
+    assert!(current.table("sqlx_incompatible_view_table").is_some());
+    assert!(current.view("sqlx_incompatible_view").is_some());
+    let legacy: Vec<i64> = db
+        .execute(sql!("PRAGMA legacy_alter_table"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(legacy, [1]);
+    let scratch: Vec<String> = db
+        .execute(sql!(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'sqlx_incompatible_view_table__besu_tmp_%'"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(scratch.is_empty(), "{scratch:?}");
 }
 
 #[tokio::test]
@@ -571,7 +652,7 @@ async fn cancelling_a_rebuild_cannot_return_a_connection_with_foreign_keys_off()
             .await
             .unwrap()
             .set_update_hook(move |update| {
-                if update.table == "cancel_rebuild__besu_tmp"
+                if update.table.starts_with("cancel_rebuild__besu_tmp_")
                     && let Some(copying) = copying.take()
                 {
                     let _ = copying.send(());
@@ -592,6 +673,12 @@ async fn cancelling_a_rebuild_cannot_return_a_connection_with_foreign_keys_off()
     let db = besu::Database::new(Sqlx::from_pool(pool));
     let foreign_keys: Vec<i64> = db.execute(sql!("PRAGMA foreign_keys")).all().await.unwrap();
     assert_eq!(foreign_keys, [1]);
+    let legacy: Vec<i64> = db
+        .execute(sql!("PRAGMA legacy_alter_table"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(legacy, [0]);
     let rows: Vec<String> = db
         .execute(sql!("SELECT name FROM cancel_rebuild"))
         .all()
@@ -609,7 +696,7 @@ async fn cancelling_a_rebuild_cannot_return_a_connection_with_foreign_keys_off()
     );
     let scratch = db
         .execute(sql!(
-            "SELECT name FROM sqlite_master WHERE name = 'cancel_rebuild__besu_tmp'"
+            "SELECT name FROM sqlite_master WHERE name LIKE 'cancel_rebuild__besu_tmp_%'"
         ))
         .first::<String>()
         .await
@@ -660,4 +747,370 @@ async fn a_rebuild_keeps_its_foreign_key_toggle_on_one_connection() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn adding_a_foreign_key_over_orphan_rows_rolls_back_even_when_enforcement_is_off() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_fk_parents (id INTEGER PRIMARY KEY)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE sqlx_fk_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_fk_children VALUES (1, 999)"))
+        .await
+        .unwrap();
+    db.execute(sql!("PRAGMA foreign_keys = OFF")).await.unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired
+        .table_mut("sqlx_fk_children")
+        .unwrap()
+        .foreign_keys
+        .push(besu::schema::ForeignKey {
+            name: "sqlx_fk_children_parent_id_fkey".into(),
+            columns: vec!["parent_id".into()],
+            references_table: "sqlx_fk_parents".into(),
+            references_columns: vec!["id".into()],
+            on_delete: besu::schema::ReferenceAction::Default,
+            on_update: besu::schema::ReferenceAction::Default,
+        });
+
+    let error = db.push_schema(&desired).await.unwrap_err().to_string();
+    assert!(error.contains("sqlx_fk_children"), "{error}");
+    assert!(error.contains("row 1"), "{error}");
+    assert!(error.contains("sqlx_fk_parents"), "{error}");
+
+    let current = db.introspect().await.unwrap();
+    assert!(
+        current
+            .table("sqlx_fk_children")
+            .unwrap()
+            .foreign_keys
+            .is_empty()
+    );
+    let rows: Vec<(i64, i64)> = db
+        .execute(sql!("SELECT id, parent_id FROM sqlx_fk_children"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(1, 999)]);
+    let enabled: Vec<i64> = db.execute(sql!("PRAGMA foreign_keys")).all().await.unwrap();
+    assert_eq!(enabled, [0]);
+    let violations: Vec<(String, i64, String, i64)> = db
+        .execute(sql!("PRAGMA foreign_key_check"))
+        .all()
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+
+    db.execute(sql!("UPDATE sqlx_fk_children SET parent_id = 1"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_fk_parents VALUES (1)"))
+        .await
+        .unwrap();
+    db.push_schema(&desired).await.unwrap();
+    let violations: Vec<(String, i64, String, i64)> = db
+        .execute(sql!("PRAGMA foreign_key_check"))
+        .all()
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_preserves_a_unique_partial_index() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_partial_members (id INTEGER PRIMARY KEY, email TEXT NOT NULL, active INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE UNIQUE INDEX sqlx_partial_members_active_email_uq ON sqlx_partial_members (email) WHERE active = 1"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO sqlx_partial_members VALUES (1, 'Alice@example.com', 1)"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO sqlx_partial_members VALUES (2, 'Alice@example.com', 1)"
+        ))
+        .await
+        .is_err()
+    );
+
+    let mut desired = db.introspect().await.unwrap();
+    let index = &desired.table("sqlx_partial_members").unwrap().indexes[0];
+    assert_eq!(index.name, "sqlx_partial_members_active_email_uq");
+    assert!(index.unique);
+    assert_eq!(index.predicate.as_deref(), Some("active = 1"));
+    desired
+        .table_mut("sqlx_partial_members")
+        .unwrap()
+        .checks
+        .push(besu::schema::Check {
+            name: "sqlx_partial_members_email_nonempty_check".into(),
+            expression: "length(email) > 0".into(),
+        });
+
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(!pushed.is_destructive());
+    let indexes: Vec<(i64, String, i64, String, i64)> = db
+        .execute(sql!("PRAGMA index_list('sqlx_partial_members')"))
+        .all()
+        .await
+        .unwrap();
+    assert!(indexes.iter().any(|(_, name, unique, _, partial)| {
+        name == "sqlx_partial_members_active_email_uq" && *unique == 1 && *partial == 1
+    }));
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO sqlx_partial_members VALUES (2, 'Alice@example.com', 1)"
+        ))
+        .await
+        .is_err()
+    );
+    let rows: Vec<(i64, String, i64)> = db
+        .execute(sql!("SELECT id, email, active FROM sqlx_partial_members"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(1, "Alice@example.com".into(), 1)]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_preserves_strict_and_without_rowid() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_strict_items (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL) STRICT"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE sqlx_keyed_items (key TEXT PRIMARY KEY, qty INTEGER NOT NULL) WITHOUT ROWID"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_strict_items VALUES (1, 2)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_keyed_items VALUES ('one', 2)"))
+        .await
+        .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO sqlx_strict_items VALUES (2, 'not an integer')"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        db.execute(sql!("SELECT rowid FROM sqlx_keyed_items"))
+            .await
+            .is_err()
+    );
+
+    let mut desired = db.introspect().await.unwrap();
+    assert!(desired.table("sqlx_strict_items").unwrap().strict);
+    assert!(desired.table("sqlx_keyed_items").unwrap().without_rowid);
+    desired.table_mut("sqlx_strict_items").unwrap().strict = false;
+    desired.table_mut("sqlx_keyed_items").unwrap().without_rowid = false;
+    desired.table_mut("sqlx_strict_items").unwrap().columns[1].nullable = true;
+    desired.table_mut("sqlx_keyed_items").unwrap().columns[1].nullable = true;
+    db.push_schema(&desired).await.unwrap();
+
+    let strict_sql: String = db
+        .execute(sql!(
+            "SELECT sql FROM sqlite_master WHERE name = 'sqlx_strict_items'"
+        ))
+        .first::<String>()
+        .await
+        .unwrap()
+        .unwrap();
+    let keyed_sql: String = db
+        .execute(sql!(
+            "SELECT sql FROM sqlite_master WHERE name = 'sqlx_keyed_items'"
+        ))
+        .first::<String>()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(strict_sql.contains("STRICT"), "{strict_sql}");
+    assert!(keyed_sql.contains("WITHOUT ROWID"), "{keyed_sql}");
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO sqlx_strict_items VALUES (2, 'not an integer')"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        db.execute(sql!("SELECT rowid FROM sqlx_keyed_items"))
+            .await
+            .is_err()
+    );
+    db.execute(sql!("INSERT INTO sqlx_strict_items VALUES (2, NULL)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_keyed_items VALUES ('two', NULL)"))
+        .await
+        .unwrap();
+    let strict_rows: Vec<(i64, Option<i64>)> = db
+        .execute(sql!("SELECT id, qty FROM sqlx_strict_items ORDER BY id"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(strict_rows, [(1, Some(2)), (2, None)]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_preserves_index_collation_and_sort_order() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE UNIQUE INDEX sqlx_accounts_email_nocase_uq ON sqlx_accounts (email COLLATE NOCASE DESC)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE INDEX sqlx_accounts_lower_email_idx ON sqlx_accounts (lower(email) COLLATE NOCASE DESC)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO sqlx_accounts VALUES (1, 'Alice@example.com')"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO sqlx_accounts VALUES (2, 'alice@example.com')"
+        ))
+        .await
+        .is_err()
+    );
+
+    let mut desired = db.introspect().await.unwrap();
+    let column = &desired.table("sqlx_accounts").unwrap().indexes[0].columns[0];
+    assert_eq!(column.collation.as_deref(), Some("NOCASE"));
+    assert!(column.descending);
+    let expression = desired
+        .table("sqlx_accounts")
+        .unwrap()
+        .indexes
+        .iter()
+        .find(|index| index.name == "sqlx_accounts_lower_email_idx")
+        .unwrap();
+    assert_eq!(expression.columns[0].as_expression(), Some("lower(email)"));
+    assert_eq!(expression.columns[0].collation.as_deref(), Some("NOCASE"));
+    assert!(expression.columns[0].descending);
+    desired.table_mut("sqlx_accounts").unwrap().columns[1].nullable = true;
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(pushed.statements.iter().any(|statement| {
+        statement.contains("sqlx_accounts_email_nocase_uq")
+            && statement.contains(r#"COLLATE "NOCASE" DESC"#)
+    }));
+
+    let key: Vec<(i64, i64, Option<String>, i64, String, i64)> = db
+        .execute(sql!("PRAGMA index_xinfo('sqlx_accounts_email_nocase_uq')"))
+        .all()
+        .await
+        .unwrap();
+    assert!(
+        key.iter()
+            .any(|(_, _, name, descending, collation, is_key)| {
+                name.as_deref() == Some("email")
+                    && *descending == 1
+                    && collation == "NOCASE"
+                    && *is_key == 1
+            })
+    );
+    let expression: Vec<(i64, i64, Option<String>, i64, String, i64)> = db
+        .execute(sql!("PRAGMA index_xinfo('sqlx_accounts_lower_email_idx')"))
+        .all()
+        .await
+        .unwrap();
+    assert!(
+        expression
+            .iter()
+            .any(|(_, _, name, descending, collation, is_key)| {
+                name.is_none() && *descending == 1 && collation == "NOCASE" && *is_key == 1
+            })
+    );
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO sqlx_accounts VALUES (2, 'alice@example.com')"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_never_drops_an_unrelated_scratch_suffix_table() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    db.execute(sql!(
+        "CREATE TABLE sqlx_scratch_accounts (id INTEGER PRIMARY KEY, balance INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE sqlx_scratch_accounts__besu_tmp (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO sqlx_scratch_accounts VALUES (1, 10)"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "INSERT INTO sqlx_scratch_accounts__besu_tmp VALUES (7, 'unrelated application data')"
+    ))
+    .await
+    .unwrap();
+    let mut desired = db.introspect().await.unwrap();
+    assert!(desired.table("sqlx_scratch_accounts__besu_tmp").is_some());
+    desired.table_mut("sqlx_scratch_accounts").unwrap().columns[1].nullable = true;
+
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(!pushed.is_destructive());
+    let marker: Vec<String> = db
+        .execute(sql!("SELECT marker FROM sqlx_scratch_accounts__besu_tmp"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(marker, ["unrelated application data"]);
+    let balance: Vec<Option<i64>> = db
+        .execute(sql!("SELECT balance FROM sqlx_scratch_accounts"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(balance, [Some(10)]);
+    let scratch: Vec<String> = db
+        .execute(sql!(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'sqlx_scratch_accounts__besu_tmp_%'"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(scratch.is_empty(), "{scratch:?}");
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }

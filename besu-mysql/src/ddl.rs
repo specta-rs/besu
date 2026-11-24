@@ -253,6 +253,8 @@ impl Ddl for MySqlDdl {
             if !matches!(index.kind, IndexKind::Btree) {
                 column.prefix = None;
             }
+            column.collation = None;
+            column.descending = false;
         }
         index
     }
@@ -900,6 +902,8 @@ mod tests {
             }],
             foreign_keys: Vec::new(),
             checks: Vec::new(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         }
     }
@@ -1096,6 +1100,8 @@ mod tests {
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
             checks: Vec::new(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         };
         let index = Index {

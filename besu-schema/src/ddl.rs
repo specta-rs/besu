@@ -40,10 +40,10 @@ pub trait Ddl {
 
     /// Fold the parts of an index this dialect cannot express, so diffing converges.
     ///
-    /// SQLite has only b-trees and no operator classes or partial indexes; MySQL has
-    /// b-trees, `FULLTEXT` and `SPATIAL` but no operator classes or partial indexes. A
-    /// snapshot taken from PostgreSQL and pushed to either would otherwise report a
-    /// `DropIndex`/`AddIndex` pair on every push. The default is the identity.
+    /// SQLite has only b-trees and no operator classes; MySQL has b-trees, `FULLTEXT` and
+    /// `SPATIAL` but no operator classes or partial indexes. A snapshot taken from
+    /// PostgreSQL and pushed to either would otherwise report a `DropIndex`/`AddIndex`
+    /// pair on every push. The default is the identity.
     fn normalise_index(&self, index: &Index) -> Index {
         index.clone()
     }
@@ -134,7 +134,14 @@ pub trait Ddl {
         }
 
         sql.push(')');
+        sql.push_str(&self.table_options_sql(table));
         sql
+    }
+
+    /// Dialect-specific options that follow a CREATE TABLE body, such as SQLite's STRICT
+    /// and WITHOUT ROWID clauses. The default renders none.
+    fn table_options_sql(&self, _table: &Table) -> String {
+        String::new()
     }
 
     /// `DROP TABLE`.
@@ -257,9 +264,16 @@ pub trait Ddl {
             IndexTarget::Column(name) => self.quote(name),
             IndexTarget::Expression(expression) => self.index_expression_sql(expression),
         };
+        if let Some(collation) = &entry.collation {
+            sql.push_str(" COLLATE ");
+            sql.push_str(&self.quote(collation));
+        }
         if let Some(opclass) = &entry.opclass {
             sql.push(' ');
             sql.push_str(opclass);
+        }
+        if entry.descending {
+            sql.push_str(" DESC");
         }
         sql
     }
@@ -787,6 +801,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_index_key_renders_its_collation_and_descending_order() {
+        let index = Index {
+            name: "users_email_idx".into(),
+            columns: vec![
+                IndexColumn::column("email")
+                    .with_collation("NOCASE")
+                    .descending(),
+            ],
+            unique: true,
+            kind: IndexKind::Btree,
+            predicate: None,
+        };
+        assert_eq!(
+            TestDdl.create_index("users", &index),
+            r#"CREATE UNIQUE INDEX "users_email_idx" ON "users" ("email" COLLATE "NOCASE" DESC)"#
+        );
+    }
+
     fn accounts(checks: Vec<Check>) -> Table {
         Table {
             name: "accounts".into(),
@@ -807,6 +840,8 @@ mod tests {
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
             checks,
+            strict: false,
+            without_rowid: false,
             comment: None,
         }
     }

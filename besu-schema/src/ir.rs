@@ -1014,6 +1014,18 @@ pub struct Table {
     /// `ALTER TABLE ... ADD/DROP CONSTRAINT` on the dialects that support it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Check>,
+    /// Whether SQLite enforces column types for this table.
+    ///
+    /// Other dialects leave this false. SQLite rebuilds preserve the live setting even
+    /// when the desired definition came from a derive that cannot spell it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strict: bool,
+    /// Whether SQLite stores this table without its implicit rowid.
+    ///
+    /// Other dialects leave this false. Like `Table::strict`, this is preserved by a
+    /// SQLite rebuild.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub without_rowid: bool,
     /// Tables of named enums are rare; kept for fidelity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
@@ -1047,6 +1059,8 @@ impl Table {
                                 target,
                                 opclass: entry.opclass.map(Into::into),
                                 prefix: entry.prefix,
+                                collation: None,
+                                descending: false,
                             }
                         })
                         .collect(),
@@ -1084,6 +1098,8 @@ impl Table {
                     expression: check.expression.into(),
                 })
                 .collect(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         }
     }
@@ -1403,6 +1419,13 @@ pub struct IndexColumn {
     pub opclass: Option<String>,
     /// The number of leading characters to index, for dialects with prefix keys.
     pub prefix: Option<u32>,
+    /// The collation for this key part, if it names one.
+    ///
+    /// SQLite reports the effective collation through `PRAGMA index_xinfo`; preserving it
+    /// is what keeps a rebuilt `NOCASE` unique index case-insensitive.
+    pub collation: Option<String>,
+    /// Whether this key part is stored in descending order.
+    pub descending: bool,
 }
 
 impl IndexColumn {
@@ -1412,6 +1435,8 @@ impl IndexColumn {
             target: IndexTarget::Column(name.into()),
             opclass: None,
             prefix: None,
+            collation: None,
+            descending: false,
         }
     }
 
@@ -1421,6 +1446,8 @@ impl IndexColumn {
             target: IndexTarget::Expression(expression.into()),
             opclass: None,
             prefix: None,
+            collation: None,
+            descending: false,
         }
     }
 
@@ -1433,6 +1460,18 @@ impl IndexColumn {
     /// Attach a prefix length to this entry.
     pub fn with_prefix(mut self, prefix: u32) -> Self {
         self.prefix = Some(prefix);
+        self
+    }
+
+    /// Attach a collation to this key part.
+    pub fn with_collation(mut self, collation: impl Into<String>) -> Self {
+        self.collation = Some(collation.into());
+        self
+    }
+
+    /// Store this key part in descending order.
+    pub fn descending(mut self) -> Self {
+        self.descending = true;
         self
     }
 
@@ -1467,11 +1506,15 @@ impl From<String> for IndexColumn {
 
 impl Serialize for IndexColumn {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match &self.target {
-            IndexTarget::Column(name) if self.opclass.is_none() && self.prefix.is_none() => {
-                serializer.serialize_str(name)
-            }
-            IndexTarget::Column(name) => {
+        match (
+            &self.target,
+            &self.opclass,
+            &self.prefix,
+            &self.collation,
+            self.descending,
+        ) {
+            (IndexTarget::Column(name), None, None, None, false) => serializer.serialize_str(name),
+            (IndexTarget::Column(name), opclass, prefix, collation, descending) => {
                 #[derive(Serialize)]
                 struct Entry<'a> {
                     column: &'a str,
@@ -1479,15 +1522,21 @@ impl Serialize for IndexColumn {
                     opclass: Option<&'a str>,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     prefix: Option<u32>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    collation: Option<&'a str>,
+                    #[serde(skip_serializing_if = "is_false")]
+                    descending: bool,
                 }
                 Entry {
                     column: name,
-                    opclass: self.opclass.as_deref(),
-                    prefix: self.prefix,
+                    opclass: opclass.as_deref(),
+                    prefix: *prefix,
+                    collation: collation.as_deref(),
+                    descending,
                 }
                 .serialize(serializer)
             }
-            IndexTarget::Expression(expression) => {
+            (IndexTarget::Expression(expression), opclass, prefix, collation, descending) => {
                 #[derive(Serialize)]
                 struct Entry<'a> {
                     expression: &'a str,
@@ -1495,11 +1544,17 @@ impl Serialize for IndexColumn {
                     opclass: Option<&'a str>,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     prefix: Option<u32>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    collation: Option<&'a str>,
+                    #[serde(skip_serializing_if = "is_false")]
+                    descending: bool,
                 }
                 Entry {
                     expression,
-                    opclass: self.opclass.as_deref(),
-                    prefix: self.prefix,
+                    opclass: opclass.as_deref(),
+                    prefix: *prefix,
+                    collation: collation.as_deref(),
+                    descending,
                 }
                 .serialize(serializer)
             }
@@ -1520,6 +1575,10 @@ impl<'de> Deserialize<'de> for IndexColumn {
                 opclass: Option<String>,
                 #[serde(default)]
                 prefix: Option<u32>,
+                #[serde(default)]
+                collation: Option<String>,
+                #[serde(default)]
+                descending: bool,
             },
             Expression {
                 expression: String,
@@ -1527,6 +1586,10 @@ impl<'de> Deserialize<'de> for IndexColumn {
                 opclass: Option<String>,
                 #[serde(default)]
                 prefix: Option<u32>,
+                #[serde(default)]
+                collation: Option<String>,
+                #[serde(default)]
+                descending: bool,
             },
         }
 
@@ -1536,19 +1599,27 @@ impl<'de> Deserialize<'de> for IndexColumn {
                 column,
                 opclass,
                 prefix,
+                collation,
+                descending,
             } => Self {
                 target: IndexTarget::Column(column),
                 opclass,
                 prefix,
+                collation,
+                descending,
             },
             Raw::Expression {
                 expression,
                 opclass,
                 prefix,
+                collation,
+                descending,
             } => Self {
                 target: IndexTarget::Expression(expression),
                 opclass,
                 prefix,
+                collation,
+                descending,
             },
         })
     }
@@ -1571,9 +1642,8 @@ pub struct Index {
     pub kind: IndexKind,
     /// The `WHERE` clause of a partial index, if it has one.
     ///
-    /// Only PostgreSQL has this read back into the IR. SQLite supports partial indexes but
-    /// its introspection skips them rather than guess, and MySQL has none, so both leave
-    /// this `None`.
+    /// PostgreSQL and SQLite read this back into the IR. MySQL has no partial indexes, so
+    /// its introspection and normalisation leave this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
 }
@@ -2513,6 +2583,23 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_table_options_default_to_false_and_round_trip() {
+        let json = r#"{"tables": [{"name": "items", "columns": [{"name": "id", "ty": "Int8"}]}]}"#;
+        let old: Schema = serde_json::from_str(json).expect("an old snapshot must load");
+        assert!(!old.tables[0].strict);
+        assert!(!old.tables[0].without_rowid);
+
+        let mut table = old.tables[0].clone();
+        table.strict = true;
+        table.without_rowid = true;
+        let value = serde_json::to_value(&table).expect("table options must serialise");
+        let parsed: super::Table =
+            serde_json::from_value(value).expect("table options must round-trip");
+        assert!(parsed.strict);
+        assert!(parsed.without_rowid);
+    }
+
+    #[test]
     fn an_index_entry_round_trips_expressions_and_operator_classes() {
         let index = Index {
             name: "users_search_idx".into(),
@@ -2520,6 +2607,9 @@ mod tests {
                 IndexColumn::column("email")
                     .with_opclass("text_pattern_ops")
                     .with_prefix(10),
+                IndexColumn::column("name")
+                    .with_collation("NOCASE")
+                    .descending(),
                 IndexColumn::expression("lower(name)"),
             ],
             unique: true,
@@ -2530,6 +2620,26 @@ mod tests {
         let json = serde_json::to_string(&index).expect("the index must serialise");
         let parsed: Index = serde_json::from_str(&json).expect("the index must load");
         assert_eq!(parsed, index);
+    }
+
+    #[test]
+    fn index_collation_and_order_round_trip_and_old_objects_still_load() {
+        let entry = IndexColumn::column("email")
+            .with_collation("NOCASE")
+            .descending();
+        let value = serde_json::to_value(&entry).expect("an entry must serialise");
+        assert_eq!(
+            value,
+            serde_json::json!({"column": "email", "collation": "NOCASE", "descending": true})
+        );
+        let parsed: IndexColumn = serde_json::from_value(value).expect("an entry must load");
+        assert_eq!(parsed, entry);
+
+        let old: IndexColumn =
+            serde_json::from_str(r#"{"column": "email", "opclass": "text_pattern_ops"}"#)
+                .expect("an old object entry must load");
+        assert_eq!(old.collation, None);
+        assert!(!old.descending);
     }
 
     #[test]

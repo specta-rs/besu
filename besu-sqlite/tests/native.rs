@@ -960,8 +960,8 @@ async fn a_failed_rebuild_restores_foreign_keys_and_can_be_retried() {
         "{violation}"
     );
 
-    // The scratch table is not part of the schema while the table it copies still exists, so
-    // a retry with a valid diff is not reported as a destructive drop.
+    // The failed transaction leaves no scratch table, so a retry with a valid diff is not
+    // reported as a destructive drop.
     let retried: Schema = db.introspect().await.unwrap();
     assert!(retried.table("people__besu_tmp").is_none());
 
@@ -977,7 +977,7 @@ async fn a_failed_rebuild_restores_foreign_keys_and_can_be_retried() {
     assert_eq!(rows, [(1, "Ada".to_owned())]);
     let leftover: Vec<(String,)> = db
         .execute(sql!(
-            "SELECT name FROM sqlite_master WHERE name LIKE '%__besu_tmp'"
+            "SELECT name FROM sqlite_master WHERE name LIKE '%__besu_tmp%'"
         ))
         .all()
         .await
@@ -986,7 +986,7 @@ async fn a_failed_rebuild_restores_foreign_keys_and_can_be_retried() {
 }
 
 #[tokio::test]
-async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
+async fn a_compatible_view_survives_a_rebuild() {
     let db = memory().await;
     db.execute(sql!(
         "CREATE TABLE native_rebuild_parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
@@ -1004,8 +1004,7 @@ async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
 
     let mut desired = db.introspect().await.unwrap();
     desired.table_mut("native_rebuild_parent").unwrap().columns[1].nullable = true;
-    let err = db.push_schema(&desired).await.unwrap_err();
-    assert!(err.to_string().contains("error in view"), "{err}");
+    db.push_schema(&desired).await.unwrap();
 
     let table_rows: Vec<String> = db
         .execute(sql!("SELECT name FROM native_rebuild_parent"))
@@ -1021,14 +1020,94 @@ async fn a_rebuild_that_cannot_rename_keeps_the_original_table_and_view() {
     assert_eq!(view_rows, ["Ada"]);
     let current = db.introspect().await.unwrap();
     assert!(
-        !current
+        current
             .table("native_rebuild_parent")
             .unwrap()
             .column("name")
             .unwrap()
             .nullable
     );
-    assert!(current.table("native_rebuild_parent__besu_tmp").is_none());
+    assert!(current.view("native_rebuild_parent_view").is_some());
+    let legacy: Vec<i64> = db
+        .execute(sql!("PRAGMA legacy_alter_table"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(legacy, [0]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_incompatible_view_rolls_back_a_rebuild_and_names_the_view() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_incompatible_view_table (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO native_incompatible_view_table VALUES (1, 'Ada')"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE VIEW native_incompatible_view AS SELECT name FROM native_incompatible_view_table"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("PRAGMA legacy_alter_table = ON"))
+        .await
+        .unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired
+        .table_mut("native_incompatible_view_table")
+        .unwrap()
+        .columns
+        .remove(1);
+    desired
+        .table_mut("native_incompatible_view_table")
+        .unwrap()
+        .checks
+        .push(besu::schema::Check {
+            name: "native_incompatible_view_table_id_check".into(),
+            expression: "id > 0".into(),
+        });
+    let err = db.push_schema_destructive(&desired).await.unwrap_err();
+    assert!(
+        err.to_string().contains("native_incompatible_view"),
+        "{err}"
+    );
+
+    let table_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM native_incompatible_view_table"))
+        .all()
+        .await
+        .unwrap();
+    let view_rows: Vec<String> = db
+        .execute(sql!("SELECT name FROM native_incompatible_view"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(table_rows, ["Ada"]);
+    assert_eq!(view_rows, ["Ada"]);
+    let current = db.introspect().await.unwrap();
+    assert!(current.table("native_incompatible_view_table").is_some());
+    assert!(current.view("native_incompatible_view").is_some());
+    let legacy: Vec<i64> = db
+        .execute(sql!("PRAGMA legacy_alter_table"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(legacy, [1]);
+    let scratch: Vec<String> = db
+        .execute(sql!(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'native_incompatible_view_table__besu_tmp_%'"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(scratch.is_empty(), "{scratch:?}");
 }
 
 #[tokio::test]
@@ -1329,5 +1408,383 @@ async fn a_multi_column_unique_added_by_a_push_is_created() {
         "{error}"
     );
 
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn adding_a_foreign_key_over_orphan_rows_rolls_back_even_when_enforcement_is_off() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_fk_parents (id INTEGER PRIMARY KEY)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE native_fk_children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO native_fk_children VALUES (1, 999)"))
+        .await
+        .unwrap();
+    db.execute(sql!("PRAGMA foreign_keys = OFF")).await.unwrap();
+
+    let mut desired = db.introspect().await.unwrap();
+    desired
+        .table_mut("native_fk_children")
+        .unwrap()
+        .foreign_keys
+        .push(besu::schema::ForeignKey {
+            name: "native_fk_children_parent_id_fkey".into(),
+            columns: vec!["parent_id".into()],
+            references_table: "native_fk_parents".into(),
+            references_columns: vec!["id".into()],
+            on_delete: besu::schema::ReferenceAction::Default,
+            on_update: besu::schema::ReferenceAction::Default,
+        });
+
+    let error = db.push_schema(&desired).await.unwrap_err().to_string();
+    assert!(error.contains("native_fk_children"), "{error}");
+    assert!(error.contains("row 1"), "{error}");
+    assert!(error.contains("native_fk_parents"), "{error}");
+
+    let current = db.introspect().await.unwrap();
+    assert!(
+        current
+            .table("native_fk_children")
+            .unwrap()
+            .foreign_keys
+            .is_empty()
+    );
+    let rows: Vec<(i64, i64)> = db
+        .execute(sql!("SELECT id, parent_id FROM native_fk_children"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(1, 999)]);
+    let enabled: Vec<i64> = db.execute(sql!("PRAGMA foreign_keys")).all().await.unwrap();
+    assert_eq!(enabled, [0]);
+    let violations: Vec<(String, i64, String, i64)> = db
+        .execute(sql!("PRAGMA foreign_key_check"))
+        .all()
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+
+    db.execute(sql!("UPDATE native_fk_children SET parent_id = 1"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO native_fk_parents VALUES (1)"))
+        .await
+        .unwrap();
+    db.push_schema(&desired).await.unwrap();
+    let violations: Vec<(String, i64, String, i64)> = db
+        .execute(sql!("PRAGMA foreign_key_check"))
+        .all()
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_preserves_a_unique_partial_index() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_partial_members (id INTEGER PRIMARY KEY, email TEXT NOT NULL, active INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE UNIQUE INDEX native_partial_members_active_email_uq ON native_partial_members (email) WHERE active = 1"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO native_partial_members VALUES (1, 'Alice@example.com', 1)"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO native_partial_members VALUES (2, 'Alice@example.com', 1)"
+        ))
+        .await
+        .is_err()
+    );
+
+    let mut desired = db.introspect().await.unwrap();
+    let index = &desired.table("native_partial_members").unwrap().indexes[0];
+    assert_eq!(index.name, "native_partial_members_active_email_uq");
+    assert!(index.unique);
+    assert_eq!(index.predicate.as_deref(), Some("active = 1"));
+    desired
+        .table_mut("native_partial_members")
+        .unwrap()
+        .checks
+        .push(besu::schema::Check {
+            name: "native_partial_members_email_nonempty_check".into(),
+            expression: "length(email) > 0".into(),
+        });
+
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(!pushed.is_destructive());
+    let indexes: Vec<(i64, String, i64, String, i64)> = db
+        .execute(sql!("PRAGMA index_list('native_partial_members')"))
+        .all()
+        .await
+        .unwrap();
+    assert!(indexes.iter().any(|(_, name, unique, _, partial)| {
+        name == "native_partial_members_active_email_uq" && *unique == 1 && *partial == 1
+    }));
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO native_partial_members VALUES (2, 'Alice@example.com', 1)"
+        ))
+        .await
+        .is_err()
+    );
+    let rows: Vec<(i64, String, i64)> = db
+        .execute(sql!("SELECT id, email, active FROM native_partial_members"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows, [(1, "Alice@example.com".into(), 1)]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_preserves_strict_and_without_rowid() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_strict_items (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL) STRICT"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE native_keyed_items (key TEXT PRIMARY KEY, qty INTEGER NOT NULL) WITHOUT ROWID"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO native_strict_items VALUES (1, 2)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO native_keyed_items VALUES ('one', 2)"))
+        .await
+        .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO native_strict_items VALUES (2, 'not an integer')"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        db.execute(sql!("SELECT rowid FROM native_keyed_items"))
+            .await
+            .is_err()
+    );
+
+    let mut desired = db.introspect().await.unwrap();
+    assert!(desired.table("native_strict_items").unwrap().strict);
+    assert!(desired.table("native_keyed_items").unwrap().without_rowid);
+    // Simulate declared metadata, which has no attributes for these SQLite-only options.
+    desired.table_mut("native_strict_items").unwrap().strict = false;
+    desired
+        .table_mut("native_keyed_items")
+        .unwrap()
+        .without_rowid = false;
+    desired.table_mut("native_strict_items").unwrap().columns[1].nullable = true;
+    desired.table_mut("native_keyed_items").unwrap().columns[1].nullable = true;
+    db.push_schema(&desired).await.unwrap();
+
+    let strict_sql: String = db
+        .execute(sql!(
+            "SELECT sql FROM sqlite_master WHERE name = 'native_strict_items'"
+        ))
+        .first::<String>()
+        .await
+        .unwrap()
+        .unwrap();
+    let keyed_sql: String = db
+        .execute(sql!(
+            "SELECT sql FROM sqlite_master WHERE name = 'native_keyed_items'"
+        ))
+        .first::<String>()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(strict_sql.contains("STRICT"), "{strict_sql}");
+    assert!(keyed_sql.contains("WITHOUT ROWID"), "{keyed_sql}");
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO native_strict_items VALUES (2, 'not an integer')"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        db.execute(sql!("SELECT rowid FROM native_keyed_items"))
+            .await
+            .is_err()
+    );
+    db.execute(sql!("INSERT INTO native_strict_items VALUES (2, NULL)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO native_keyed_items VALUES ('two', NULL)"))
+        .await
+        .unwrap();
+    let strict_rows: Vec<(i64, Option<i64>)> = db
+        .execute(sql!("SELECT id, qty FROM native_strict_items ORDER BY id"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(strict_rows, [(1, Some(2)), (2, None)]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_preserves_index_collation_and_sort_order() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE UNIQUE INDEX native_accounts_email_nocase_uq ON native_accounts (email COLLATE NOCASE DESC)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE INDEX native_accounts_lower_email_idx ON native_accounts (lower(email) COLLATE NOCASE DESC)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "INSERT INTO native_accounts VALUES (1, 'Alice@example.com')"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO native_accounts VALUES (2, 'alice@example.com')"
+        ))
+        .await
+        .is_err()
+    );
+
+    let mut desired = db.introspect().await.unwrap();
+    let column = &desired.table("native_accounts").unwrap().indexes[0].columns[0];
+    assert_eq!(column.collation.as_deref(), Some("NOCASE"));
+    assert!(column.descending);
+    let expression = desired
+        .table("native_accounts")
+        .unwrap()
+        .indexes
+        .iter()
+        .find(|index| index.name == "native_accounts_lower_email_idx")
+        .unwrap();
+    assert_eq!(expression.columns[0].as_expression(), Some("lower(email)"));
+    assert_eq!(expression.columns[0].collation.as_deref(), Some("NOCASE"));
+    assert!(expression.columns[0].descending);
+    desired.table_mut("native_accounts").unwrap().columns[1].nullable = true;
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(pushed.statements.iter().any(|statement| {
+        statement.contains("native_accounts_email_nocase_uq")
+            && statement.contains(r#"COLLATE "NOCASE" DESC"#)
+    }));
+
+    let key: Vec<(i64, i64, Option<String>, i64, String, i64)> = db
+        .execute(sql!(
+            "PRAGMA index_xinfo('native_accounts_email_nocase_uq')"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(
+        key.iter()
+            .any(|(_, _, name, descending, collation, is_key)| {
+                name.as_deref() == Some("email")
+                    && *descending == 1
+                    && collation == "NOCASE"
+                    && *is_key == 1
+            })
+    );
+    let expression: Vec<(i64, i64, Option<String>, i64, String, i64)> = db
+        .execute(sql!(
+            "PRAGMA index_xinfo('native_accounts_lower_email_idx')"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(
+        expression
+            .iter()
+            .any(|(_, _, name, descending, collation, is_key)| {
+                name.is_none() && *descending == 1 && collation == "NOCASE" && *is_key == 1
+            })
+    );
+    assert!(
+        db.execute(sql!(
+            "INSERT INTO native_accounts VALUES (2, 'alice@example.com')"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebuild_never_drops_an_unrelated_scratch_suffix_table() {
+    let db = memory().await;
+    db.execute(sql!(
+        "CREATE TABLE native_scratch_accounts (id INTEGER PRIMARY KEY, balance INTEGER NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!(
+        "CREATE TABLE native_scratch_accounts__besu_tmp (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)"
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO native_scratch_accounts VALUES (1, 10)"))
+        .await
+        .unwrap();
+    db.execute(sql!(
+        "INSERT INTO native_scratch_accounts__besu_tmp VALUES (7, 'unrelated application data')"
+    ))
+    .await
+    .unwrap();
+    let mut desired = db.introspect().await.unwrap();
+    assert!(desired.table("native_scratch_accounts__besu_tmp").is_some());
+    desired
+        .table_mut("native_scratch_accounts")
+        .unwrap()
+        .columns[1]
+        .nullable = true;
+
+    let pushed = db.push_schema(&desired).await.unwrap();
+    assert!(!pushed.is_destructive());
+    let marker: Vec<String> = db
+        .execute(sql!("SELECT marker FROM native_scratch_accounts__besu_tmp"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(marker, ["unrelated application data"]);
+    let balance: Vec<Option<i64>> = db
+        .execute(sql!("SELECT balance FROM native_scratch_accounts"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(balance, [Some(10)]);
+    let scratch: Vec<String> = db
+        .execute(sql!(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'native_scratch_accounts__besu_tmp_%'"
+        ))
+        .all()
+        .await
+        .unwrap();
+    assert!(scratch.is_empty(), "{scratch:?}");
     assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
