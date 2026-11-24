@@ -151,7 +151,7 @@ impl Dialect for MySql {
                     if i != 0 {
                         out.push(',');
                     }
-                    out.push_str(&crate::dialect::mysql_literal(&label));
+                    out.push_str(&crate::dialect::mysql_literal(label));
                 }
                 out.push(')');
                 Cow::Owned(out)
@@ -164,7 +164,7 @@ impl Dialect for MySql {
                     if i != 0 {
                         out.push(',');
                     }
-                    out.push_str(&crate::dialect::mysql_literal(&label));
+                    out.push_str(&crate::dialect::mysql_literal(label));
                 }
                 out.push(')');
                 Cow::Owned(out)

@@ -1395,3 +1395,114 @@ async fn a_text_default_cannot_inject_another_column() {
         .unwrap();
     assert_eq!(stored, [(payload.to_owned(),)]);
 }
+
+// ---------------------------------------------------------------------------------------
+// Wide integer columns and parameters keep their full range
+// ---------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unsigned_bigints_widen_to_i128_without_narrowing() {
+    let db = fresh("besu_native_unsigned_i128").await;
+    db.execute(sql!(
+        "CREATE TABLE unsigned_big (value BIGINT UNSIGNED NOT NULL)"
+    ))
+    .await
+    .unwrap();
+
+    let values = [0, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX];
+    for value in values {
+        db.execute(Fragment::with_args(
+            "INSERT INTO unsigned_big (value) VALUES (?)",
+            vec![Value::UInt(value)],
+        ))
+        .await
+        .unwrap();
+        let cast: Vec<(i128,)> = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS UNSIGNED)",
+                vec![Value::UInt(value)],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(cast, [(i128::from(value),)]);
+    }
+
+    let stored: Vec<(i128,)> = db
+        .execute(sql!("SELECT value FROM unsigned_big ORDER BY value"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        values
+            .into_iter()
+            .map(|value| (i128::from(value),))
+            .collect::<Vec<_>>()
+    );
+
+    let signed: Vec<(i128,)> = db
+        .execute(sql!("SELECT CAST(-9223372036854775808 AS SIGNED)"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(signed, [(i128::from(i64::MIN),)]);
+}
+
+#[tokio::test]
+async fn wide_integer_parameters_round_trip_through_select() {
+    let db = fresh("besu_native_wide_parameters").await;
+
+    for value in [42, u128::MAX] {
+        let rows: Vec<(u128,)> = db
+            .execute(Fragment::with_args("SELECT ?", vec![Value::UInt128(value)]))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, [(value,)]);
+    }
+    for value in [-42, i128::MIN] {
+        let rows: Vec<(i128,)> = db
+            .execute(Fragment::with_args("SELECT ?", vec![Value::Int128(value)]))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, [(value,)]);
+    }
+}
+
+#[tokio::test]
+async fn negative_fractional_decimals_are_not_decoded_as_u128_zero() {
+    let db = fresh("besu_native_negative_decimal_u128").await;
+
+    for text in ["-0.50", "-0.99", "-0.01", "-0.000001", "-1.50"] {
+        let result = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS DECIMAL(10,6))",
+                vec![Value::Text(text.into())],
+            ))
+            .all::<(u128,)>()
+            .await;
+        assert!(result.is_err(), "{text} decoded as {:?}", result.ok());
+    }
+    for (text, expected) in [("0.50", 0), ("1.90", 1), ("-0.00", 0)] {
+        let rows: Vec<(u128,)> = db
+            .execute(Fragment::with_args(
+                "SELECT CAST(? AS DECIMAL(10,6))",
+                vec![Value::Text(text.into())],
+            ))
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, [(expected,)], "{text}");
+    }
+
+    let too_wide = db
+        .execute(Fragment::with_args(
+            "SELECT CAST(? AS DECIMAL(39,0))",
+            vec![Value::Text((i128::MAX as u128 + 1).to_string())],
+        ))
+        .all::<(i128,)>()
+        .await;
+    assert!(too_wide.is_err(), "got {too_wide:?}");
+}
