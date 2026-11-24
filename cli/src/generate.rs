@@ -81,5 +81,60 @@ fn next_version(dir: &std::path::Path) -> anyhow::Result<i64> {
             highest = highest.max(version);
         }
     }
-    Ok(highest + 1)
+    highest.checked_add(1).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot generate a migration after version {highest}: the next version exceeds i64::MAX"
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "besu-generate-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).expect("create test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn next_version_reports_overflow_instead_of_panicking() {
+        let dir = TestDir::new();
+        std::fs::write(dir.0.join("9223372036854775807_existing.sql"), "SELECT 1;")
+            .expect("write migration");
+
+        let error = next_version(&dir.0).expect_err("i64::MAX has no successor");
+        assert!(error.to_string().contains("exceeds i64::MAX"));
+        assert_eq!(
+            std::fs::read_dir(&dir.0).expect("read directory").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn next_version_can_generate_i64_max() {
+        let dir = TestDir::new();
+        std::fs::write(dir.0.join("9223372036854775806_existing.sql"), "SELECT 1;")
+            .expect("write migration");
+
+        assert_eq!(next_version(&dir.0).expect("next version"), i64::MAX);
+    }
 }
