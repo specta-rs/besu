@@ -1513,9 +1513,7 @@ impl Serialize for IndexColumn {
             &self.collation,
             self.descending,
         ) {
-            (IndexTarget::Column(name), None, None, None, false) => {
-                serializer.serialize_str(name)
-            }
+            (IndexTarget::Column(name), None, None, None, false) => serializer.serialize_str(name),
             (IndexTarget::Column(name), opclass, prefix, collation, descending) => {
                 #[derive(Serialize)]
                 struct Entry<'a> {

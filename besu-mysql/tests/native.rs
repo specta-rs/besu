@@ -1296,6 +1296,8 @@ async fn enum_and_set_labels_cannot_close_their_type_literal() {
         uniques: Vec::new(),
         foreign_keys: Vec::new(),
         checks: Vec::new(),
+        strict: false,
+        without_rowid: false,
         comment: None,
     };
     let desired = Schema {
@@ -1374,6 +1376,8 @@ async fn a_text_default_cannot_inject_another_column() {
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
             checks: Vec::new(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         }],
         ..Schema::default()

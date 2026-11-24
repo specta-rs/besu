@@ -1875,9 +1875,11 @@ mod tests {
         let mut before = table("users", vec![column("email", TypeDef::Text)]);
         before.indexes.push(crate::Index {
             name: "users_email_idx".into(),
-            columns: vec![IndexColumn::column("email")
-                .with_prefix(10)
-                .with_collation("NOCASE")],
+            columns: vec![
+                IndexColumn::column("email")
+                    .with_prefix(10)
+                    .with_collation("NOCASE"),
+            ],
             unique: false,
             kind: crate::IndexKind::Btree,
             predicate: None,
@@ -1897,7 +1899,10 @@ mod tests {
 
         let mut descending = after.clone();
         descending.tables[0].indexes[0].columns[0].descending = true;
-        assert!(matches!(&diff(&after, &descending)[0], Change::DropIndex { .. }));
+        assert!(matches!(
+            &diff(&after, &descending)[0],
+            Change::DropIndex { .. }
+        ));
     }
 
     #[test]
