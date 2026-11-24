@@ -2404,6 +2404,8 @@ mod tests {
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
             checks: Vec::new(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         };
         assert_eq!(table.qualified_name(), r#""order.items""#);

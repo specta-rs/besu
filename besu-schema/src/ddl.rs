@@ -815,9 +815,11 @@ mod tests {
     fn an_index_key_renders_its_collation_and_descending_order() {
         let index = Index {
             name: "users_email_idx".into(),
-            columns: vec![IndexColumn::column("email")
-                .with_collation("NOCASE")
-                .descending()],
+            columns: vec![
+                IndexColumn::column("email")
+                    .with_collation("NOCASE")
+                    .descending(),
+            ],
             unique: true,
             kind: IndexKind::Btree,
             predicate: None,

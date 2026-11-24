@@ -825,6 +825,8 @@ mod tests {
                 uniques: Vec::new(),
                 foreign_keys: Vec::new(),
                 checks: Vec::new(),
+                strict: false,
+                without_rowid: false,
                 comment: None,
             }
         }
@@ -904,6 +906,8 @@ mod tests {
             uniques: Vec::new(),
             foreign_keys: Vec::new(),
             checks: Vec::new(),
+            strict: false,
+            without_rowid: false,
             comment: None,
         };
         let apply = |current: Schema, desired: Schema| {
