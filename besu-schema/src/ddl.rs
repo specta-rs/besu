@@ -2,7 +2,7 @@ use besu_core::{IndexKind, TypeDef, Value};
 
 use crate::{
     Change, Check, Column, Domain, Enum, ForeignKey, Index, IndexColumn, IndexTarget,
-    ReferenceAction, Schema, Sequence, Table, Unique, View, view_body,
+    ReferenceAction, Schema, Sequence, Table, Unique, View, split_qualified_name, view_body,
 };
 
 /// Render a schema as DDL for a particular database.
@@ -20,10 +20,11 @@ pub trait Ddl {
 
     /// Quote a possibly schema-qualified table name.
     fn quote_table(&self, table: &str) -> String {
-        match table.split_once('.') {
-            Some((schema, table)) => format!("{}.{}", self.quote(schema), self.quote(table)),
-            None => self.quote(table),
-        }
+        split_qualified_name(table)
+            .iter()
+            .map(|part| self.quote(part))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// The native type name for a canonical type.
@@ -814,11 +815,9 @@ mod tests {
     fn an_index_key_renders_its_collation_and_descending_order() {
         let index = Index {
             name: "users_email_idx".into(),
-            columns: vec![
-                IndexColumn::column("email")
-                    .with_collation("NOCASE")
-                    .descending(),
-            ],
+            columns: vec![IndexColumn::column("email")
+                .with_collation("NOCASE")
+                .descending()],
             unique: true,
             kind: IndexKind::Btree,
             predicate: None,
@@ -827,6 +826,13 @@ mod tests {
             TestDdl.create_index("users", &index),
             r#"CREATE UNIQUE INDEX "users_email_idx" ON "users" ("email" COLLATE "NOCASE" DESC)"#
         );
+    }
+
+    #[test]
+    fn a_quoted_table_component_keeps_its_literal_dot() {
+        assert_eq!(TestDdl.quote_table(r#""order.items""#), r#""order.items""#);
+        assert_eq!(TestDdl.quote_table(r#""a.b"."c.d""#), r#""a.b"."c.d""#);
+        assert_eq!(TestDdl.quote_table("app.users"), r#""app"."users""#);
     }
 
     fn accounts(checks: Vec<Check>) -> Table {

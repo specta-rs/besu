@@ -100,6 +100,58 @@ impl View {
     }
 }
 
+/// Split a possibly qualified SQL name into its identifier components.
+///
+/// A dot inside a double-quoted or backtick-quoted identifier is data, not a schema
+/// separator. [`Table::qualified_name`] uses that spelling when an unqualified table name
+/// itself contains a dot, so a change can carry the name without becoming ambiguous.
+pub fn split_qualified_name(name: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = name.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active) if ch == active => {
+                if chars.peek() == Some(&active) {
+                    current.push(chars.next().unwrap_or(ch));
+                } else {
+                    quote = None;
+                }
+            }
+            Some(_) => current.push(ch),
+            None => match ch {
+                '"' | '`' => quote = Some(ch),
+                '.' => {
+                    parts.push(core::mem::take(&mut current));
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+/// Join identifier components into the unambiguous spelling used by schema changes.
+///
+/// Components that contain a dot or identifier quote are double-quoted, with embedded
+/// double quotes doubled. Ordinary names stay bare so existing schema.table spellings do
+/// not change.
+pub fn join_qualified_name(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| {
+            if part.is_empty() || part.chars().any(|ch| matches!(ch, '.' | '"' | '`')) {
+                format!("\"{}\"", part.replace('"', "\"\""))
+            } else {
+                part.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// The `SELECT` part of a view definition, with any `CREATE VIEW ... AS` wrapper removed.
 ///
 /// This is public because the dialects render it and the differ compares it, and both have
@@ -759,8 +811,8 @@ impl Sequence {
     /// The sequence's name, qualified by its schema when it has one.
     pub fn qualified_name(&self) -> String {
         match &self.schema {
-            Some(schema) => format!("{schema}.{}", self.name),
-            None => self.name.clone(),
+            Some(schema) => join_qualified_name(&[schema.clone(), self.name.clone()]),
+            None => join_qualified_name(core::slice::from_ref(&self.name)),
         }
     }
 
@@ -968,9 +1020,18 @@ impl Schema {
     /// The name is `schema.table` when the table has a schema, and a bare `table`
     /// otherwise.
     pub fn get(&self, qualified: &str) -> Option<&Table> {
-        match qualified.split_once('.') {
-            Some((schema, name)) => self.find(Some(schema), name),
-            None => self.find(None, qualified),
+        if let Some(table) = self
+            .tables
+            .iter()
+            .find(|table| table.qualified_name() == qualified)
+        {
+            return Some(table);
+        }
+        let parts = split_qualified_name(qualified);
+        match parts.as_slice() {
+            [schema, name] => self.find(Some(schema), name),
+            [name] => self.find(None, name),
+            _ => None,
         }
     }
 
@@ -1269,11 +1330,13 @@ impl Table {
     /// The table's name, qualified by its schema when it has one, as in `app.users`.
     ///
     /// This is the identity [`Change`](crate::Change) carries and what
-    /// [`Ddl::quote_table`](crate::Ddl::quote_table) expects; it is *not* quoted.
+    /// [`Ddl::quote_table`](crate::Ddl::quote_table) expects. A component containing a dot is
+    /// quoted so an unqualified table literally named `order.items` cannot be mistaken for a
+    /// table named `items` in a schema named `order`.
     pub fn qualified_name(&self) -> String {
         match &self.schema {
-            Some(schema) => format!("{schema}.{}", self.name),
-            None => self.name.clone(),
+            Some(schema) => join_qualified_name(&[schema.clone(), self.name.clone()]),
+            None => join_qualified_name(core::slice::from_ref(&self.name)),
         }
     }
 
@@ -2311,6 +2374,56 @@ mod fs_impl {
 
 #[cfg(test)]
 mod tests {
+    use super::{join_qualified_name, split_qualified_name};
+
+    #[test]
+    fn qualified_names_keep_literal_dots_unambiguous() {
+        assert_eq!(split_qualified_name(r#""order.items""#), ["order.items"]);
+        assert_eq!(split_qualified_name(r#""a.b"."c.d""#), ["a.b", "c.d"]);
+        assert_eq!(
+            join_qualified_name(&["order.items".into()]),
+            r#""order.items""#
+        );
+        assert_eq!(
+            join_qualified_name(&["a.b".into(), "c.d".into()]),
+            r#""a.b"."c.d""#
+        );
+        assert_eq!(
+            join_qualified_name(&["app".into(), "users".into()]),
+            "app.users"
+        );
+    }
+
+    #[test]
+    fn a_literal_dotted_table_name_round_trips_through_changes() {
+        let mut table = super::Table {
+            name: "order.items".into(),
+            schema: None,
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            comment: None,
+        };
+        assert_eq!(table.qualified_name(), r#""order.items""#);
+        let mut schema = super::Schema::new();
+        schema.tables.push(table.clone());
+        assert_eq!(
+            schema.get(&table.qualified_name()).unwrap().name,
+            "order.items"
+        );
+
+        table.schema = Some("order".into());
+        table.name = "items".into();
+        schema.tables.push(table.clone());
+        assert_eq!(
+            schema.get("order.items").unwrap().schema.as_deref(),
+            Some("order")
+        );
+        assert_eq!(schema.get(r#""order.items""#).unwrap().schema, None);
+    }
+
     use super::{
         Enum, Index, IndexColumn, IndexKind, IndexTarget, Schema, Sequence,
         normalise_generated_expression, normalise_view_definition, view_body,

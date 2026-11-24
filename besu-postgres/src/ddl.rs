@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use besu_core::{Dialect, TypeDef};
 use besu_schema::{
-    Change, Column, Ddl, Domain, Enum, ForeignKey, Index, Schema, Sequence, View, view_body,
+    Change, Column, Ddl, Domain, Enum, ForeignKey, Index, Schema, Sequence, View,
+    split_qualified_name, view_body,
 };
 
 use crate::Postgres;
@@ -313,13 +314,13 @@ impl Ddl for PostgresDdl {
     fn drop_index(&self, table: &str, index: &Index) -> String {
         // An index belongs to the table's schema, so an unqualified `DROP INDEX` names the
         // wrong one whenever the table is not in the current schema.
-        match table.split_once('.') {
-            Some((schema, _)) => format!(
+        match split_qualified_name(table).as_slice() {
+            [schema, _] => format!(
                 "DROP INDEX {}.{}",
                 self.quote(schema),
                 self.quote(&index.name)
             ),
-            None => format!("DROP INDEX {}", self.quote(&index.name)),
+            _ => format!("DROP INDEX {}", self.quote(&index.name)),
         }
     }
 

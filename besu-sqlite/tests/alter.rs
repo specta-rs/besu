@@ -117,7 +117,7 @@ async fn altering_a_column_rebuilds_the_table_without_losing_rows() {
     .await
     .unwrap();
 
-    let result = db.push([v2::users.def()]).await.unwrap();
+    let result = db.push_destructive([v2::users.def()]).await.unwrap();
 
     // A type change and a nullability change are two `AlterColumn`s, but one rebuild.
     assert_eq!(result.changes.len(), 2);
@@ -202,7 +202,7 @@ async fn rebuilding_an_empty_table_copies_nothing() {
     db.push([v1::users.def()]).await.unwrap();
 
     // The copy is still emitted, but selecting from an empty table is not an error.
-    let result = db.push([v2::users.def()]).await.unwrap();
+    let result = db.push_destructive([v2::users.def()]).await.unwrap();
     assert!(
         result
             .statements
@@ -242,7 +242,7 @@ async fn rebuilding_preserves_autoincrement_after_deleting_the_highest_id() {
             .await
             .unwrap();
 
-        db.push([v2::users.def()]).await.unwrap();
+        db.push_destructive([v2::users.def()]).await.unwrap();
         let sequence = db
             .execute(sql!("SELECT seq FROM sqlite_sequence WHERE name = 'users'"))
             .first::<i64>()
@@ -446,7 +446,7 @@ async fn rebuilding_a_parent_table_does_not_disturb_its_children() {
     .unwrap();
 
     let result = db
-        .push([author_v2::authors.def(), books::books.def()])
+        .push_destructive([author_v2::authors.def(), books::books.def()])
         .await
         .unwrap();
     assert_eq!(result.changes.len(), 1);
@@ -513,7 +513,9 @@ async fn a_compatible_view_survives_a_rebuild() {
 
     let mut desired = db.introspect().await.unwrap();
     desired.table_mut("sqlx_rebuild_parent").unwrap().columns[1].nullable = true;
-    db.push_schema(&desired).await.unwrap();
+    // Relaxing NOT NULL is destructive under the updated safety classifier; opt in so
+    // the rebuild can prove the compatible view survives.
+    db.push_schema_destructive(&desired).await.unwrap();
 
     let table_rows: Vec<String> = db
         .execute(sql!("SELECT name FROM sqlx_rebuild_parent"))
@@ -661,7 +663,7 @@ async fn cancelling_a_rebuild_cannot_return_a_connection_with_foreign_keys_off()
             });
     }
 
-    let task = tokio::spawn(async move { db.push_schema(&desired).await });
+    let task = tokio::spawn(async move { db.push_schema_destructive(&desired).await });
     tokio::time::timeout(std::time::Duration::from_secs(5), started)
         .await
         .unwrap()
@@ -726,7 +728,7 @@ async fn a_rebuild_keeps_its_foreign_key_toggle_on_one_connection() {
         .unwrap();
 
     // Change a column on the parent, which forces a rebuild of the table the child points at.
-    db.push([children_v1::children.def(), parents_v2::parents.def()])
+    db.push_destructive([children_v1::children.def(), parents_v2::parents.def()])
         .await
         .unwrap();
 
