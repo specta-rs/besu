@@ -10,7 +10,7 @@ mod common;
 use besu::TypeDef;
 use besu::prelude::*;
 use besu::schema::{
-    Change, Check, Column, Enum, Generated, Index, IndexColumn, IndexKind, Safety, Schema,
+    Change, Check, Column, Ddl, Enum, Generated, Index, IndexColumn, IndexKind, Safety, Schema,
     Sequence, Table as TableIr, Unique, View,
 };
 use besu_postgres::Sqlx;
@@ -1190,7 +1190,9 @@ async fn type_modifiers_are_kept() {
              tod TIME(2) NOT NULL, \
              flags BIT(5) NOT NULL, \
              code VARCHAR(10) NOT NULL, \
-             amount NUMERIC(10,2) NOT NULL)"
+             amount NUMERIC(10,2) NOT NULL, \
+             large_amount NUMERIC(1000,2) NOT NULL, \
+             scaled_amount NUMERIC(10,300) NOT NULL)"
             .to_owned(),
     ))
     .await
@@ -1203,10 +1205,81 @@ async fn type_modifiers_are_kept() {
     assert_eq!(table.column("flags").unwrap().ty, TypeDef::Bit(5));
     assert_eq!(table.column("code").unwrap().ty, TypeDef::VarChar(10));
     assert_eq!(table.column("amount").unwrap().ty, TypeDef::Decimal(10, 2));
+    assert_eq!(
+        table.column("large_amount").unwrap().ty,
+        TypeDef::Decimal(1000, 2)
+    );
+    assert_eq!(
+        table.column("scaled_amount").unwrap().ty,
+        TypeDef::Decimal(10, 300)
+    );
 
     // A push that dropped a modifier would change the column's precision silently.
     let pushed = db.push_schema(&introspected).await.unwrap();
     assert!(pushed.is_empty(), "got {:?}", pushed.changes);
+}
+
+#[tokio::test]
+async fn dropping_not_null_requires_destructive_opt_in() {
+    let db = common::database().await;
+    common::reset(&db).await;
+    db.execute(besu::Fragment::new(
+        "CREATE TABLE required_values (
+            id BIGINT PRIMARY KEY,
+            required_value BIGINT NOT NULL
+        )"
+        .to_owned(),
+    ))
+    .await
+    .unwrap();
+    db.execute(sql!("INSERT INTO required_values VALUES (1, 42)"))
+        .await
+        .unwrap();
+
+    let current = db.introspect().await.unwrap();
+    let mut desired = current.clone();
+    desired
+        .table_mut("required_values")
+        .unwrap()
+        .columns
+        .iter_mut()
+        .find(|column| column.name == "required_value")
+        .unwrap()
+        .nullable = true;
+    let changes = besu::schema::diff_with(&current, &desired, &|ty| {
+        besu_postgres::PostgresDdl.normalise_type(ty)
+    });
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].safety(), Safety::Destructive);
+
+    let refused = db.push_schema(&desired).await.unwrap_err().to_string();
+    assert!(refused.contains("lose data"), "got {refused}");
+    assert!(
+        refused.contains("required_values.required_value"),
+        "got {refused}"
+    );
+    assert!(
+        !db.introspect()
+            .await
+            .unwrap()
+            .table("required_values")
+            .unwrap()
+            .column("required_value")
+            .unwrap()
+            .nullable
+    );
+
+    let applied = db.push_schema_destructive(&desired).await.unwrap();
+    assert_eq!(
+        applied.statements,
+        ["ALTER TABLE \"required_values\" ALTER COLUMN \"required_value\" DROP NOT NULL"]
+    );
+    let values: Vec<i64> = db
+        .execute(sql!("SELECT required_value FROM required_values"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(values, [42]);
 }
 
 /// A column collation is part of the column, so a pull has to keep it.

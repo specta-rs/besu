@@ -757,6 +757,28 @@ fn decimal_parts(modifier: &str) -> Option<(u16, u16)> {
     Some((precision, scale))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_modifiers_keep_postgresqls_full_width() {
+        assert_eq!(
+            parse_type_name("numeric(1000,2)"),
+            TypeDef::Decimal(1000, 2)
+        );
+        assert_eq!(
+            parse_type_name("numeric(10,300)"),
+            TypeDef::Decimal(10, 300)
+        );
+        assert_eq!(parse_type_name("numeric(10,2)"), TypeDef::Decimal(10, 2));
+        assert_eq!(
+            parse_type_name("numeric"),
+            TypeDef::Custom("numeric".into())
+        );
+    }
+}
+
 /// Read the expression of every generated column.
 ///
 /// This is a query of its own because the column row already has twelve fields and the

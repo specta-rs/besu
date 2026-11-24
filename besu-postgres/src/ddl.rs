@@ -1,5 +1,9 @@
+use std::collections::BTreeSet;
+
 use besu_core::{Dialect, TypeDef};
-use besu_schema::{Column, Ddl, Domain, Enum, ForeignKey, Index, Sequence, View, view_body};
+use besu_schema::{
+    Change, Column, Ddl, Domain, Enum, ForeignKey, Index, Schema, Sequence, View, view_body,
+};
 
 use crate::Postgres;
 
@@ -147,9 +151,9 @@ impl Ddl for PostgresDdl {
 
     /// PostgreSQL can change a column in place, so only the parts that differ are emitted.
     ///
-    /// Primary key changes still need an explicit migration. Single-column `UNIQUE` is
-    /// changed as a table constraint. A generated column's expression cannot be altered
-    /// portably, so the column is dropped and added.
+    /// Primary keys are changed as table constraints. Single-column `UNIQUE` is changed the
+    /// same way. A generated column's expression cannot be altered portably, so the column
+    /// is dropped and added.
     fn alter_column(&self, table: &str, from: &Column, to: &Column) -> Vec<String> {
         if from.generated != to.generated {
             return vec![
@@ -213,6 +217,83 @@ impl Ddl for PostgresDdl {
             }
         }
 
+        if from.primary_key != to.primary_key {
+            if to.primary_key {
+                statements.push(format!("ALTER TABLE {table} ADD PRIMARY KEY ({column})"));
+            } else {
+                statements.push(drop_primary_key(&table));
+            }
+        }
+
+        statements
+    }
+
+    fn apply_with(&self, changes: &[Change], current: &Schema, desired: &Schema) -> Vec<String> {
+        // A composite key is represented by a flag on each column. Replace the complete key
+        // once per table rather than adding/dropping one column at a time, which would fail
+        // while the old key still exists (or leave the table with several partial keys).
+        let mut keyed_tables = BTreeSet::new();
+        for change in changes {
+            let Change::AlterColumn { table, .. } = change else {
+                continue;
+            };
+            let (Some(current), Some(desired)) = (current.get(table), desired.get(table)) else {
+                continue;
+            };
+            let current_key: Vec<&str> = current
+                .primary_key()
+                .into_iter()
+                .map(|column| column.name.as_str())
+                .collect();
+            let desired_key: Vec<&str> = desired
+                .primary_key()
+                .into_iter()
+                .map(|column| column.name.as_str())
+                .collect();
+            if current_key != desired_key {
+                keyed_tables.insert(table.clone());
+            }
+        }
+
+        let mut replaced_keys = BTreeSet::new();
+        let mut statements = Vec::new();
+        for change in changes {
+            let Change::AlterColumn { table, .. } = change else {
+                statements.extend(self.change(change));
+                continue;
+            };
+            if keyed_tables.contains(table) && replaced_keys.insert(table.clone()) {
+                let current = current.get(table).expect("the differing table exists");
+                let desired = desired.get(table).expect("the differing table exists");
+                if current.has_primary_key() {
+                    statements.push(drop_primary_key(&self.quote_table(table)));
+                }
+                let key = desired.primary_key();
+                if !key.is_empty() {
+                    let columns = key
+                        .iter()
+                        .map(|column| self.quote(&column.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    statements.push(format!(
+                        "ALTER TABLE {} ADD PRIMARY KEY ({columns})",
+                        self.quote_table(table)
+                    ));
+                }
+            }
+
+            if keyed_tables.contains(table) {
+                // The complete key was handled above; render only the column's other edits.
+                let mut change = change.clone();
+                if let Change::AlterColumn { from, to, .. } = &mut change {
+                    from.primary_key = false;
+                    to.primary_key = false;
+                }
+                statements.extend(self.change(&change));
+            } else {
+                statements.extend(self.change(change));
+            }
+        }
         statements
     }
 
@@ -325,6 +406,7 @@ impl Ddl for PostgresDdl {
             .collect::<Vec<_>>()
             .join(", ");
         let old_type = self.quote_table(&from.name);
+        let old_type_literal = escape_string_literal(&old_type);
         let (_, name) = from
             .name
             .rsplit_once('.')
@@ -341,7 +423,7 @@ impl Ddl for PostgresDdl {
         vec![format!(
             "DO $besu$\n\
              DECLARE\n\
-               old_type regtype := {old_type};\n\
+               old_type regtype := {old_type_literal}::pg_catalog.regtype;\n\
                old_schema text;\n\
                old_name text;\n\
                temporary_name constant text := {temporary_name};\n\
@@ -547,6 +629,31 @@ fn drop_column_unique(table: &str, column: &str) -> String {
     format!("DO {}", escape_string_literal(&body))
 }
 
+fn drop_primary_key(table: &str) -> String {
+    // The column flags do not carry the constraint's name, and callers may have chosen a
+    // custom one. Find the table's single local primary key under the same lock used to drop
+    // it rather than guessing PostgreSQL's usual `<table>_pkey` spelling.
+    let relation = escape_string_literal(table);
+    let body = format!(
+        "DECLARE
+            constraint_name text;
+         BEGIN
+            LOCK TABLE ONLY {table} IN ACCESS EXCLUSIVE MODE;
+            SELECT pg_catalog.min(c.conname::text) INTO constraint_name
+            FROM pg_catalog.pg_constraint c
+            WHERE c.conrelid = {relation}::pg_catalog.regclass
+              AND c.contype = 'p'
+            HAVING count(*) = 1 AND pg_catalog.bool_and(c.conparentid = 0 AND c.coninhcount = 0);
+            IF constraint_name IS NULL THEN
+                RAISE SQLSTATE '0A000' USING MESSAGE =
+                    'cannot identify a single local PRIMARY KEY constraint for the table; use an explicit migration';
+            END IF;
+            EXECUTE pg_catalog.format('ALTER TABLE ONLY %s DROP CONSTRAINT %I', {relation}, constraint_name);
+         END;"
+    );
+    format!("DO {}", escape_string_literal(&body))
+}
+
 fn escape_string_literal(text: &str) -> String {
     format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
@@ -583,6 +690,111 @@ mod tests {
         assert_eq!(
             Postgres::type_name(TypeDef::Enum(besu_core::EnumDef::new("", &["happy"]))),
             "TEXT"
+        );
+    }
+
+    #[test]
+    fn reordering_an_enum_renders_a_type_replacement() {
+        let from = Enum {
+            name: "mood".into(),
+            values: vec!["happy".into(), "sad".into()],
+        };
+        let to = Enum {
+            name: "mood".into(),
+            values: vec!["sad".into(), "happy".into()],
+        };
+        let statements = PostgresDdl.reorder_enum(&from, &to);
+        assert_eq!(statements.len(), 1);
+        let statement = &statements[0];
+        assert!(statement.starts_with("DO $besu$"), "{statement}");
+        assert!(
+            statement.contains("CREATE TYPE %I.%I AS ENUM (%s)"),
+            "{statement}"
+        );
+        assert!(statement.contains("E'''sad'', ''happy'''"), "{statement}");
+        assert!(statement.contains("DROP TYPE %s"), "{statement}");
+        assert!(statement.contains("RENAME TO %I"), "{statement}");
+    }
+
+    #[test]
+    fn a_primary_key_only_change_renders_ddl() {
+        fn column(name: &str, primary_key: bool) -> Column {
+            Column {
+                name: name.into(),
+                ty: TypeDef::Int8,
+                nullable: false,
+                auto_increment: false,
+                primary_key,
+                unique: false,
+                default: None,
+                generated: None,
+                comment: None,
+                renamed_from: None,
+            }
+        }
+        fn table(columns: Vec<Column>) -> besu_schema::Table {
+            besu_schema::Table {
+                name: "things".into(),
+                schema: None,
+                columns,
+                indexes: Vec::new(),
+                uniques: Vec::new(),
+                foreign_keys: Vec::new(),
+                checks: Vec::new(),
+                comment: None,
+            }
+        }
+
+        let plain = column("id", false);
+        let keyed = column("id", true);
+        assert_eq!(
+            PostgresDdl.change(&Change::AlterColumn {
+                table: "things".into(),
+                from: plain.clone(),
+                to: keyed.clone(),
+            }),
+            ["ALTER TABLE \"things\" ADD PRIMARY KEY (\"id\")"]
+        );
+        let dropped = PostgresDdl.change(&Change::AlterColumn {
+            table: "things".into(),
+            from: keyed,
+            to: plain,
+        });
+        assert_eq!(dropped.len(), 1);
+        assert!(dropped[0].contains("PRIMARY KEY constraint"), "{dropped:?}");
+
+        // Replacing a composite key is one drop and one add, not an add per newly keyed
+        // column while the old constraint still exists.
+        let current = Schema {
+            tables: vec![table(vec![
+                column("a", true),
+                column("b", true),
+                column("c", false),
+            ])],
+            ..Schema::default()
+        };
+        let desired = Schema {
+            tables: vec![table(vec![
+                column("a", true),
+                column("b", false),
+                column("c", true),
+            ])],
+            ..Schema::default()
+        };
+        let statements = PostgresDdl.apply_with(
+            &[Change::AlterColumn {
+                table: "things".into(),
+                from: column("c", false),
+                to: column("c", true),
+            }],
+            &current,
+            &desired,
+        );
+        assert_eq!(statements.len(), 2, "{statements:?}");
+        assert!(statements[0].contains("DROP CONSTRAINT"));
+        assert_eq!(
+            statements[1],
+            "ALTER TABLE \"things\" ADD PRIMARY KEY (\"a\", \"c\")"
         );
     }
 

@@ -120,3 +120,73 @@ async fn dropping_column_unique_refuses_ambiguous_constraints() {
     .unwrap();
     assert_eq!(constraints, 2);
 }
+
+#[tokio::test]
+async fn adding_a_primary_key_creates_the_constraint() {
+    let mut db = PgConnection::connect(common::URL).await.unwrap();
+    sqlx::query("CREATE TEMP TABLE besu_audit_add_primary_key (email TEXT NOT NULL)")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    let mut keyed = column("email", false);
+    keyed.primary_key = true;
+
+    for statement in PostgresDdl.alter_column(
+        "pg_temp.besu_audit_add_primary_key",
+        &column("email", false),
+        &keyed,
+    ) {
+        sqlx::query(&statement).execute(&mut db).await.unwrap();
+    }
+
+    let constraints: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint
+         WHERE conrelid = 'pg_temp.besu_audit_add_primary_key'::regclass AND contype = 'p'",
+    )
+    .fetch_one(&mut db)
+    .await
+    .unwrap();
+    assert_eq!(constraints, 1);
+    assert!(
+        sqlx::query("INSERT INTO besu_audit_add_primary_key VALUES ('alice'), ('alice')")
+            .execute(&mut db)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn dropping_a_primary_key_uses_the_catalog_constraint_name() {
+    let mut db = PgConnection::connect(common::URL).await.unwrap();
+    sqlx::query(
+        r#"CREATE TEMP TABLE besu_audit_drop_primary_key (
+            email TEXT NOT NULL CONSTRAINT "email's primary key" PRIMARY KEY
+        )"#,
+    )
+    .execute(&mut db)
+    .await
+    .unwrap();
+    let mut keyed = column("email", false);
+    keyed.primary_key = true;
+
+    for statement in PostgresDdl.alter_column(
+        "pg_temp.besu_audit_drop_primary_key",
+        &keyed,
+        &column("email", false),
+    ) {
+        sqlx::query(&statement).execute(&mut db).await.unwrap();
+    }
+
+    let constraints: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint
+         WHERE conrelid = 'pg_temp.besu_audit_drop_primary_key'::regclass AND contype = 'p'",
+    )
+    .fetch_one(&mut db)
+    .await
+    .unwrap();
+    assert_eq!(constraints, 0);
+    sqlx::query("INSERT INTO besu_audit_drop_primary_key VALUES ('alice'), ('alice')")
+        .execute(&mut db)
+        .await
+        .unwrap();
+}
