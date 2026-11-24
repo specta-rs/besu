@@ -510,3 +510,73 @@ async fn the_page_is_html() {
     assert!(page.contains("/assets/index-"));
     assert!(page.contains(r#"<div id="root">"#));
 }
+
+#[tokio::test]
+async fn info_request_logs_do_not_contain_filter_values() {
+    use std::sync::{Arc, Mutex};
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = LogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.0.clone())
+        }
+    }
+
+    let fixture = fixture().await;
+    let secret = "AUDIT_FILTER_SECRET_7f3a";
+    let inserted = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": format!("INSERT INTO users (id, name, active) VALUES (4, '{secret}', 1)")}),
+    )
+    .await;
+    assert_eq!(inserted.status(), StatusCode::OK);
+
+    let filter = encode(r#"[{"column":"name","op":"eq","value":"AUDIT_FILTER_SECRET_7f3a"}]"#);
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .with_writer(Logs(logs.clone()))
+        .without_time()
+        .finish();
+
+    use tracing::instrument::WithSubscriber;
+
+    let response = async {
+        get(
+            &fixture.app,
+            &format!("/api/tables/users/rows?limit=50&offset=0&filter={filter}"),
+        )
+        .await
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = body_json(response).await;
+    assert_eq!(page["rows"], json!([[4, secret, true]]));
+
+    let output =
+        String::from_utf8(logs.lock().expect("the log lock").clone()).expect("UTF-8 log output");
+    assert!(output.contains("filter=%5Bredacted%5D"), "{output}");
+    assert!(!output.contains(secret), "{output}");
+}
