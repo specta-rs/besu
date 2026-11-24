@@ -398,7 +398,10 @@ impl Migrator {
             let Some(newest) = applied.into_iter().next_back() else {
                 break;
             };
-            if newest.version <= to {
+            // Zero is the CLI's revert-everything sentinel, not an ordinary version bound.
+            // Versions are signed, so an inclusive comparison would leave zero and negative
+            // journal rows applied forever.
+            if to != 0 && newest.version <= to {
                 break;
             }
             reverted.push(self.revert(exec, newest).await?);

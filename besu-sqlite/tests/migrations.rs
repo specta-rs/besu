@@ -341,6 +341,69 @@ async fn refuses_to_revert_a_migration_without_a_down_file() {
 }
 
 #[tokio::test]
+async fn reverts_zero_and_negative_versions_with_to_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    write_version_pair(dir.path(), -7, "legacy", "sentinel_negative");
+    write_version_pair(dir.path(), 0, "init", "sentinel_zero");
+    write_version_pair(dir.path(), 2, "positive", "sentinel_positive");
+
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let migrator = Migrator::from_dir(dir.path()).unwrap();
+    db.migrate(&migrator).await.unwrap();
+    assert_eq!(journal_versions(&db).await, [-7, 0, 2]);
+
+    let reverted = db.migrate_down(&migrator, 0).await.unwrap();
+    assert_eq!(
+        reverted.iter().map(|m| m.version).collect::<Vec<_>>(),
+        [2, 0, -7]
+    );
+    assert!(journal_versions(&db).await.is_empty());
+    let schema = db.introspect().await.unwrap();
+    assert!(schema.table("sentinel_negative").is_none());
+    assert!(schema.table("sentinel_zero").is_none());
+    assert!(schema.table("sentinel_positive").is_none());
+}
+
+#[tokio::test]
+async fn an_ordinary_down_target_keeps_zero_and_negative_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    write_version_pair(dir.path(), -7, "legacy", "sentinel_negative");
+    write_version_pair(dir.path(), 0, "init", "sentinel_zero");
+    write_version_pair(dir.path(), 2, "positive", "sentinel_positive");
+
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let migrator = Migrator::from_dir(dir.path()).unwrap();
+    db.migrate(&migrator).await.unwrap();
+
+    let reverted = db.migrate_down(&migrator, 1).await.unwrap();
+    assert_eq!(reverted.len(), 1);
+    assert_eq!(reverted[0].version, 2);
+    assert_eq!(journal_versions(&db).await, [-7, 0]);
+    let schema = db.introspect().await.unwrap();
+    assert!(schema.table("sentinel_negative").is_some());
+    assert!(schema.table("sentinel_zero").is_some());
+    assert!(schema.table("sentinel_positive").is_none());
+}
+
+fn write_version_pair(dir: &std::path::Path, version: i64, name: &str, table: &str) {
+    let prefix = if version < 0 {
+        format!("-{:04}", version.unsigned_abs())
+    } else {
+        format!("{version:04}")
+    };
+    std::fs::write(
+        dir.join(format!("{prefix}_{name}.sql")),
+        format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY);"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(format!("{prefix}_{name}.down.sql")),
+        format!("DROP TABLE {table};"),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
 async fn refuses_to_revert_when_the_down_file_changed() {
     let dir = tempfile::tempdir().unwrap();
     write_users_migrations(dir.path(), true);
