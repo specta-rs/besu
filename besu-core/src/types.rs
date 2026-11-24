@@ -71,9 +71,9 @@ pub enum TypeDef {
     TimestampTzP(u8),
     /// A fixed-precision decimal, `DECIMAL(precision, scale)`.
     ///
-    /// PostgreSQL accepts precision and scale up to 1000, so both modifiers are wider than
-    /// the temporal precisions above.
-    Decimal(u16, u16),
+    /// PostgreSQL accepts precision up to 1000 and scales from -1000 to 1000, so both
+    /// modifiers are wider than the temporal precisions above and scale is signed.
+    Decimal(u16, i16),
     /// A fixed-length bit string, as in PostgreSQL's `BIT(n)`.
     ///
     /// MySQL's `BIT(n)` and PostgreSQL's type share the same canonical form; SQLite stores

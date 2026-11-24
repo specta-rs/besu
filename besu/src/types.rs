@@ -341,9 +341,9 @@ impl<const N: u32> SqlType for VarChar<N> {
 /// SQL `DECIMAL(precision, scale)`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[allow(non_camel_case_types)]
-pub struct Decimal<const PRECISION: u16, const SCALE: u16>;
+pub struct Decimal<const PRECISION: u16, const SCALE: i16>;
 
-impl<const PRECISION: u16, const SCALE: u16> SqlType for Decimal<PRECISION, SCALE> {
+impl<const PRECISION: u16, const SCALE: i16> SqlType for Decimal<PRECISION, SCALE> {
     const DEF: TypeDef = TypeDef::Decimal(PRECISION, SCALE);
     type Rust = String;
 }
@@ -475,7 +475,7 @@ impl<const N: u32> SqlType for Array<VarChar<N>> {
     type Rust = alloc::vec::Vec<String>;
 }
 
-impl<const PRECISION: u16, const SCALE: u16> SqlType for Array<Decimal<PRECISION, SCALE>> {
+impl<const PRECISION: u16, const SCALE: i16> SqlType for Array<Decimal<PRECISION, SCALE>> {
     const DEF: TypeDef = TypeDef::Array(TypeRef::from_static(&TypeDef::Decimal(PRECISION, SCALE)));
     type Rust = alloc::vec::Vec<String>;
 }
@@ -633,7 +633,7 @@ impl SqlType for Range<Date> {
     type Rust = Range<chrono::NaiveDate>;
 }
 
-impl<const PRECISION: u16, const SCALE: u16> SqlType for Range<Decimal<PRECISION, SCALE>> {
+impl<const PRECISION: u16, const SCALE: i16> SqlType for Range<Decimal<PRECISION, SCALE>> {
     const DEF: TypeDef = TypeDef::Range(TypeRef::from_static(&TypeDef::Decimal(PRECISION, SCALE)));
     type Rust = Range<String>;
 }

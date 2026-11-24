@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use besu_core::{Dialect, TypeDef};
 use besu_schema::{
@@ -230,15 +230,15 @@ impl Ddl for PostgresDdl {
     }
 
     fn apply_with(&self, changes: &[Change], current: &Schema, desired: &Schema) -> Vec<String> {
-        // A composite key is represented by a flag on each column. Replace the complete key
-        // once per table rather than adding/dropping one column at a time, which would fail
-        // while the old key still exists (or leave the table with several partial keys).
+        // Primary-key membership can change through AlterColumn, AddColumn or DropColumn.
+        // Compare the complete table definitions for every table change and rebuild each
+        // differing key once.
         let mut keyed_tables = BTreeSet::new();
         for change in changes {
-            let Change::AlterColumn { table, .. } = change else {
+            let Some(table) = change.table() else {
                 continue;
             };
-            let (Some(current), Some(desired)) = (current.get(table), desired.get(table)) else {
+            let (Some(current), Some(desired)) = (current.get(&table), desired.get(&table)) else {
                 continue;
             };
             let current_key: Vec<&str> = current
@@ -252,37 +252,117 @@ impl Ddl for PostgresDdl {
                 .map(|column| column.name.as_str())
                 .collect();
             if current_key != desired_key {
-                keyed_tables.insert(table.clone());
+                keyed_tables.insert(table);
             }
         }
 
-        let mut replaced_keys = BTreeSet::new();
+        let mut pending_keys = BTreeMap::new();
+        for table in &keyed_tables {
+            let (Some(current), Some(desired)) = (current.get(table), desired.get(table)) else {
+                continue;
+            };
+            let mut statements = Vec::new();
+            if current.has_primary_key() {
+                statements.push(drop_primary_key(&self.quote_table(table)));
+            }
+            let key = desired.primary_key();
+            if !key.is_empty() {
+                let columns = key
+                    .iter()
+                    .map(|column| self.quote(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                statements.push(format!(
+                    "ALTER TABLE {} ADD PRIMARY KEY ({columns})",
+                    self.quote_table(table)
+                ));
+            }
+            pending_keys.insert(table.clone(), statements);
+        }
+
+        // A referenced key cannot be dropped until its foreign keys are gone. Count the
+        // drops per table and flush the rebuilt key immediately after the last one.
+        let mut remaining_foreign_key_drops: BTreeMap<String, usize> = BTreeMap::new();
+        for change in changes {
+            if let Change::DropForeignKey { foreign_key, .. } = change {
+                *remaining_foreign_key_drops
+                    .entry(foreign_key.references_table.clone())
+                    .or_default() += 1;
+            }
+        }
+
+        fn flush_key(
+            table: &str,
+            statements: &mut Vec<String>,
+            pending: &mut BTreeMap<String, Vec<String>>,
+            flushed: &mut BTreeSet<String>,
+        ) {
+            if flushed.insert(table.to_owned())
+                && let Some(key) = pending.remove(table)
+            {
+                statements.extend(key);
+            }
+        }
+
+        let mut flushed_keys = BTreeSet::new();
         let mut statements = Vec::new();
         for change in changes {
+            if let Change::DropForeignKey { foreign_key, .. } = change {
+                statements.extend(self.change(change));
+                let referenced = &foreign_key.references_table;
+                if pending_keys.contains_key(referenced) {
+                    let remaining = remaining_foreign_key_drops
+                        .get_mut(referenced)
+                        .expect("foreign-key drops were counted");
+                    *remaining -= 1;
+                    if *remaining == 0 {
+                        flush_key(
+                            referenced,
+                            &mut statements,
+                            &mut pending_keys,
+                            &mut flushed_keys,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // New foreign keys need the desired key on their referenced table.
+            if let Change::AddForeignKey { foreign_key, .. } = change {
+                flush_key(
+                    &foreign_key.references_table,
+                    &mut statements,
+                    &mut pending_keys,
+                    &mut flushed_keys,
+                );
+            }
+            // Dropping an old key column needs the old constraint gone first.
+            if matches!(change, Change::DropColumn { .. } | Change::DropTable { .. })
+                && let Some(table) = change.table()
+            {
+                flush_key(
+                    &table,
+                    &mut statements,
+                    &mut pending_keys,
+                    &mut flushed_keys,
+                );
+            }
+
+            // Preserve the base implementation's kind-aware replacement: PostgreSQL cannot
+            // turn a plain view into a materialised one (or the reverse) in place.
+            if let Change::ReplaceView(view) = change
+                && let Some(existing) = current.view(&view.name)
+                && existing.materialised != view.materialised
+            {
+                statements.extend(self.drop_view(&existing.name, existing.materialised));
+                statements.extend(self.create_view(view));
+                continue;
+            }
+
             let Change::AlterColumn { table, .. } = change else {
                 statements.extend(self.change(change));
                 continue;
             };
-            if keyed_tables.contains(table) && replaced_keys.insert(table.clone()) {
-                let current = current.get(table).expect("the differing table exists");
-                let desired = desired.get(table).expect("the differing table exists");
-                if current.has_primary_key() {
-                    statements.push(drop_primary_key(&self.quote_table(table)));
-                }
-                let key = desired.primary_key();
-                if !key.is_empty() {
-                    let columns = key
-                        .iter()
-                        .map(|column| self.quote(&column.name))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    statements.push(format!(
-                        "ALTER TABLE {} ADD PRIMARY KEY ({columns})",
-                        self.quote_table(table)
-                    ));
-                }
-            }
-
             if keyed_tables.contains(table) {
                 // The complete key was handled above; render only the column's other edits.
                 let mut change = change.clone();
@@ -294,6 +374,9 @@ impl Ddl for PostgresDdl {
             } else {
                 statements.extend(self.change(change));
             }
+        }
+        for table in &keyed_tables {
+            flush_key(table, &mut statements, &mut pending_keys, &mut flushed_keys);
         }
         statements
     }
@@ -678,7 +761,7 @@ fn is_function_call(expression: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use besu_schema::{IndexColumn, IndexKind};
+    use besu_schema::{IndexColumn, IndexKind, View, diff_with};
 
     #[test]
     fn a_named_enum_renders_its_name_and_an_unnamed_one_is_text() {
@@ -796,6 +879,216 @@ mod tests {
         assert_eq!(
             statements[1],
             "ALTER TABLE \"things\" ADD PRIMARY KEY (\"a\", \"c\")"
+        );
+    }
+
+    #[test]
+    fn primary_key_rebuilds_cover_column_membership_and_foreign_keys() {
+        let column = |name: &str, primary_key| Column {
+            name: name.into(),
+            ty: TypeDef::Int8,
+            nullable: false,
+            auto_increment: false,
+            primary_key,
+            unique: false,
+            default: None,
+            generated: None,
+            comment: None,
+            renamed_from: None,
+        };
+        let table = |name: &str, columns: Vec<Column>| besu_schema::Table {
+            name: name.into(),
+            schema: None,
+            columns,
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            comment: None,
+        };
+        let apply = |current: Schema, desired: Schema| {
+            let changes = diff_with(&current, &desired, &|ty| ty.clone());
+            PostgresDdl.apply_with(&changes, &current, &desired)
+        };
+
+        // Adding a composite member is only an AddColumn, but the complete desired key must
+        // still be built.
+        let current = Schema {
+            tables: vec![table("things", vec![column("a", true)])],
+            ..Schema::default()
+        };
+        let desired = Schema {
+            tables: vec![table("things", vec![column("a", true), column("b", true)])],
+            ..Schema::default()
+        };
+        let statements = apply(current, desired);
+        assert_eq!(statements.len(), 3, "{statements:?}");
+        assert_eq!(
+            statements[0],
+            r#"ALTER TABLE "things" ADD COLUMN "b" BIGINT"#
+        );
+        assert!(statements[1].contains("PRIMARY KEY constraint"));
+        assert_eq!(
+            statements[2],
+            r#"ALTER TABLE "things" ADD PRIMARY KEY ("a", "b")"#
+        );
+
+        // Dropping a composite member must drop the old complete key before the column.
+        let current = Schema {
+            tables: vec![table("things", vec![column("a", true), column("b", true)])],
+            ..Schema::default()
+        };
+        let desired = Schema {
+            tables: vec![table("things", vec![column("a", true)])],
+            ..Schema::default()
+        };
+        let statements = apply(current, desired);
+        assert_eq!(statements.len(), 3, "{statements:?}");
+        assert!(statements[0].contains("PRIMARY KEY constraint"));
+        assert_eq!(
+            statements[1],
+            r#"ALTER TABLE "things" ADD PRIMARY KEY ("a")"#
+        );
+        assert_eq!(statements[2], r#"ALTER TABLE "things" DROP COLUMN "b""#);
+
+        // Replacing the sole key column is an add plus a drop. The new column must exist
+        // before the new key is added, and the old constraint must go before its column.
+        let current = Schema {
+            tables: vec![table("things", vec![column("old", true)])],
+            ..Schema::default()
+        };
+        let desired = Schema {
+            tables: vec![table("things", vec![column("new", true)])],
+            ..Schema::default()
+        };
+        let statements = apply(current, desired);
+        assert_eq!(statements.len(), 4, "{statements:?}");
+        assert_eq!(
+            statements[0],
+            r#"ALTER TABLE "things" ADD COLUMN "new" BIGINT"#
+        );
+        assert!(statements[1].contains("PRIMARY KEY constraint"));
+        assert_eq!(
+            statements[2],
+            r#"ALTER TABLE "things" ADD PRIMARY KEY ("new")"#
+        );
+        assert_eq!(statements[3], r#"ALTER TABLE "things" DROP COLUMN "old""#);
+
+        // A referenced key is rebuilt after dependent foreign keys are dropped and before
+        // they are added again.
+        let foreign_key = besu_schema::ForeignKey {
+            name: "child_parent_fk".into(),
+            columns: vec!["parent_id".into()],
+            references_table: "parents".into(),
+            references_columns: vec!["id".into()],
+            on_delete: besu_schema::ReferenceAction::Default,
+            on_update: besu_schema::ReferenceAction::Default,
+        };
+        let mut current_child = table("children", vec![column("parent_id", false)]);
+        current_child.foreign_keys.push(foreign_key.clone());
+        let current = Schema {
+            tables: vec![
+                table("parents", vec![column("id", true), column("code", false)]),
+                current_child,
+            ],
+            ..Schema::default()
+        };
+        let mut desired_child = table("children", vec![column("parent_id", false)]);
+        let mut retargeted = foreign_key;
+        retargeted.references_columns = vec!["code".into()];
+        desired_child.foreign_keys.push(retargeted);
+        let desired = Schema {
+            tables: vec![
+                table("parents", vec![column("id", false), column("code", true)]),
+                desired_child,
+            ],
+            ..Schema::default()
+        };
+        let statements = apply(current, desired);
+        let drop_fk = statements
+            .iter()
+            .position(|statement| {
+                statement == r#"ALTER TABLE "children" DROP CONSTRAINT "child_parent_fk""#
+            })
+            .expect("foreign key drop is planned");
+        let drop_pk = statements
+            .iter()
+            .position(|statement| statement.contains("PRIMARY KEY constraint"))
+            .expect("primary key drop is planned");
+        let add_pk = statements
+            .iter()
+            .position(|statement| statement == r#"ALTER TABLE "parents" ADD PRIMARY KEY ("code")"#)
+            .expect("new primary key is planned");
+        let add_fk = statements
+            .iter()
+            .position(|statement| statement == r#"ALTER TABLE "children" ADD CONSTRAINT "child_parent_fk" FOREIGN KEY ("parent_id") REFERENCES "parents" ("code")"#)
+            .expect("retargeted foreign key is planned");
+        assert!(
+            drop_fk < drop_pk && drop_pk < add_pk && add_pk < add_fk,
+            "{statements:?}"
+        );
+
+        // A newly added foreign key also needs the referenced table's new key first, even
+        // when there was no old foreign key to drop.
+        let current = Schema {
+            tables: vec![
+                table("parents", vec![column("id", false), column("code", false)]),
+                table("children", vec![column("parent_id", false)]),
+            ],
+            ..Schema::default()
+        };
+        let mut desired_child = table("children", vec![column("parent_id", false)]);
+        desired_child.foreign_keys.push(besu_schema::ForeignKey {
+            name: "child_parent_fk".into(),
+            columns: vec!["parent_id".into()],
+            references_table: "parents".into(),
+            references_columns: vec!["code".into()],
+            on_delete: besu_schema::ReferenceAction::Default,
+            on_update: besu_schema::ReferenceAction::Default,
+        });
+        let desired = Schema {
+            tables: vec![
+                table("parents", vec![column("id", false), column("code", true)]),
+                desired_child,
+            ],
+            ..Schema::default()
+        };
+        let statements = apply(current, desired);
+        let add_pk = statements
+            .iter()
+            .position(|statement| statement == r#"ALTER TABLE "parents" ADD PRIMARY KEY ("code")"#)
+            .expect("new primary key is planned");
+        let add_fk = statements
+            .iter()
+            .position(|statement| statement.contains(r#"REFERENCES "parents" ("code")"#))
+            .expect("new foreign key is planned");
+        assert!(add_pk < add_fk, "{statements:?}");
+    }
+
+    #[test]
+    fn changing_view_kind_drops_the_kind_that_exists() {
+        let plain = Schema {
+            views: vec![View::new("user_ids", "SELECT id FROM users")],
+            ..Schema::default()
+        };
+        let mut materialised = plain.clone();
+        materialised.views[0].materialised = true;
+        let changes = diff_with(&plain, &materialised, &|ty| ty.clone());
+        assert_eq!(
+            PostgresDdl.apply_with(&changes, &plain, &materialised),
+            [
+                r#"DROP VIEW "user_ids""#,
+                r#"CREATE MATERIALIZED VIEW "user_ids" AS SELECT id FROM users"#,
+            ]
+        );
+
+        let changes = diff_with(&materialised, &plain, &|ty| ty.clone());
+        assert_eq!(
+            PostgresDdl.apply_with(&changes, &materialised, &plain),
+            [
+                r#"DROP MATERIALIZED VIEW "user_ids""#,
+                r#"CREATE VIEW "user_ids" AS SELECT id FROM users"#,
+            ]
         );
     }
 

@@ -2410,7 +2410,10 @@ mod tests {
         let mut schema = super::Schema::new();
         schema.tables.push(table.clone());
         assert_eq!(
-            schema.get(&table.qualified_name()).unwrap().name,
+            schema
+                .get(&table.qualified_name())
+                .expect("quoted dotted name resolves")
+                .name,
             "order.items"
         );
 
@@ -2418,10 +2421,20 @@ mod tests {
         table.name = "items".into();
         schema.tables.push(table.clone());
         assert_eq!(
-            schema.get("order.items").unwrap().schema.as_deref(),
+            schema
+                .get("order.items")
+                .expect("qualified table is present")
+                .schema
+                .as_deref(),
             Some("order")
         );
-        assert_eq!(schema.get(r#""order.items""#).unwrap().schema, None);
+        assert_eq!(
+            schema
+                .get(r#""order.items""#)
+                .expect("literal dotted table is present")
+                .schema,
+            None
+        );
     }
 
     use super::{
