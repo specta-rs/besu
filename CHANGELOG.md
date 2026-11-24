@@ -16,6 +16,7 @@
   across request serialization (#121).
 - `Vector::to_binary` is fallible and rejects dimensions above 32767. Both PostgreSQL
   encoders surface that error instead of silently truncating components (#122).
+- The table derive rejects duplicate SQL column names at compile time (#156).
 
 ### Internal
 

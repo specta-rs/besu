@@ -12,6 +12,20 @@ use besu_core::{TableDef, Value};
 ///
 /// The generated handle and insert types have the same visibility as the row model.
 ///
+/// Every non-skipped field must have a distinct SQL column name.
+///
+/// ```compile_fail
+/// use besu::prelude::*;
+/// #[derive(Table)]
+/// #[besu(table = "duplicate_columns")]
+/// struct DuplicateTable {
+///     #[besu(column = "id")]
+///     first_id: i64,
+///     #[besu(column = "id")]
+///     second_id: i64,
+/// }
+/// ```
+///
 /// ```compile_fail,E0603
 /// mod schema {
 ///     #[derive(besu::Table)]
