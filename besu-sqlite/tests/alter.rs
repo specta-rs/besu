@@ -932,7 +932,7 @@ async fn a_rebuild_preserves_strict_and_without_rowid() {
     desired.table_mut("sqlx_keyed_items").unwrap().without_rowid = false;
     desired.table_mut("sqlx_strict_items").unwrap().columns[1].nullable = true;
     desired.table_mut("sqlx_keyed_items").unwrap().columns[1].nullable = true;
-    db.push_schema(&desired).await.unwrap();
+    db.push_schema_destructive(&desired).await.unwrap();
 
     let strict_sql: String = db
         .execute(sql!(
@@ -1025,7 +1025,7 @@ async fn a_rebuild_preserves_index_collation_and_sort_order() {
     assert_eq!(expression.columns[0].collation.as_deref(), Some("NOCASE"));
     assert!(expression.columns[0].descending);
     desired.table_mut("sqlx_accounts").unwrap().columns[1].nullable = true;
-    let pushed = db.push_schema(&desired).await.unwrap();
+    let pushed = db.push_schema_destructive(&desired).await.unwrap();
     assert!(pushed.statements.iter().any(|statement| {
         statement.contains("sqlx_accounts_email_nocase_uq")
             && statement.contains(r#"COLLATE "NOCASE" DESC"#)
@@ -1092,8 +1092,13 @@ async fn a_rebuild_never_drops_an_unrelated_scratch_suffix_table() {
     assert!(desired.table("sqlx_scratch_accounts__besu_tmp").is_some());
     desired.table_mut("sqlx_scratch_accounts").unwrap().columns[1].nullable = true;
 
-    let pushed = db.push_schema(&desired).await.unwrap();
-    assert!(!pushed.is_destructive());
+    let pushed = db.push_schema_destructive(&desired).await.unwrap();
+    assert!(
+        pushed
+            .changes
+            .iter()
+            .all(|change| !matches!(change, besu::schema::Change::DropTable { .. }))
+    );
     let marker: Vec<String> = db
         .execute(sql!("SELECT marker FROM sqlx_scratch_accounts__besu_tmp"))
         .all()
