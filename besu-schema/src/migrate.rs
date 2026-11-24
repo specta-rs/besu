@@ -839,7 +839,8 @@ fn is_dollar_tag_start(ch: char) -> bool {
 }
 
 fn is_identifier_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric() || !ch.is_ascii()
+    // PostgreSQL also allows dollar signs inside unquoted identifiers.
+    ch == '$' || ch == '_' || ch.is_ascii_alphanumeric() || !ch.is_ascii()
 }
 
 fn is_dollar_tag_continue(ch: char) -> bool {
@@ -939,6 +940,8 @@ mod tests {
             ("SELECT _$b$; SELECT 2;", "SELECT _$b$"),
             ("SELECT é$b$; SELECT 2;", "SELECT é$b$"),
             ("SELECT a$$; SELECT 2;", "SELECT a$$"),
+            ("SELECT a$$b$$; SELECT 2;", "SELECT a$$b$$"),
+            ("SELECT a$b$$c$; SELECT 2;", "SELECT a$b$$c$"),
         ] {
             assert_eq!(split_statements(sql), [identifier, "SELECT 2"], "{sql}");
         }
@@ -1006,21 +1009,35 @@ mod tests {
 
     #[test]
     fn identifier_dollar_text_preserves_legacy_statement_boundaries() {
-        let migration = Migration::from_sql(1, "init", "SELECT a$b$; SELECT 2;");
-        assert_eq!(migration.statements, ["SELECT a$b$", "SELECT 2"]);
-        assert_eq!(
-            legacy_checksum_of(&migration.name, "", &migration.statements),
-            "9c51c8f9916036c8"
-        );
+        for (sql, first, checksum) in [
+            ("SELECT a$b$; SELECT 2;", "SELECT a$b$", "9c51c8f9916036c8"),
+            (
+                "SELECT a$$b$$; SELECT 2;",
+                "SELECT a$$b$$",
+                "23dbe2f0dc19125c",
+            ),
+            (
+                "SELECT a$b$$c$; SELECT 2;",
+                "SELECT a$b$$c$",
+                "9d889c7fcfcd6f19",
+            ),
+        ] {
+            let migration = Migration::from_sql(1, "init", sql);
+            assert_eq!(migration.statements, [first, "SELECT 2"]);
+            assert_eq!(
+                legacy_checksum_of(&migration.name, "", &migration.statements),
+                checksum
+            );
 
-        let record = AppliedMigration {
-            version: 1,
-            name: "init".to_owned(),
-            checksum: "9c51c8f9916036c8".to_owned(),
-            down_checksum: None,
-        };
-        verify_checksums::<besu_core::Error>(&record, &migration)
-            .expect("identifier dollar text must keep legacy checksums valid");
+            let record = AppliedMigration {
+                version: 1,
+                name: "init".to_owned(),
+                checksum: checksum.to_owned(),
+                down_checksum: None,
+            };
+            verify_checksums::<besu_core::Error>(&record, &migration)
+                .expect("identifier dollar text must keep legacy checksums valid");
+        }
     }
 
     #[test]
