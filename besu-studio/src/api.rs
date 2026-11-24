@@ -1166,6 +1166,10 @@ pub(crate) async fn query(
     let request = json_body(body)?;
     let started = Instant::now();
     let statement = one_statement(&request.sql)?;
+    // A disconnected client is not a reliable cancellation signal for SQL already
+    // running on the server. Serializing console statements ensures a later query
+    // cannot finish while an earlier stopped mutation is still in flight.
+    let _query = state.query_lock.lock().await;
 
     let outcome = match &state.db {
         AnyDatabase::Sqlite(db) => run_statement(db, &state.db, &statement).await,

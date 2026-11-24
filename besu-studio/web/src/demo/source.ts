@@ -236,7 +236,8 @@ export const demoSource: DataSource = {
     return { deleted: rows.length - kept.length };
   },
 
-  async query(sql: string): Promise<QueryResult> {
+  async query(sql: string, options?: { signal?: AbortSignal }): Promise<QueryResult> {
+    options?.signal?.throwIfAborted();
     const statement = normalizeQuery(sql);
     const canned = cannedQueries.find((entry) => normalizeQuery(entry.sql) === statement);
 

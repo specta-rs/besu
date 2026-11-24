@@ -31,7 +31,9 @@ use axum::{
     routing::{get, post},
 };
 use besu_any::AnyDatabase;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::Level;
@@ -52,6 +54,10 @@ pub struct StudioInfo {
 pub(crate) struct AppState {
     pub(crate) db: AnyDatabase,
     pub(crate) info: StudioInfo,
+    /// SQL console statements run one at a time. Aborting the HTTP request does not
+    /// necessarily abort a statement the database has already started, so a later
+    /// statement must wait for it rather than overtaking it.
+    pub(crate) query_lock: Arc<Mutex<()>>,
 }
 
 /// Serve the studio until the listener stops.
@@ -98,6 +104,7 @@ pub fn router(db: AnyDatabase, connection: impl Into<String>) -> Router {
             dialect,
             version: env!("CARGO_PKG_VERSION"),
         },
+        query_lock: Arc::new(Mutex::new(())),
     };
 
     Router::new()

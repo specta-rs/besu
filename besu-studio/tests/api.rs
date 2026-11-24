@@ -495,6 +495,49 @@ async fn a_with_select_returns_its_rows() {
 }
 
 #[tokio::test]
+async fn a_later_console_query_waits_for_an_inflight_statement() {
+    use std::time::Duration;
+
+    let fixture = fixture().await;
+    let app = fixture.app.clone();
+    let first = tokio::spawn(async move {
+        post_json(
+            &app,
+            "/api/query",
+            json!({
+                "sql": "WITH RECURSIVE n(x) AS (
+                    VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1000000
+                ) SELECT sum(x) AS total FROM n"
+            }),
+        )
+        .await
+    });
+
+    // Give the first request time to acquire the console lock and start its
+    // deliberately expensive read. The later request must queue behind it.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let started = std::time::Instant::now();
+    let second = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "SELECT 1 AS one"}),
+    )
+    .await;
+    let waited = started.elapsed();
+
+    assert!(
+        waited >= Duration::from_millis(50),
+        "only waited {waited:?}"
+    );
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(body_json(second).await["rows"], json!([["1"]]));
+
+    let first = first.await.expect("the first request finishes");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(body_json(first).await["rows"], json!([["500000500000"]]));
+}
+
+#[tokio::test]
 async fn unsafe_64_bit_keys_keep_their_identity_through_update_and_delete() {
     let fixture = fixture().await;
     let created = post_json(

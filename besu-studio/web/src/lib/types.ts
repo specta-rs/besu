@@ -182,5 +182,5 @@ export interface DataSource {
     values: Record<string, Json>,
   ): Promise<WriteResult>;
   remove(table: string, key: Record<string, Json>): Promise<WriteResult>;
-  query(sql: string): Promise<QueryResult>;
+  query(sql: string, options?: { signal?: AbortSignal }): Promise<QueryResult>;
 }

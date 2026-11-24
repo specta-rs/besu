@@ -3,6 +3,7 @@ import {
   Show,
   createMemo,
   createSignal,
+  onCleanup,
   onSettled,
   untrack,
 } from "solid-js";
@@ -125,6 +126,7 @@ export function SqlPage(): JSX.Element {
   const [dragging, setDragging] = createSignal(false);
 
   let ticket = 0;
+  let active: AbortController | undefined;
 
   const remember = (statement: string) =>
     setHistory((current) =>
@@ -138,6 +140,9 @@ export function SqlPage(): JSX.Element {
     if (statement === "" || running()) return;
 
     const id = ++ticket;
+    active?.abort();
+    const controller = new AbortController();
+    active = controller;
     setRunning(true);
     setStopped(false);
     setError(null);
@@ -146,7 +151,9 @@ export function SqlPage(): JSX.Element {
 
     const started = performance.now();
     try {
-      const output = await studio.client().query(statement);
+      const output = await studio.client().query(statement, {
+        signal: controller.signal,
+      });
       if (id !== ticket) return;
       setResult(output);
       setLastDuration(output.duration_ms ?? Math.round(performance.now() - started));
@@ -155,13 +162,18 @@ export function SqlPage(): JSX.Element {
       setError(cause instanceof Error ? cause.message : String(cause));
       setLastDuration(Math.round(performance.now() - started));
     } finally {
-      if (id === ticket) setRunning(false);
+      if (id === ticket) {
+        if (active === controller) active = undefined;
+        setRunning(false);
+      }
     }
   };
 
   const stop = () => {
     if (!running()) return;
     ticket += 1;
+    active?.abort();
+    active = undefined;
     setRunning(false);
     setStopped(true);
   };
@@ -206,6 +218,7 @@ export function SqlPage(): JSX.Element {
   };
 
   onSettled(() => () => release?.());
+  onCleanup(() => active?.abort());
 
   const nudge = (delta: number) =>
     setSplit((current) => Math.min(0.78, Math.max(0.16, current + delta)));
@@ -401,7 +414,7 @@ export function SqlPage(): JSX.Element {
                     >
                       <EmptyState
                         title="Query stopped"
-                        detail="The result was discarded. A statement already in flight may still finish on the server."
+                        detail="The request was cancelled. The server finishes any statement already in flight before running another."
                       />
                     </Show>
                   }
