@@ -156,7 +156,7 @@ export interface QueryResult {
   columns: string[];
   rows: Json[][];
   rows_affected?: number;
-  last_insert_id?: number | null;
+  last_insert_id?: string | null;
   duration_ms?: number;
 }
 

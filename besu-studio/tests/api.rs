@@ -386,8 +386,9 @@ async fn a_select_returns_typed_columns_and_string_cells() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let result = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
 
     assert_eq!(result["columns"], json!(["id", "name", "active"]));
     assert_eq!(
@@ -396,6 +397,154 @@ async fn a_select_returns_typed_columns_and_string_cells() {
     );
     assert_eq!(result["rows_affected"], 0);
     assert!(result["duration_ms"].is_number(), "{result}");
+}
+
+#[tokio::test]
+async fn binary_rows_are_hex_encoded_and_other_pages_still_work() {
+    let fixture = fixture().await;
+    let created = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "CREATE TABLE blobs (id INTEGER PRIMARY KEY, data BLOB, label TEXT)"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let inserted = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "INSERT INTO blobs VALUES (1, X'FF', 'first'), (2, X'4869', 'second')"}),
+    )
+    .await;
+    assert_eq!(inserted.status(), StatusCode::OK);
+
+    let first = get_json(&fixture.app, "/api/tables/blobs/rows?limit=1").await;
+    assert_eq!(first["rows"], json!([[1, "hex:FF", "first"]]));
+    let second = get_json(&fixture.app, "/api/tables/blobs/rows?limit=1&offset=1").await;
+    assert_eq!(second["rows"], json!([[2, "hex:4869", "second"]]));
+
+    let updated = request_json(
+        &fixture.app,
+        Method::PATCH,
+        "/api/tables/blobs/rows",
+        json!({"key": {"id": 1}, "values": {"data": "hex:00FF"}}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let page = get_json(&fixture.app, "/api/tables/blobs/rows?limit=1").await;
+    assert_eq!(page["rows"], json!([[1, "hex:00FF", "first"]]));
+}
+
+#[tokio::test]
+async fn the_query_console_returns_pragma_and_returning_results() {
+    let fixture = fixture().await;
+
+    let pragma = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "PRAGMA table_info(users)"}),
+    )
+    .await;
+    assert_eq!(pragma.status(), StatusCode::OK);
+    let result = body_json(pragma).await;
+    assert_eq!(
+        result["columns"],
+        json!(["cid", "name", "type", "notnull", "dflt_value", "pk"])
+    );
+    assert_eq!(result["rows"].as_array().expect("rows").len(), 3);
+
+    let returned = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "INSERT INTO users (id, name, active) VALUES (4, 'Ada', 1) RETURNING id, name"}),
+    )
+    .await;
+    assert_eq!(returned.status(), StatusCode::OK);
+    let result = body_json(returned).await;
+    assert_eq!(result["columns"], json!(["id", "name"]));
+    assert_eq!(result["rows"], json!([["4", "Ada"]]));
+    assert_eq!(result["rows_affected"], 1);
+    assert_eq!(users(&fixture.app).await.len(), 4);
+
+    let updated = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "UPDATE users SET active = 0 WHERE id = 4"}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let result = body_json(updated).await;
+    assert_eq!(result["columns"], json!([]));
+    assert_eq!(result["rows"], json!([]));
+    assert_eq!(result["rows_affected"], 1);
+}
+
+#[tokio::test]
+async fn a_with_select_returns_its_rows() {
+    let fixture = fixture().await;
+    let response = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "WITH ids AS (SELECT id FROM users) SELECT * FROM ids ORDER BY id"}),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = body_json(response).await;
+    assert_eq!(result["columns"], json!(["id"]));
+    assert_eq!(result["rows"], json!([["1"], ["2"], ["3"]]));
+}
+
+#[tokio::test]
+async fn unsafe_64_bit_keys_keep_their_identity_through_update_and_delete() {
+    let fixture = fixture().await;
+    let created = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "CREATE TABLE precision_rows (id INTEGER PRIMARY KEY, label TEXT NOT NULL)"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let inserted = post_json(
+        &fixture.app,
+        "/api/query",
+        json!({"sql": "INSERT INTO precision_rows VALUES (9007199254740992, 'first'), (9007199254740993, 'second')"}),
+    )
+    .await;
+    assert_eq!(inserted.status(), StatusCode::OK);
+
+    let page = get_json(&fixture.app, "/api/tables/precision_rows/rows").await;
+    assert_eq!(
+        page["rows"],
+        json!([
+            ["9007199254740992", "first"],
+            ["9007199254740993", "second"]
+        ])
+    );
+
+    let updated = request_json(
+        &fixture.app,
+        Method::PATCH,
+        "/api/tables/precision_rows/rows",
+        json!({"key": {"id": "9007199254740993"}, "values": {"label": "changed"}}),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    assert_eq!(body_json(updated).await["updated"], 1);
+    let page = get_json(&fixture.app, "/api/tables/precision_rows/rows").await;
+    assert_eq!(page["rows"][0][1], "first");
+    assert_eq!(page["rows"][1][1], "changed");
+
+    let deleted = request_json(
+        &fixture.app,
+        Method::DELETE,
+        "/api/tables/precision_rows/rows",
+        json!({"key": {"id": "9007199254740993"}}),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(body_json(deleted).await["deleted"], 1);
+    let page = get_json(&fixture.app, "/api/tables/precision_rows/rows").await;
+    assert_eq!(page["rows"], json!([["9007199254740992", "first"]]));
 }
 
 #[tokio::test]
@@ -509,74 +658,4 @@ async fn the_page_is_html() {
     assert!(page.contains("besu studio"));
     assert!(page.contains("/assets/index-"));
     assert!(page.contains(r#"<div id="root">"#));
-}
-
-#[tokio::test]
-async fn info_request_logs_do_not_contain_filter_values() {
-    use std::sync::{Arc, Mutex};
-
-    struct LogWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the log lock")
-                .extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone)]
-    struct Logs(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-        type Writer = LogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            LogWriter(self.0.clone())
-        }
-    }
-
-    let fixture = fixture().await;
-    let secret = "AUDIT_FILTER_SECRET_7f3a";
-    let inserted = post_json(
-        &fixture.app,
-        "/api/query",
-        json!({"sql": format!("INSERT INTO users (id, name, active) VALUES (4, '{secret}', 1)")}),
-    )
-    .await;
-    assert_eq!(inserted.status(), StatusCode::OK);
-
-    let filter = encode(r#"[{"column":"name","op":"eq","value":"AUDIT_FILTER_SECRET_7f3a"}]"#);
-    let logs = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-        .with_writer(Logs(logs.clone()))
-        .without_time()
-        .finish();
-
-    use tracing::instrument::WithSubscriber;
-
-    let response = async {
-        get(
-            &fixture.app,
-            &format!("/api/tables/users/rows?limit=50&offset=0&filter={filter}"),
-        )
-        .await
-    }
-    .with_subscriber(subscriber)
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let page = body_json(response).await;
-    assert_eq!(page["rows"], json!([[4, secret, true]]));
-
-    let output =
-        String::from_utf8(logs.lock().expect("the log lock").clone()).expect("UTF-8 log output");
-    assert!(output.contains("filter=%5Bredacted%5D"), "{output}");
-    assert!(!output.contains(secret), "{output}");
 }

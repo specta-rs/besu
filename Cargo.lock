@@ -373,6 +373,7 @@ dependencies = [
  "axum",
  "besu",
  "besu-any",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",
@@ -381,6 +382,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
