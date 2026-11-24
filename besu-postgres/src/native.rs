@@ -40,6 +40,7 @@
 use std::{
     error::Error as StdError,
     fmt,
+    fmt::Write as _,
     future::poll_fn,
     marker::PhantomData,
     pin::Pin,
@@ -77,6 +78,8 @@ const INT2_OID: u32 = 21;
 const INT4_OID: u32 = 23;
 /// `TEXT`.
 const TEXT_OID: u32 = 25;
+/// `UNKNOWN`, PostgreSQL's unresolved string parameter type.
+const UNKNOWN_OID: u32 = 705;
 /// `OID`.
 const OID_OID: u32 = 26;
 /// `JSON`.
@@ -672,75 +675,154 @@ fn type_oid(ty: &Type) -> u32 {
 }
 
 fn encode(value: &Value, ty: &Type, out: &mut BytesMut) -> Result<(), String> {
+    let oid = type_oid(ty);
     match value {
         Value::Null => {}
-        Value::Bool(value) => out.put_u8(u8::from(*value)),
+        Value::Bool(value) => match oid {
+            BOOL_OID => out.put_u8(u8::from(*value)),
+            oid if is_text_oid(oid) => out.put_slice(if *value { b"true" } else { b"false" }),
+            oid => return Err(type_mismatch("a boolean", oid)),
+        },
         Value::Int(value) => write_signed_integer(i128::from(*value), ty, out)?,
         Value::UInt(value) => write_unsigned_integer(u128::from(*value), ty, out)?,
         Value::UInt128(value) => write_unsigned_integer(*value, ty, out)?,
         Value::Int128(value) => write_signed_integer(*value, ty, out)?,
-        Value::Float(value) => match type_oid(ty) {
+        Value::Float(value) => match oid {
             FLOAT4_OID => out.put_f32(*value as f32),
             FLOAT8_OID => out.put_f64(*value),
+            oid if is_text_oid(oid) => write_display(value, out)?,
             oid => return Err(type_mismatch("a float", oid)),
         },
         Value::Text(value) => write_text(value, ty, out)?,
-        Value::EnumLabel(value) => out.put_slice(value.as_bytes()),
-        Value::Bytes(value) => out.put_slice(value),
-        Value::Uuid(value) => out.put_slice(value.as_bytes()),
-        Value::Date(value) => {
-            let days = value.signed_duration_since(postgres_epoch()).num_days();
-            let days = i32::try_from(days).map_err(|_| "the date is out of range".to_owned())?;
-            out.put_i32(days);
+        Value::EnumLabel(value) => {
+            if is_enum_parameter(ty) {
+                out.put_slice(value.as_bytes());
+            } else {
+                return Err(type_mismatch("an enum label", oid));
+            }
         }
-        Value::Time(value) => {
-            let micros = i64::from(value.num_seconds_from_midnight()) * 1_000_000
-                + i64::from(value.nanosecond() / 1_000);
-            out.put_i64(micros);
-        }
-        Value::Timestamp(value) => out.put_i64(micros_since_epoch(*value)?),
-        Value::TimestampTz(value) => out.put_i64(micros_since_epoch(value.naive_utc())?),
-        Value::Decimal(value) => write_numeric_text(value, out)?,
+        Value::Bytes(value) => match oid {
+            BYTEA_OID => out.put_slice(value),
+            oid if is_text_oid(oid) => write_bytea_text(value, out),
+            oid => return Err(type_mismatch("binary data", oid)),
+        },
+        Value::Uuid(value) => match oid {
+            UUID_OID => out.put_slice(value.as_bytes()),
+            oid if is_text_oid(oid) => write_display(value, out)?,
+            oid => return Err(type_mismatch("a UUID", oid)),
+        },
+        Value::Date(value) => match oid {
+            DATE_OID => {
+                let days = value.signed_duration_since(postgres_epoch()).num_days();
+                let days =
+                    i32::try_from(days).map_err(|_| "the date is out of range".to_owned())?;
+                out.put_i32(days);
+            }
+            oid if is_text_oid(oid) => write_display(value, out)?,
+            oid => return Err(type_mismatch("a date", oid)),
+        },
+        Value::Time(value) => match oid {
+            TIME_OID => {
+                let micros = i64::from(value.num_seconds_from_midnight()) * 1_000_000
+                    + i64::from(value.nanosecond() / 1_000);
+                out.put_i64(micros);
+            }
+            oid if is_text_oid(oid) => write_display(value, out)?,
+            oid => return Err(type_mismatch("a time", oid)),
+        },
+        Value::Timestamp(value) => match oid {
+            TIMESTAMP_OID => out.put_i64(micros_since_epoch(*value)?),
+            oid if is_text_oid(oid) => write_display(value, out)?,
+            oid => return Err(type_mismatch("a timestamp", oid)),
+        },
+        Value::TimestampTz(value) => match oid {
+            TIMESTAMPTZ_OID => out.put_i64(micros_since_epoch(value.naive_utc())?),
+            oid if is_text_oid(oid) => write_display(value, out)?,
+            oid => return Err(type_mismatch("a timestamp with time zone", oid)),
+        },
+        Value::Decimal(value) => match oid {
+            NUMERIC_OID => write_numeric_text(value, out)?,
+            FLOAT4_OID => out.put_f32(decimal_float32(value)?),
+            FLOAT8_OID => out.put_f64(decimal_float(value)?),
+            oid if is_text_oid(oid) => out.put_slice(value.as_bytes()),
+            oid => return Err(type_mismatch("a decimal", oid)),
+        },
         Value::Json(value) => {
             // Validate in place. The document is already JSON text, so parsing it into a
             // tree only to serialise it back would be two allocations for no change.
             let _: &serde_json::value::RawValue = serde_json::from_slice(value)
                 .map_err(|err| Error::encode("json", err.to_string()).to_string())?;
-            if type_oid(ty) == JSONB_OID {
-                // The binary JSONB form is a one-byte version followed by the document.
-                out.put_u8(1);
+            match oid {
+                JSONB_OID => {
+                    // The binary JSONB form is a one-byte version followed by the document.
+                    out.put_u8(1);
+                    out.put_slice(value);
+                }
+                JSON_OID => out.put_slice(value),
+                oid if is_text_oid(oid) => out.put_slice(value),
+                oid => return Err(type_mismatch("json", oid)),
             }
-            out.put_slice(value);
         }
-        Value::Interval(value) => {
-            // `interval_send` writes the time in microseconds, then whole days, then whole
-            // months, in that order.
-            out.put_i64(value.microseconds());
-            out.put_i32(value.days());
-            out.put_i32(value.months());
-        }
-        Value::Inet(value) => write_network(&NetworkValue::inet(value), out),
-        Value::Cidr(value) => write_network(&NetworkValue::cidr(value), out),
-        Value::Bit(value) => {
-            let length =
-                i32::try_from(value.len()).map_err(|_| "the bit string is too long".to_owned())?;
-            out.put_i32(length);
-            out.put_slice(&value.to_bytes());
-        }
+        Value::Interval(value) => match oid {
+            INTERVAL_OID => {
+                // `interval_send` writes the time in microseconds, then whole days, then whole
+                // months, in that order.
+                out.put_i64(value.microseconds());
+                out.put_i32(value.days());
+                out.put_i32(value.months());
+            }
+            oid if is_text_oid(oid) => write_display(value, out)?,
+            oid => return Err(type_mismatch("an interval", oid)),
+        },
+        Value::Inet(value) => match oid {
+            INET_OID => write_network(&NetworkValue::inet(value), out),
+            oid if is_text_oid(oid) => write_display(value.as_str(), out)?,
+            oid => return Err(type_mismatch("an inet", oid)),
+        },
+        Value::Cidr(value) => match oid {
+            CIDR_OID => write_network(&NetworkValue::cidr(value), out),
+            oid if is_text_oid(oid) => write_display(value.as_str(), out)?,
+            oid => return Err(type_mismatch("a cidr", oid)),
+        },
+        Value::Bit(value) => match oid {
+            BIT_OID | VARBIT_OID => {
+                let length = i32::try_from(value.len())
+                    .map_err(|_| "the bit string is too long".to_owned())?;
+                out.put_i32(length);
+                out.put_slice(&value.to_bytes());
+            }
+            oid if is_text_oid(oid) => write_display(value.as_str(), out)?,
+            oid => return Err(type_mismatch("a bit string", oid)),
+        },
         Value::Range { range, .. } => {
             let element = match base_type(ty).kind() {
                 Kind::Range(element) => element,
-                _ => return Err(type_mismatch("a range", type_oid(ty))),
+                _ => return Err(type_mismatch("a range", oid)),
             };
             write_range(element, range, out)?;
         }
         Value::Array { values, .. } => write_array(values, ty, out)?,
-        Value::Geometry(value) => out.put_slice(value.ewkb()),
-        Value::Vector(value) => out.put_slice(
-            &value
+        Value::Geometry(value) => {
+            if is_text_oid(oid) {
+                write_display(value, out)?;
+            } else if matches!(base_type(ty).name(), "geometry" | "geography") {
+                out.put_slice(value.ewkb());
+            } else {
+                return Err(type_mismatch("a geometry", oid));
+            }
+        }
+        Value::Vector(value) => {
+            let bytes = value
                 .to_binary()
-                .map_err(|err| Error::encode("vector", err.to_string()).to_string())?,
-        ),
+                .map_err(|err| Error::encode("vector", err.to_string()).to_string())?;
+            if is_text_oid(oid) {
+                write_display(value, out)?;
+            } else if base_type(ty).name() == "vector" {
+                out.put_slice(&bytes);
+            } else {
+                return Err(type_mismatch("a vector", oid));
+            }
+        }
         // `Value` is `#[non_exhaustive]`: a future variant fails loudly rather than
         // silently becoming `NULL`.
         other => {
@@ -752,6 +834,103 @@ fn encode(value: &Value, ty: &Type, out: &mut BytesMut) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Types whose binary payload is their UTF-8 text representation.
+fn is_text_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        TEXT_OID | UNKNOWN_OID | VARCHAR_OID | BPCHAR_OID | NAME_OID
+    )
+}
+
+/// Whether an enum label can be written as the inferred type's textual payload.
+fn is_enum_parameter(ty: &Type) -> bool {
+    let oid = type_oid(ty);
+    is_text_oid(oid) || oid == JSON_OID || matches!(base_type(ty).kind(), Kind::Enum(_))
+}
+
+/// Whether text can be written as the inferred type's textual binary payload.
+///
+/// Extension-defined simple types keep the historical text binding behavior; the built-in
+/// types Besu encodes in another binary form are rejected instead of being misinterpreted.
+fn is_text_parameter(ty: &Type) -> bool {
+    let oid = type_oid(ty);
+    is_enum_parameter(ty)
+        || (matches!(base_type(ty).kind(), Kind::Simple)
+            && !is_known_binary_oid(oid)
+            && !matches!(base_type(ty).name(), "geometry" | "geography" | "vector"))
+}
+
+/// Built-in types whose binary payload is not UTF-8 text.
+fn is_known_binary_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        BOOL_OID
+            | BYTEA_OID
+            | CHAR_OID
+            | INT8_OID
+            | INT2_OID
+            | INT4_OID
+            | OID_OID
+            | CIDR_OID
+            | FLOAT4_OID
+            | FLOAT8_OID
+            | INET_OID
+            | DATE_OID
+            | TIME_OID
+            | TIMESTAMP_OID
+            | TIMESTAMPTZ_OID
+            | INTERVAL_OID
+            | BIT_OID
+            | VARBIT_OID
+            | NUMERIC_OID
+            | UUID_OID
+            | JSONB_OID
+    )
+}
+
+/// Append a value's PostgreSQL text spelling without allocating a temporary `String`.
+fn write_display(value: impl fmt::Display, out: &mut BytesMut) -> Result<(), String> {
+    write!(out, "{value}").map_err(|_| "the value could not be formatted".to_owned())
+}
+
+/// Parse an exact decimal only when the inferred type asks for an inexact float.
+fn decimal_float(value: &str) -> Result<f64, String> {
+    let parsed = value.parse::<f64>().map_err(|_| {
+        Error::encode(value, "the decimal cannot be represented as a float").to_string()
+    })?;
+    // PostgreSQL's NUMERIC has no negative zero.
+    let parsed = if parsed == 0.0 { 0.0 } else { parsed };
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(Error::encode(value, "the decimal is outside the float range").to_string())
+    }
+}
+
+/// Parse directly as `f32` so conversion does not double-round through `f64`.
+fn decimal_float32(value: &str) -> Result<f32, String> {
+    let parsed = value.parse::<f32>().map_err(|_| {
+        Error::encode(value, "the decimal cannot be represented as a real").to_string()
+    })?;
+    // PostgreSQL's NUMERIC has no negative zero.
+    let parsed = if parsed == 0.0 { 0.0 } else { parsed };
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(Error::encode(value, "the decimal is outside the real range").to_string())
+    }
+}
+
+/// PostgreSQL's text input for `BYTEA` is a backslash-x followed by hexadecimal digits.
+fn write_bytea_text(value: &[u8], out: &mut BytesMut) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.put_slice(b"\\x");
+    for byte in value {
+        out.put_u8(HEX[usize::from(byte >> 4)]);
+        out.put_u8(HEX[usize::from(byte & 0x0f)]);
+    }
 }
 
 fn type_mismatch(what: &str, oid: u32) -> String {
@@ -803,10 +982,15 @@ fn write_unsigned_integer(value: u128, ty: &Type, out: &mut BytesMut) -> Result<
 /// A `String` is normally bound to a text column. The numeric branch exists for array
 /// elements and range bounds, where the element type is already known to be `NUMERIC`.
 fn write_text(value: &str, ty: &Type, out: &mut BytesMut) -> Result<(), String> {
-    if type_oid(ty) == NUMERIC_OID {
-        write_numeric_text(value, out)?;
-    } else {
-        out.put_slice(value.as_bytes());
+    let oid = type_oid(ty);
+    match oid {
+        NUMERIC_OID => write_numeric_text(value, out)?,
+        BYTEA_OID => out.put_slice(value.as_bytes()),
+        CHAR_OID if value.len() == 1 => out.put_u8(value.as_bytes()[0]),
+        CHAR_OID => return Err("text written as `\"char\"` must have one byte".to_owned()),
+        oid if is_text_oid(oid) || oid == JSON_OID => out.put_slice(value.as_bytes()),
+        _ if is_text_parameter(ty) => out.put_slice(value.as_bytes()),
+        oid => return Err(type_mismatch("text", oid)),
     }
     Ok(())
 }
@@ -2033,6 +2217,76 @@ mod tests {
         assert!(decode_numeric_decimal(&[]).is_err());
         assert!(decode_network_binary(&[]).is_err());
         assert!(decode_network_binary(&[2, 24, 0, 4, 1]).is_err());
+    }
+
+    #[test]
+    fn a_decimal_bound_as_a_float_is_converted_before_encoding() {
+        for (text, expected) in [
+            ("0.00", 0.0_f64),
+            ("-0.00", 0.0_f64),
+            ("1.25", 1.25),
+            ("-2.5", -2.5),
+        ] {
+            let mut out = BytesMut::new();
+            encode(&Value::Decimal(text.to_owned()), &Type::FLOAT8, &mut out).unwrap();
+            let bytes: [u8; 8] = out.to_vec().try_into().unwrap();
+            assert_eq!(f64::from_be_bytes(bytes).to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn a_decimal_bound_as_real_rounds_directly_and_rejects_overflow() {
+        let text = "1.0000000596046447753906250000001";
+        let expected = text.parse::<f32>().unwrap();
+        let mut out = BytesMut::new();
+        encode(&Value::Decimal(text.to_owned()), &Type::FLOAT4, &mut out).unwrap();
+        let bytes: [u8; 4] = out.to_vec().try_into().unwrap();
+        assert_eq!(f32::from_be_bytes(bytes).to_bits(), expected.to_bits());
+
+        let overflow = format!("1{}", "0".repeat(40));
+        let mut out = BytesMut::new();
+        let error = encode(&Value::Decimal(overflow), &Type::FLOAT4, &mut out).unwrap_err();
+        assert!(error.contains("outside the real range"), "{error}");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn text_written_as_bytea_uses_its_raw_utf8_bytes() {
+        let mut out = BytesMut::new();
+        encode(&Value::Text("AB".to_owned()), &Type::BYTEA, &mut out).unwrap();
+        assert_eq!(out.as_ref(), b"AB");
+    }
+
+    #[test]
+    fn an_incompatible_inferred_type_is_rejected_before_writing_bytes() {
+        let key = uuid::Uuid::nil();
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let geometry =
+            Geometry::from_hex("0101000020E6100000000000000000F03F0000000000000040").unwrap();
+        let cases = [
+            (Value::Uuid(key), Type::INT4),
+            (Value::Date(day), Type::FLOAT8),
+            (Value::Decimal("1.23".to_owned()), Type::INT4),
+            (Value::Inet(Inet::new("192.0.2.1").unwrap()), Type::UUID),
+            (Value::Bit(BitString::new("101").unwrap()), Type::JSONB),
+            (Value::Text(key.to_string()), Type::UUID),
+            (Value::EnumLabel("label".to_owned()), Type::INT4),
+            (Value::Geometry(geometry), Type::INT4),
+            (Value::Vector(Vector::new(vec![1.0])), Type::INT4),
+        ];
+        for (value, ty) in cases {
+            let mut out = BytesMut::new();
+            let error = encode(&value, &ty, &mut out).unwrap_err();
+            assert!(error.contains("cannot be written"), "{error}");
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn binary_data_uses_bytea_text_for_a_text_parameter() {
+        let mut out = BytesMut::new();
+        encode(&Value::Bytes(vec![0, 1, 0xfe, 0xff]), &Type::TEXT, &mut out).unwrap();
+        assert_eq!(out.as_ref(), b"\\x0001feff");
     }
 
     #[test]
