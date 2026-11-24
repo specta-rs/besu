@@ -4,7 +4,7 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::panic)]
 
 use besu::prelude::*;
-use besu::schema::{Check, Index, IndexColumn, IndexKind, Schema};
+use besu::schema::{Change, Check, Index, IndexColumn, IndexKind, Schema, View};
 use besu_sqlite::Sqlx;
 
 /// A file-backed database, because a pool over `:memory:` would give every statement its
@@ -445,6 +445,61 @@ async fn views_are_created_replaced_and_dropped() {
         dropped.statements,
         [r#"DROP VIEW "user_ids""#, r#"DROP TABLE "users""#]
     );
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "outer_t")]
+struct OuterRow {
+    #[besu(primary_key)]
+    id: i64,
+}
+
+#[derive(Table, Debug, Clone, PartialEq)]
+#[besu(table = "inner_t")]
+struct InnerRow {
+    #[besu(primary_key)]
+    id: i64,
+}
+
+#[tokio::test]
+async fn a_changed_correlated_view_is_replaced_live() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = database(&dir).await;
+    let mut desired = Schema::from_defs(&[outer_t.def(), inner_t.def()]);
+    desired.add_view(View::new(
+        "matching_rows",
+        "SELECT outer_t.id FROM outer_t WHERE EXISTS (\
+         SELECT 1 FROM inner_t WHERE inner_t.id = outer_t.id)",
+    ));
+    db.push_schema(&desired).await.unwrap();
+    db.execute(sql!("INSERT INTO outer_t VALUES (1), (2)"))
+        .await
+        .unwrap();
+    db.execute(sql!("INSERT INTO inner_t VALUES (1)"))
+        .await
+        .unwrap();
+    let before: Vec<i64> = db
+        .execute(sql!("SELECT id FROM matching_rows ORDER BY id"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(before, [1]);
+
+    desired.views[0].definition = "SELECT outer_t.id FROM outer_t WHERE EXISTS (\
+         SELECT 1 FROM inner_t WHERE inner_t.id = inner_t.id)"
+        .into();
+    let applied = db.push_schema(&desired).await.unwrap();
+    assert_eq!(
+        applied.changes,
+        [Change::ReplaceView(desired.views[0].clone())]
+    );
+    let after: Vec<i64> = db
+        .execute(sql!("SELECT id FROM matching_rows ORDER BY id"))
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(after, [1, 2]);
+    assert!(db.push_schema(&desired).await.unwrap().is_empty());
 }
 
 mod generated {
