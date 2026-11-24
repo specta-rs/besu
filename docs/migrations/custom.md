@@ -38,11 +38,11 @@ down file but no up file is not.
 A file is split on `;`. The splitter understands:
 
 - single-quoted, double-quoted and backtick-quoted spans, with a doubled quote as an escape;
+- PostgreSQL dollar-quoted spans (`$$ ... $$` and `$tag$ ... $tag$`);
 - `--` line comments, whose semicolons are ignored.
 
-It does not understand PostgreSQL dollar-quoting or `/* */` block comments. A `DO $$ … $$`
-body containing a semicolon is split in the middle. Keep such a body in its own file with one
-statement, or run it outside the runner.
+It does not understand `/* */` block comments, so semicolons inside those comments still split
+statements.
 
 A trailing statement without a semicolon is kept. An empty file produces no statements and is
 still recorded in the journal.

@@ -642,14 +642,26 @@ where
     Ok(count > 0)
 }
 
-/// Split a SQL blob into statements, respecting single-quoted strings and `--` comments.
+/// Split a SQL blob into statements, respecting quoted strings, `--` comments and
+/// PostgreSQL dollar-quoted bodies.
 pub fn split_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
+    let mut dollar_quote: Option<(String, usize)> = None;
     let mut chars = sql.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        if let Some((delimiter, body_start)) = &dollar_quote {
+            current.push(ch);
+            if current.len() >= *body_start + delimiter.len()
+                && current.ends_with(delimiter.as_str())
+            {
+                dollar_quote = None;
+            }
+            continue;
+        }
+
         if let Some(q) = quote {
             current.push(ch);
             if ch == q {
@@ -664,6 +676,19 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         }
 
         match ch {
+            '$' => {
+                if let Some(delimiter) = dollar_quote_delimiter(chars.clone()) {
+                    // The opening `$` has already been consumed from the iterator.
+                    for _ in delimiter.chars().skip(1) {
+                        chars.next();
+                    }
+                    current.push_str(&delimiter);
+                    let body_start = current.len();
+                    dollar_quote = Some((delimiter, body_start));
+                } else {
+                    current.push(ch);
+                }
+            }
             '\'' | '"' | '`' => {
                 quote = Some(ch);
                 current.push(ch);
@@ -694,6 +719,45 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     statements
+}
+
+fn dollar_quote_delimiter(mut chars: std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut tag = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch == '$' {
+            let valid = match tag.chars().next() {
+                None => true,
+                Some(first) => {
+                    is_dollar_tag_start(first) && tag.chars().all(is_dollar_tag_continue)
+                }
+            };
+            if !valid {
+                return None;
+            }
+            chars.next();
+            return Some(format!("${tag}$"));
+        }
+
+        let valid = if tag.is_empty() {
+            is_dollar_tag_start(ch)
+        } else {
+            is_dollar_tag_continue(ch)
+        };
+        if !valid {
+            return None;
+        }
+        tag.push(ch);
+        chars.next();
+    }
+    None
+}
+
+fn is_dollar_tag_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic() || !ch.is_ascii()
+}
+
+fn is_dollar_tag_continue(ch: char) -> bool {
+    is_dollar_tag_start(ch) || ch.is_ascii_digit()
 }
 
 #[cfg(test)]
@@ -784,6 +848,53 @@ mod tests {
         // change deliberate.
         let migration = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
         assert_eq!(migration.checksum(), "c5aaac2804fd1185");
+    }
+
+    #[test]
+    fn keeps_postgres_dollar_quoted_bodies_in_one_statement() {
+        let sql = "CREATE FUNCTION public.answer()\n\
+                   RETURNS integer\n\
+                   LANGUAGE plpgsql\n\
+                   AS $$\n\
+                   BEGIN\n\
+                       RETURN 1;\n\
+                   END;\n\
+                   $$;\n\
+                   SELECT public.answer();";
+        let statements = split_statements(sql);
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE FUNCTION public.answer()"));
+        assert!(statements[0].ends_with("$$"));
+        assert_eq!(statements[1], "SELECT public.answer()");
+    }
+
+    #[test]
+    fn dollar_quote_tags_are_case_sensitive_and_self_delimited() {
+        let statements = split_statements(
+            "CREATE FUNCTION f() RETURNS void AS $Body$ BEGIN PERFORM 1; END; $Body$;\n\
+             CREATE FUNCTION g() RETURNS void AS $body$ BEGIN PERFORM 2; END; $body$;",
+        );
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].ends_with("$Body$"));
+        assert!(statements[1].ends_with("$body$"));
+    }
+
+    #[test]
+    fn does_not_treat_parameters_as_dollar_quotes() {
+        let statements = split_statements("SELECT $1; SELECT $tag; SELECT 2;");
+        assert_eq!(statements, ["SELECT $1", "SELECT $tag", "SELECT 2"]);
+    }
+
+    #[test]
+    fn ignores_dollar_quote_openers_inside_regular_strings() {
+        let statements = split_statements("SELECT '$$;', '$tag$;'; SELECT 2;");
+        assert_eq!(statements, ["SELECT '$$;', '$tag$;'", "SELECT 2"]);
+    }
+
+    #[test]
+    fn dollar_quoted_bodies_can_contain_multibyte_text() {
+        let statements = split_statements("SELECT $$€;$$; SELECT 2;");
+        assert_eq!(statements, ["SELECT $$€;$$", "SELECT 2"]);
     }
 
     #[test]

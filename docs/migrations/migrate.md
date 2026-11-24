@@ -80,6 +80,6 @@ that also keeps every statement on the same connection, which a schema change ne
   files; the whole pending set runs.
 - **There is no `--dry-run`.** To see what would change, run [`besu generate`](generate.md)
   against a copy, or `besu push --dry-run` for the schema-level difference.
-- **Migrations are split on `;`.** The splitter understands quotes and `--` comments, not
-  PostgreSQL dollar-quoting or `/* */` blocks, so a `DO $$ ... $$` body is cut in the middle.
-  Put such a body in its own file with one statement, or run it outside the runner.
+- **Migrations are split on `;`.** The splitter understands quotes, `--` comments and
+  PostgreSQL dollar-quoted bodies such as `DO $$ ... $$`. It does not understand `/* */`
+  block comments, so keep semicolons inside those comments out of migration files.
