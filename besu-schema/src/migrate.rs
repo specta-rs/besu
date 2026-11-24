@@ -62,23 +62,50 @@ impl Migration {
     }
 }
 
-/// FNV-1a over a migration's name, its direction and its statements.
+/// FNV-1a over a migration's name, direction and length-delimited statements.
 ///
-/// The up direction contributes no bytes, so checksums recorded before down migrations
-/// existed still match.
+/// Length prefixes make statement boundaries part of the digest. Joining statements with a
+/// newline is ambiguous: replacing one separator with a newline can produce the same bytes
+/// from different statement vectors.
 fn checksum_of(name: &str, direction: &str, statements: &[String]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    feed(name.as_bytes());
-    feed(&[0]);
-    feed(direction.as_bytes());
-    feed(statements.join("\n").as_bytes());
+    feed_field(&mut hash, name.as_bytes());
+    feed_field(&mut hash, direction.as_bytes());
+    feed_bytes(&mut hash, &(statements.len() as u64).to_be_bytes());
+    for statement in statements {
+        feed_field(&mut hash, statement.as_bytes());
+    }
     format!("{hash:016x}")
+}
+
+fn feed_field(hash: &mut u64, bytes: &[u8]) {
+    feed_bytes(hash, &(bytes.len() as u64).to_be_bytes());
+    feed_bytes(hash, bytes);
+}
+
+fn feed_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// The checksum format used before statement boundaries were length-delimited.
+///
+/// Existing journals contain these digests, so unchanged legacy migrations must still verify.
+/// Newly applied migrations use the unambiguous format above.
+fn legacy_checksum_of(name: &str, direction: &str, statements: &[String]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    feed_bytes(&mut hash, name.as_bytes());
+    feed_bytes(&mut hash, &[0]);
+    feed_bytes(&mut hash, direction.as_bytes());
+    feed_bytes(&mut hash, statements.join("\n").as_bytes());
+    format!("{hash:016x}")
+}
+
+fn checksum_matches(expected: &str, name: &str, direction: &str, statements: &[String]) -> bool {
+    expected == checksum_of(name, direction, statements)
+        || expected == legacy_checksum_of(name, direction, statements)
 }
 
 /// A migration that has been applied to a database.
@@ -116,6 +143,18 @@ pub enum MigrationError<E> {
     },
     /// Two migrations share a version.
     DuplicateVersion(i64),
+    /// An applied migration's file is missing, so its history cannot be verified.
+    MissingMigrationFile {
+        /// The applied version with no supplied migration.
+        version: i64,
+    },
+    /// A migration older than the newest applied version is being backfilled.
+    OutOfOrderMigration {
+        /// The out-of-order migration's version.
+        version: i64,
+        /// The newest version already in the journal.
+        latest_applied: i64,
+    },
     /// The newest applied migration cannot be reverted, because it has no down file.
     MissingDownFile {
         /// The version that cannot be reverted.
@@ -138,6 +177,19 @@ impl<E: fmt::Display> fmt::Display for MigrationError<E> {
                  (recorded checksum {expected}, now {actual}); migrations are append-only"
             ),
             Self::DuplicateVersion(version) => write!(f, "two migrations share version {version}"),
+            Self::MissingMigrationFile { version } => write!(
+                f,
+                "applied migration {version} is missing from the migration directory; \
+                 restore its file before continuing"
+            ),
+            Self::OutOfOrderMigration {
+                version,
+                latest_applied,
+            } => write!(
+                f,
+                "migration {version} is older than the latest applied migration \
+                 {latest_applied}; migrations must be appended in ascending order"
+            ),
             Self::MissingDownFile { version } => write!(
                 f,
                 "migration {version} has no down file, so it cannot be reverted; \
@@ -274,7 +326,7 @@ impl Migrator {
         // 1. Make sure the journal exists and is up to date.
         let applied = read_journal(exec).await?;
 
-        // 2. Validate: no duplicates, and nothing that already ran was edited.
+        // 2. Validate: no duplicates, complete applied history, and append-only ordering.
         let mut sorted = self.migrations.clone();
         sorted.sort_by_key(|m| m.version);
         for pair in sorted.windows(2) {
@@ -282,9 +334,26 @@ impl Migrator {
                 return Err(MigrationError::DuplicateVersion(pair[0].version));
             }
         }
+        // Every journal row needs its original file so its checksum can be verified. Without
+        // this check a partial migration directory can silently run new SQL on top of history
+        // that the runner cannot inspect.
+        for record in &applied {
+            if !sorted.iter().any(|m| m.version == record.version) {
+                return Err(MigrationError::MissingMigrationFile {
+                    version: record.version,
+                });
+            }
+        }
         for migration in &sorted {
             if let Some(record) = applied.iter().find(|a| a.version == migration.version) {
                 verify_checksums(record, migration)?;
+            } else if let Some(latest) = applied.last() {
+                if migration.version <= latest.version {
+                    return Err(MigrationError::OutOfOrderMigration {
+                        version: migration.version,
+                        latest_applied: latest.version,
+                    });
+                }
             }
         }
 
@@ -371,7 +440,10 @@ impl Migrator {
             let Some(newest) = applied.into_iter().next_back() else {
                 break;
             };
-            if newest.version <= to {
+            // Zero is the CLI's revert-everything sentinel, not an ordinary version bound.
+            // Versions are signed, so an inclusive comparison would leave zero and negative
+            // journal rows applied forever.
+            if to != 0 && newest.version <= to {
                 break;
             }
             reverted.push(self.revert(exec, newest).await?);
@@ -573,8 +645,8 @@ fn verify_checksums<F>(
     record: &AppliedMigration,
     migration: &Migration,
 ) -> Result<(), MigrationError<F>> {
-    let actual = migration.checksum();
-    if record.checksum != actual {
+    if !checksum_matches(&record.checksum, &migration.name, "", &migration.statements) {
+        let actual = migration.checksum();
         return Err(MigrationError::ChecksumMismatch {
             version: migration.version,
             expected: record.checksum.clone(),
@@ -584,12 +656,17 @@ fn verify_checksums<F>(
 
     // A row recorded before down checksums existed has no value to compare against, so a down
     // file added later is allowed. Once a checksum is recorded, editing the file is an error.
-    if let (Some(expected), Some(actual)) = (&record.down_checksum, migration.down_checksum()) {
-        if *expected != actual {
+    if let Some(expected) = &record.down_checksum {
+        let matches = migration.down.as_deref().is_some_and(|statements| {
+            checksum_matches(expected, &migration.name, "down", statements)
+        });
+        if !matches {
             return Err(MigrationError::ChecksumMismatch {
                 version: migration.version,
                 expected: expected.clone(),
-                actual,
+                actual: migration
+                    .down_checksum()
+                    .unwrap_or_else(|| "<missing>".to_owned()),
             });
         }
     }
@@ -642,14 +719,26 @@ where
     Ok(count > 0)
 }
 
-/// Split a SQL blob into statements, respecting single-quoted strings and `--` comments.
+/// Split a SQL blob into statements, respecting quoted strings, `--` comments and
+/// PostgreSQL dollar-quoted bodies.
 pub fn split_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
+    let mut dollar_quote: Option<(String, usize)> = None;
     let mut chars = sql.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        if let Some((delimiter, body_start)) = &dollar_quote {
+            current.push(ch);
+            if current.len() >= *body_start + delimiter.len()
+                && current.ends_with(delimiter.as_str())
+            {
+                dollar_quote = None;
+            }
+            continue;
+        }
+
         if let Some(q) = quote {
             current.push(ch);
             if ch == q {
@@ -664,6 +753,24 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         }
 
         match ch {
+            '$' if current
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !is_identifier_char(previous)) =>
+            {
+                if let Some(delimiter) = dollar_quote_delimiter(chars.clone()) {
+                    // The opening `$` has already been consumed from the iterator.
+                    for _ in delimiter.chars().skip(1) {
+                        chars.next();
+                    }
+                    current.push_str(&delimiter);
+                    let body_start = current.len();
+                    dollar_quote = Some((delimiter, body_start));
+                } else {
+                    current.push(ch);
+                }
+            }
+            '$' => current.push(ch),
             '\'' | '"' | '`' => {
                 quote = Some(ch);
                 current.push(ch);
@@ -694,6 +801,50 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     statements
+}
+
+fn dollar_quote_delimiter(mut chars: std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut tag = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch == '$' {
+            let valid = match tag.chars().next() {
+                None => true,
+                Some(first) => {
+                    is_dollar_tag_start(first) && tag.chars().all(is_dollar_tag_continue)
+                }
+            };
+            if !valid {
+                return None;
+            }
+            chars.next();
+            return Some(format!("${tag}$"));
+        }
+
+        let valid = if tag.is_empty() {
+            is_dollar_tag_start(ch)
+        } else {
+            is_dollar_tag_continue(ch)
+        };
+        if !valid {
+            return None;
+        }
+        tag.push(ch);
+        chars.next();
+    }
+    None
+}
+
+fn is_dollar_tag_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic() || !ch.is_ascii()
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    // PostgreSQL also allows dollar signs inside unquoted identifiers.
+    ch == '$' || ch == '_' || ch.is_ascii_alphanumeric() || !ch.is_ascii()
+}
+
+fn is_dollar_tag_continue(ch: char) -> bool {
+    is_dollar_tag_start(ch) || ch.is_ascii_digit()
 }
 
 #[cfg(test)]
@@ -747,6 +898,68 @@ mod tests {
     }
 
     #[test]
+    fn keeps_postgres_dollar_quoted_bodies_in_one_statement() {
+        let sql = "CREATE FUNCTION public.answer()\n\
+                   RETURNS integer\n\
+                   LANGUAGE plpgsql\n\
+                   AS $$\n\
+                   BEGIN\n\
+                       RETURN 1;\n\
+                   END;\n\
+                   $$;\n\
+                   SELECT public.answer();";
+        let statements = split_statements(sql);
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE FUNCTION public.answer()"));
+        assert!(statements[0].ends_with("$$"));
+        assert_eq!(statements[1], "SELECT public.answer()");
+    }
+
+    #[test]
+    fn dollar_quote_tags_are_case_sensitive_and_self_delimited() {
+        let statements = split_statements(
+            "CREATE FUNCTION f() RETURNS void AS $Body$ BEGIN PERFORM 1; END; $Body$;\n\
+             CREATE FUNCTION g() RETURNS void AS $body$ BEGIN PERFORM 2; END; $body$;",
+        );
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].ends_with("$Body$"));
+        assert!(statements[1].ends_with("$body$"));
+    }
+
+    #[test]
+    fn does_not_treat_parameters_as_dollar_quotes() {
+        let statements = split_statements("SELECT $1; SELECT $tag; SELECT 2;");
+        assert_eq!(statements, ["SELECT $1", "SELECT $tag", "SELECT 2"]);
+    }
+
+    #[test]
+    fn does_not_treat_dollar_quotes_inside_identifiers_as_openers() {
+        for (sql, identifier) in [
+            ("SELECT a$b$; SELECT 2;", "SELECT a$b$"),
+            ("SELECT 1$b$; SELECT 2;", "SELECT 1$b$"),
+            ("SELECT _$b$; SELECT 2;", "SELECT _$b$"),
+            ("SELECT é$b$; SELECT 2;", "SELECT é$b$"),
+            ("SELECT a$$; SELECT 2;", "SELECT a$$"),
+            ("SELECT a$$b$$; SELECT 2;", "SELECT a$$b$$"),
+            ("SELECT a$b$$c$; SELECT 2;", "SELECT a$b$$c$"),
+        ] {
+            assert_eq!(split_statements(sql), [identifier, "SELECT 2"], "{sql}");
+        }
+    }
+
+    #[test]
+    fn ignores_dollar_quote_openers_inside_regular_strings() {
+        let statements = split_statements("SELECT '$$;', '$tag$;'; SELECT 2;");
+        assert_eq!(statements, ["SELECT '$$;', '$tag$;'", "SELECT 2"]);
+    }
+
+    #[test]
+    fn dollar_quoted_bodies_can_contain_multibyte_text() {
+        let statements = split_statements("SELECT $$€;$$; SELECT 2;");
+        assert_eq!(statements, ["SELECT $$€;$$", "SELECT 2"]);
+    }
+
+    #[test]
     fn the_journal_probe_is_scoped_to_this_database() {
         // `information_schema` is shared with every other schema on PostgreSQL and every
         // other database on MySQL, so an unscoped count could see another application's
@@ -779,11 +992,106 @@ mod tests {
 
     #[test]
     fn up_checksum_is_pinned() {
-        // Every database that has run this migration stores this value in its journal, so a
-        // refactor that changes it would invalidate all of them. The test exists to make that
-        // change deliberate.
+        // New journals store the length-delimited format. Legacy digests are pinned below and
+        // still accepted when verifying existing history.
         let migration = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
-        assert_eq!(migration.checksum(), "c5aaac2804fd1185");
+        assert_eq!(migration.checksum(), "70cefc2f1aca861d");
+    }
+
+    #[test]
+    fn legacy_up_checksum_is_pinned() {
+        let migration = Migration::from_sql(1, "init", "CREATE TABLE a (id INT)");
+        assert_eq!(
+            legacy_checksum_of(&migration.name, "", &migration.statements),
+            "c5aaac2804fd1185"
+        );
+    }
+
+    #[test]
+    fn identifier_dollar_text_preserves_legacy_statement_boundaries() {
+        for (sql, first, checksum) in [
+            ("SELECT a$b$; SELECT 2;", "SELECT a$b$", "9c51c8f9916036c8"),
+            (
+                "SELECT a$$b$$; SELECT 2;",
+                "SELECT a$$b$$",
+                "23dbe2f0dc19125c",
+            ),
+            (
+                "SELECT a$b$$c$; SELECT 2;",
+                "SELECT a$b$$c$",
+                "9d889c7fcfcd6f19",
+            ),
+        ] {
+            let migration = Migration::from_sql(1, "init", sql);
+            assert_eq!(migration.statements, [first, "SELECT 2"]);
+            assert_eq!(
+                legacy_checksum_of(&migration.name, "", &migration.statements),
+                checksum
+            );
+
+            let record = AppliedMigration {
+                version: 1,
+                name: "init".to_owned(),
+                checksum: checksum.to_owned(),
+                down_checksum: None,
+            };
+            verify_checksums::<besu_core::Error>(&record, &migration)
+                .expect("identifier dollar text must keep legacy checksums valid");
+        }
+    }
+
+    #[test]
+    fn checksum_changes_when_only_statement_boundaries_change() {
+        let before = Migration::from_sql(
+            1,
+            "init",
+            "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);",
+        );
+        let after = Migration::from_sql(
+            1,
+            "init",
+            "CREATE TABLE a (id INT)\nCREATE TABLE b (id INT);",
+        );
+        assert_eq!(before.statements.len(), 2);
+        assert_eq!(after.statements.len(), 1);
+        assert_eq!(before.statements.join("\n"), after.statements.join("\n"));
+        assert_ne!(before.checksum(), after.checksum());
+    }
+
+    #[test]
+    fn unchanged_legacy_up_and_down_checksums_still_verify() {
+        let migration = Migration::from_sql_pair(
+            1,
+            "init",
+            "CREATE TABLE a (id INT)",
+            Some("DROP TABLE a".to_owned()),
+        );
+        let record = AppliedMigration {
+            version: 1,
+            name: "init".to_owned(),
+            checksum: legacy_checksum_of(&migration.name, "", &migration.statements),
+            down_checksum: Some(legacy_checksum_of(
+                &migration.name,
+                "down",
+                migration
+                    .down
+                    .as_deref()
+                    .expect("test migration has down statements"),
+            )),
+        };
+        verify_checksums::<besu_core::Error>(&record, &migration)
+            .expect("unchanged legacy checksums should verify");
+
+        let edited = Migration::from_sql_pair(
+            1,
+            "init",
+            "CREATE TABLE a (id BIGINT)",
+            Some("DROP TABLE a".to_owned()),
+        );
+        assert!(matches!(
+            verify_checksums::<besu_core::Error>(&record, &edited),
+            Err(MigrationError::ChecksumMismatch { version: 1, .. })
+        ));
     }
 
     #[test]
@@ -803,7 +1111,7 @@ mod tests {
 
         assert_eq!(
             migration.down_checksum().as_deref(),
-            Some("539878c5921f7627")
+            Some("06e7fb8e93f3a4be")
         );
         assert_ne!(migration.down_checksum(), edited.down_checksum());
         // The up file did not change, so its checksum must not move.

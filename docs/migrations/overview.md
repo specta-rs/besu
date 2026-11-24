@@ -98,8 +98,9 @@ CREATE TABLE IF NOT EXISTS _besu_migrations (
 ```
 
 Each row records the version, the name and a 16-character FNV-1a digest of the migration's
-name and statements. A down checksum is recorded when the migration has a down file. Editing
-an applied migration is an error, because the digest no longer matches.
+name and length-delimited statements. A down checksum is recorded when the migration has a down
+file. Editing an applied migration, or deleting a recorded down file, is an error because the
+digest no longer matches.
 
 ## The loop
 

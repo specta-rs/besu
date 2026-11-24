@@ -60,8 +60,10 @@ and the runner undoes them back to front. See [custom migrations](custom.md#down
    `NNNN_name.down.sql` by version.
 2. Creates `_besu_migrations` if it is missing, and adds `down_checksum` to a journal written
    before that column existed.
-3. Rejects two files with the same version.
-4. Verifies the checksum of every already-applied migration, up and down.
+3. Rejects two files with the same version, an applied version with no file, and a new version
+   below the newest applied version.
+4. Verifies the checksum of every already-applied migration, up and down. A recorded down file
+   that has since been deleted is also rejected.
 5. Executes the statements of each missing migration, then inserts its journal row.
 
 The whole run is one transaction: a failure rolls every pending migration back. On SQLite
@@ -80,6 +82,6 @@ that also keeps every statement on the same connection, which a schema change ne
   files; the whole pending set runs.
 - **There is no `--dry-run`.** To see what would change, run [`besu generate`](generate.md)
   against a copy, or `besu push --dry-run` for the schema-level difference.
-- **Migrations are split on `;`.** The splitter understands quotes and `--` comments, not
-  PostgreSQL dollar-quoting or `/* */` blocks, so a `DO $$ ... $$` body is cut in the middle.
-  Put such a body in its own file with one statement, or run it outside the runner.
+- **Migrations are split on `;`.** The splitter understands quotes, `--` comments and
+  PostgreSQL dollar-quoted bodies such as `DO $$ ... $$`. It does not understand `/* */`
+  block comments, so keep semicolons inside those comments out of migration files.
