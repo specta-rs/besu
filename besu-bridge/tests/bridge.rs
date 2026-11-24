@@ -349,6 +349,27 @@ fn the_server_helper_runs_the_statement_and_serialises_its_rows() {
 }
 
 #[test]
+fn the_server_helper_binds_the_original_json_document_bytes() {
+    let document = br#"{"id":18446744073709551616,"price":0.12345678901234567890123456789,"duplicate":1,"duplicate":2}"#;
+    let driver = FakeDriver::new(Vec::new());
+    let request = Request::query(
+        "SELECT $1",
+        vec![BridgeValue::from_value(Value::Json(document.to_vec())).unwrap()],
+    );
+    let wire = serde_json::to_string(&request).unwrap();
+    let request: Request = serde_json::from_str(&wire).unwrap();
+
+    let response = block_on(handle_request(&driver, &FakeSource, request));
+    assert!(response.error.is_none(), "{response:?}");
+    let recorded = driver.recorded();
+    assert_eq!(
+        recorded[0].1,
+        vec![Value::Json(document.to_vec())],
+        "the driver must receive the validated document verbatim"
+    );
+}
+
+#[test]
 fn the_server_helper_reports_an_execute_count() {
     let driver = FakeDriver::new(Vec::new());
     let db = besu::Database::new(Bridge::<_, Postgres>::new(Loopback {

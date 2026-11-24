@@ -75,7 +75,7 @@
 //! | `timestamp` | `YYYY-MM-DDTHH:MM:SS[.fraction]` | `chrono::NaiveDateTime` |
 //! | `timestamp_tz` | RFC 3339 | `chrono::DateTime<Utc>` |
 //! | `decimal` | exact decimal string | `String` |
-//! | `json` | any JSON value | `serde_json::Value` |
+//! | `json` | any JSON value | `Box<serde_json::value::RawValue>` |
 //! | `array` | `{"element": <type>, "values": [...]}` | `Vec<T>` |
 //! | `interval` | canonical text | `SqlInterval` |
 //! | `inet` / `cidr` | canonical text | `Inet`, `Cidr` |

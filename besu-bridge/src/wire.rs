@@ -26,7 +26,7 @@ use crate::BridgeError;
 /// `float`, `text`, `enum_label`, `bytes`, `uuid`, `date`, `time`, `timestamp`,
 /// `timestamp_tz`, `decimal`, `json`, `array`, `interval`, `inet`, `cidr`, `bit`, `range`,
 /// `geometry` and `vector`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "v", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BridgeValue {
@@ -71,7 +71,10 @@ pub enum BridgeValue {
     /// A fixed-precision decimal, as its exact decimal text. It is never a float.
     Decimal(String),
     /// A JSON document, carried as JSON inside `v` rather than double-encoded as text.
-    Json(serde_json::Value),
+    ///
+    /// The validated raw fragment is kept verbatim so nested number precision, duplicate
+    /// object members and key order survive the bridge unchanged.
+    Json(Box<serde_json::value::RawValue>),
     /// An array of one element type.
     Array(BridgeArray),
     /// A SQL interval, as its canonical text.
@@ -91,6 +94,39 @@ pub enum BridgeValue {
     Geometry(#[serde(with = "base64_bytes")] Vec<u8>),
     /// A `pgvector` vector, as its `[1,2,3]` text.
     Vector(String),
+}
+
+impl PartialEq for BridgeValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::Int(left), Self::Int(right)) => left == right,
+            (Self::UInt(left), Self::UInt(right)) => left == right,
+            (Self::UInt128(left), Self::UInt128(right)) => left == right,
+            (Self::Int128(left), Self::Int128(right)) => left == right,
+            (Self::Float(left), Self::Float(right)) => left == right,
+            (Self::Text(left), Self::Text(right)) => left == right,
+            (Self::EnumLabel(left), Self::EnumLabel(right)) => left == right,
+            (Self::Bytes(left), Self::Bytes(right)) => left == right,
+            (Self::Uuid(left), Self::Uuid(right)) => left == right,
+            (Self::Date(left), Self::Date(right)) => left == right,
+            (Self::Time(left), Self::Time(right)) => left == right,
+            (Self::Timestamp(left), Self::Timestamp(right)) => left == right,
+            (Self::TimestampTz(left), Self::TimestampTz(right)) => left == right,
+            (Self::Decimal(left), Self::Decimal(right)) => left == right,
+            (Self::Json(left), Self::Json(right)) => left.get() == right.get(),
+            (Self::Array(left), Self::Array(right)) => left == right,
+            (Self::Interval(left), Self::Interval(right)) => left == right,
+            (Self::Inet(left), Self::Inet(right)) => left == right,
+            (Self::Cidr(left), Self::Cidr(right)) => left == right,
+            (Self::Bit(left), Self::Bit(right)) => left == right,
+            (Self::Range(left), Self::Range(right)) => left == right,
+            (Self::Geometry(left), Self::Geometry(right)) => left == right,
+            (Self::Vector(left), Self::Vector(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 impl BridgeValue {
@@ -217,10 +253,7 @@ impl BridgeValue {
             Self::Timestamp(value) => Value::Timestamp(value),
             Self::TimestampTz(value) => Value::TimestampTz(value),
             Self::Decimal(value) => Value::Decimal(value),
-            Self::Json(value) => Value::Json(
-                serde_json::to_vec(&value)
-                    .map_err(|err| besu_core::Error::encode("<json>", err.to_string()))?,
-            ),
+            Self::Json(value) => Value::Json(value.get().as_bytes().to_vec()),
             Self::Array(array) => Value::Array {
                 element: array.element,
                 values: array
@@ -753,5 +786,18 @@ mod tests {
                 "{json}"
             );
         }
+    }
+
+    #[test]
+    fn json_keeps_numeric_precision_duplicate_members_and_key_order() {
+        let document = br#"{"id":18446744073709551616,"price":0.12345678901234567890123456789,"duplicate":1,"duplicate":2}"#;
+        let wire = BridgeValue::from_value(Value::Json(document.to_vec())).expect("valid JSON");
+        let json = serde_json::to_string(&wire).expect("the wire value serialises");
+        let decoded: BridgeValue =
+            serde_json::from_str(&json).expect("the wire value deserialises");
+        assert_eq!(
+            decoded.into_value().expect("the value decodes"),
+            Value::Json(document.to_vec())
+        );
     }
 }

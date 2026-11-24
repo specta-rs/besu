@@ -173,7 +173,9 @@ impl_chrono! {
 impl FromWire for serde_json::Value {
     fn from_wire(value: &BridgeValue, index: usize) -> Result<Self, BridgeError> {
         match value {
-            BridgeValue::Json(value) => Ok(value.clone()),
+            BridgeValue::Json(value) => {
+                serde_json::from_str(value.get()).map_err(BridgeError::from)
+            }
             other => Err(wrong(other, index, "a JSON document")),
         }
     }
