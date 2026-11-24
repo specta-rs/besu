@@ -635,6 +635,32 @@ impl Ddl for MySqlDdl {
     }
 }
 
+/// Re-encode a dialect-neutral quoted default with MySQL's backslash-aware rules.
+///
+/// DefaultValue::render quotes apostrophes for PostgreSQL/SQLite, where backslashes are
+/// ordinary characters. MySQL needs the same value spelled differently. Raw expression
+/// defaults, or literals this parser cannot prove are a single quoted string, pass through.
+fn mysql_default(default: &str) -> String {
+    let bytes = default.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'\'' || bytes[bytes.len() - 1] != b'\'' {
+        return default.to_owned();
+    }
+    let inner = &default[1..default.len() - 1];
+    let mut chars = inner.chars();
+    let mut value = String::with_capacity(inner.len());
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.next() != Some('\'') {
+                return default.to_owned();
+            }
+            value.push('\'');
+        } else {
+            value.push(ch);
+        }
+    }
+    crate::dialect::mysql_literal(&value)
+}
+
 /// Render one column definition, optionally repeating its `UNIQUE` clause.
 ///
 /// `MODIFY COLUMN` replaces the column definition but leaves its indexes in place, so
@@ -689,13 +715,14 @@ fn column_definition(column: &Column, inline_pk: bool, inline_unique: bool) -> S
     if column.generated.is_none()
         && let Some(default) = &column.default
     {
+        let default = mysql_default(default);
         sql.push_str(" DEFAULT ");
-        if MySqlDdl::default_needs_expression(&column.ty, default) {
+        if MySqlDdl::default_needs_expression(&column.ty, &default) {
             sql.push('(');
-            sql.push_str(default);
+            sql.push_str(&default);
             sql.push(')');
         } else {
-            sql.push_str(default);
+            sql.push_str(&default);
         }
     }
 
@@ -987,6 +1014,29 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn quoted_defaults_are_reencoded_for_mysql_without_changing_other_dialects() {
+        assert_eq!(mysql_default(r"'back\slash'"), r"'back\\slash'");
+        assert_eq!(mysql_default(r"'tail\'"), r"'tail\\'");
+        assert_eq!(mysql_default(r"'\'''"), r"'\\'''");
+        assert_eq!(mysql_default("curdate()"), "curdate()");
+
+        let column = Column {
+            name: "note".into(),
+            ty: TypeDef::Text,
+            nullable: false,
+            auto_increment: false,
+            primary_key: false,
+            unique: false,
+            default: Some(r"'back\slash'".into()),
+            generated: None,
+            comment: None,
+            renamed_from: None,
+        };
+        let sql = MySqlDdl.column_sql(&column, false);
+        assert!(sql.ends_with("DEFAULT ('back\\\\slash')"), "{sql}");
     }
 
     #[test]

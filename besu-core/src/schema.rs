@@ -86,10 +86,7 @@ impl DefaultValue {
             Self::Bool(false) => Cow::Borrowed("FALSE"),
             Self::Int(v) => Cow::Owned(alloc::format!("{v}")),
             Self::Float(v) => Cow::Owned(alloc::format!("{v}")),
-            Self::Text(v) => Cow::Owned(alloc::format!(
-                "'{}'",
-                v.replace('\\', "\\\\").replace('\'', "''")
-            )),
+            Self::Text(v) => Cow::Owned(alloc::format!("'{}'", v.replace('\'', "''"))),
             Self::Raw(v) => Cow::Borrowed(v),
             Self::Now => Cow::Borrowed("CURRENT_TIMESTAMP"),
         }
@@ -410,17 +407,14 @@ mod tests {
     use super::{DefaultValue, IndexEntry};
 
     #[test]
-    fn text_defaults_escape_backslashes_before_quotes() {
+    fn text_defaults_quote_apostrophes_without_changing_backslashes() {
         assert_eq!(DefaultValue::Text("plain").render(), "'plain'");
         assert_eq!(DefaultValue::Text("it's").render(), "'it''s'");
-        assert_eq!(
-            DefaultValue::Text("back\\slash").render(),
-            "'back\\\\slash'"
-        );
-        assert_eq!(DefaultValue::Text("tail\\").render(), "'tail\\\\'");
+        assert_eq!(DefaultValue::Text(r"back\slash").render(), r"'back\slash'");
+        assert_eq!(DefaultValue::Text("tail\\").render(), r"'tail\'");
         assert_eq!(
             DefaultValue::Text("\\') , injected INT DEFAULT 5) #").render(),
-            "'\\\\'') , injected INT DEFAULT 5) #'"
+            r"'\'') , injected INT DEFAULT 5) #'"
         );
     }
 
