@@ -60,8 +60,10 @@ and the runner undoes them back to front. See [custom migrations](custom.md#down
    `NNNN_name.down.sql` by version.
 2. Creates `_besu_migrations` if it is missing, and adds `down_checksum` to a journal written
    before that column existed.
-3. Rejects two files with the same version.
-4. Verifies the checksum of every already-applied migration, up and down.
+3. Rejects two files with the same version, an applied version with no file, and a new version
+   below the newest applied version.
+4. Verifies the checksum of every already-applied migration, up and down. A recorded down file
+   that has since been deleted is also rejected.
 5. Executes the statements of each missing migration, then inserts its journal row.
 
 The whole run is one transaction: a failure rolls every pending migration back. On SQLite

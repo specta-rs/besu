@@ -60,6 +60,78 @@ async fn applies_each_migration_once() {
 }
 
 #[tokio::test]
+async fn refuses_to_backfill_a_version_below_applied_history() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let version_two = Migration::from_sql(
+        2,
+        "second",
+        "CREATE TABLE execution_log (version INTEGER NOT NULL);\n\
+         INSERT INTO execution_log (version) VALUES (2);",
+    );
+    let mut applied = Migrator::new();
+    applied.push(version_two.clone());
+    db.migrate(&applied).await.unwrap();
+
+    let mut with_late_lower = Migrator::new();
+    with_late_lower.push(Migration::from_sql(
+        1,
+        "first",
+        "INSERT INTO execution_log (version) VALUES (1);",
+    ));
+    with_late_lower.push(version_two);
+    let error = db.migrate(&with_late_lower).await.unwrap_err();
+    assert!(matches!(
+        error,
+        besu::SchemaError::Migration(MigrationError::OutOfOrderMigration {
+            version: 1,
+            latest_applied: 2
+        })
+    ));
+    assert_eq!(journal_versions(&db).await, [2]);
+    assert_eq!(
+        db.execute(sql!("SELECT version FROM execution_log ORDER BY version"))
+            .all::<(i64,)>()
+            .await
+            .unwrap(),
+        [(2,)]
+    );
+}
+
+#[tokio::test]
+async fn refuses_new_migrations_when_applied_history_is_missing() {
+    let db = besu::Database::new(Sqlx::memory().await.unwrap());
+    let mut applied = Migrator::new();
+    applied.push(Migration::from_sql(
+        1,
+        "first",
+        "CREATE TABLE applied_first (id INTEGER PRIMARY KEY);",
+    ));
+    applied.push(Migration::from_sql(
+        2,
+        "second",
+        "CREATE TABLE applied_second (id INTEGER PRIMARY KEY);",
+    ));
+    db.migrate(&applied).await.unwrap();
+
+    let mut missing_history = Migrator::new();
+    missing_history.push(Migration::from_sql(
+        3,
+        "third",
+        "CREATE TABLE applied_third (id INTEGER PRIMARY KEY);",
+    ));
+    let error = db.migrate(&missing_history).await.unwrap_err();
+    assert!(matches!(
+        error,
+        besu::SchemaError::Migration(MigrationError::MissingMigrationFile { version: 1 })
+    ));
+    assert_eq!(journal_versions(&db).await, [1, 2]);
+    let schema = db.introspect().await.unwrap();
+    assert!(schema.table("applied_first").is_some());
+    assert!(schema.table("applied_second").is_some());
+    assert!(schema.table("applied_third").is_none());
+}
+
+#[tokio::test]
 async fn refuses_to_run_a_sqlite_rebuild_that_disables_foreign_keys() {
     let db = besu::Database::new(Sqlx::memory().await.unwrap());
     let mut migrator = Migrator::new();

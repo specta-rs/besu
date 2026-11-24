@@ -143,6 +143,18 @@ pub enum MigrationError<E> {
     },
     /// Two migrations share a version.
     DuplicateVersion(i64),
+    /// An applied migration's file is missing, so its history cannot be verified.
+    MissingMigrationFile {
+        /// The applied version with no supplied migration.
+        version: i64,
+    },
+    /// A migration older than the newest applied version is being backfilled.
+    OutOfOrderMigration {
+        /// The out-of-order migration's version.
+        version: i64,
+        /// The newest version already in the journal.
+        latest_applied: i64,
+    },
     /// The newest applied migration cannot be reverted, because it has no down file.
     MissingDownFile {
         /// The version that cannot be reverted.
@@ -165,6 +177,19 @@ impl<E: fmt::Display> fmt::Display for MigrationError<E> {
                  (recorded checksum {expected}, now {actual}); migrations are append-only"
             ),
             Self::DuplicateVersion(version) => write!(f, "two migrations share version {version}"),
+            Self::MissingMigrationFile { version } => write!(
+                f,
+                "applied migration {version} is missing from the migration directory; \
+                 restore its file before continuing"
+            ),
+            Self::OutOfOrderMigration {
+                version,
+                latest_applied,
+            } => write!(
+                f,
+                "migration {version} is older than the latest applied migration \
+                 {latest_applied}; migrations must be appended in ascending order"
+            ),
             Self::MissingDownFile { version } => write!(
                 f,
                 "migration {version} has no down file, so it cannot be reverted; \
@@ -301,7 +326,7 @@ impl Migrator {
         // 1. Make sure the journal exists and is up to date.
         let applied = read_journal(exec).await?;
 
-        // 2. Validate: no duplicates, and nothing that already ran was edited.
+        // 2. Validate: no duplicates, complete applied history, and append-only ordering.
         let mut sorted = self.migrations.clone();
         sorted.sort_by_key(|m| m.version);
         for pair in sorted.windows(2) {
@@ -309,9 +334,26 @@ impl Migrator {
                 return Err(MigrationError::DuplicateVersion(pair[0].version));
             }
         }
+        // Every journal row needs its original file so its checksum can be verified. Without
+        // this check a partial migration directory can silently run new SQL on top of history
+        // that the runner cannot inspect.
+        for record in &applied {
+            if !sorted.iter().any(|m| m.version == record.version) {
+                return Err(MigrationError::MissingMigrationFile {
+                    version: record.version,
+                });
+            }
+        }
         for migration in &sorted {
             if let Some(record) = applied.iter().find(|a| a.version == migration.version) {
                 verify_checksums(record, migration)?;
+            } else if let Some(latest) = applied.last() {
+                if migration.version <= latest.version {
+                    return Err(MigrationError::OutOfOrderMigration {
+                        version: migration.version,
+                        latest_applied: latest.version,
+                    });
+                }
             }
         }
 
