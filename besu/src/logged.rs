@@ -29,11 +29,11 @@
 //! statement, never touches the clock and never allocates the rendered SQL. With the
 //! `tracing` feature off the module does not exist at all.
 //!
-//! When it *is* listening, the SQL is rendered with [`Sql::inspect`], which inlines the
-//! bound parameters. That output is for humans and debugging only: it is not quoted for
-//! every dialect, it is not guaranteed to be valid SQL, and it must never be executed.
-//! The statement that actually runs is always `sql.sql()` with `sql.args()` bound, so
-//! logging can never change what the database sees.
+//! When it *is* listening, the event contains the placeholder SQL and the number of bound
+//! arguments. Bound values are never rendered: a statement can carry passwords, tokens or
+//! other private data, and a tracing subscriber is a broader trust boundary than the
+//! database. The statement that actually runs is always `sql.sql()` with `sql.args()` bound,
+//! so logging can never change what the database sees.
 //!
 //! # The policy
 //!
@@ -214,10 +214,10 @@ impl Policy {
             || (self.slow.is_some() && tracing::enabled!(target: TARGET, tracing::Level::WARN))
     }
 
-    /// Report a stream that has finished, from the SQL text captured when it started.
-    fn report_text(&self, kind: &'static str, sql: &str, elapsed: Duration) {
+    /// Report a stream that has finished, from the placeholder SQL captured when it started.
+    fn report_text(&self, kind: &'static str, sql: &str, args: usize, elapsed: Duration) {
         if self.log_queries && tracing::enabled!(target: TARGET, tracing::Level::DEBUG) {
-            tracing::debug!(target: TARGET, kind, elapsed = ?elapsed, sql, "statement");
+            tracing::debug!(target: TARGET, kind, args, elapsed = ?elapsed, sql, "statement");
         }
 
         if let Some(threshold) = self.slow {
@@ -225,6 +225,7 @@ impl Policy {
                 tracing::warn!(
                     target: TARGET,
                     kind,
+                    args,
                     elapsed = ?elapsed,
                     threshold = ?threshold,
                     sql,
@@ -242,7 +243,7 @@ impl Policy {
                 kind,
                 args = sql.args().len(),
                 elapsed = ?elapsed,
-                sql = %sql.inspect(),
+                sql = %sql.sql(),
                 "statement"
             );
         }
@@ -255,7 +256,7 @@ impl Policy {
                     args = sql.args().len(),
                     elapsed = ?elapsed,
                     threshold = ?threshold,
-                    sql = %sql.inspect(),
+                    sql = %sql.sql(),
                     "slow statement"
                 );
             }
@@ -341,7 +342,8 @@ impl<Dr: Driver> Driver for Logged<Dr> {
         // A cursor outlives this call, so the event is emitted when the stream ends rather
         // than around it. That is the only honest place to measure it.
         let started = self.policy.reporting().then(Instant::now);
-        let summary = started.map(|_| alloc::string::ToString::to_string(&sql.inspect()));
+        let summary = started.map(|_| sql.sql().to_owned());
+        let args = sql.args().len();
         let policy = self.policy;
         let inner = self.inner.query_stream(sql);
 
@@ -353,6 +355,7 @@ impl<Dr: Driver> Driver for Logged<Dr> {
                     started,
                     policy,
                     summary: summary.unwrap_or_default(),
+                    args,
                 }) as RowStream<'a, Dr>),
                 None => Ok(inner),
             }
@@ -366,6 +369,7 @@ struct LoggedStream<'a, Dr: Driver> {
     started: Instant,
     policy: Policy,
     summary: String,
+    args: usize,
 }
 
 impl<Dr: Driver> Stream for LoggedStream<'_, Dr> {
@@ -376,7 +380,7 @@ impl<Dr: Driver> Stream for LoggedStream<'_, Dr> {
         let next = Pin::new(&mut this.inner).poll_next(cx);
         if let Poll::Ready(None) = next {
             this.policy
-                .report_text("stream", &this.summary, this.started.elapsed());
+                .report_text("stream", &this.summary, this.args, this.started.elapsed());
         }
         next
     }
@@ -454,7 +458,8 @@ impl<Dr: TransactionDriver> TransactionDriver for Logged<Dr> {
         sql: &'c Sql<Self::Dialect>,
     ) -> Result<RowStream<'c, Self>, Self::Error> {
         let started = tx.policy.reporting().then(Instant::now);
-        let summary = started.map(|_| alloc::string::ToString::to_string(&sql.inspect()));
+        let summary = started.map(|_| sql.sql().to_owned());
+        let args = sql.args().len();
         let policy = tx.policy;
         let inner = Dr::txn_query_stream(&mut tx.inner, sql).await?;
         match started {
@@ -463,6 +468,7 @@ impl<Dr: TransactionDriver> TransactionDriver for Logged<Dr> {
                 started,
                 policy,
                 summary: summary.unwrap_or_default(),
+                args,
             }) as RowStream<'c, Dr>),
             None => Ok(inner),
         }

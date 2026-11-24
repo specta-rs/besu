@@ -10,15 +10,15 @@
 use std::{
     borrow::Cow,
     fmt,
-    future::Future,
+    future::{Future, poll_fn},
     marker::PhantomData,
-    pin::pin,
+    pin::{Pin, pin},
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
-use besu::{Database, Logged, Policy};
+use besu::{Database, Logged, Policy, Stream};
 use besu_core::{
     Dialect, Driver, Error, Placeholder, Sql, TransactionDriver, TypeDef, UpsertStyle, Value,
 };
@@ -66,17 +66,39 @@ fn find_user(id: i64) -> Sql<TestDialect> {
     sql
 }
 
-fn record(statements: &Mutex<Vec<String>>, sql: &Sql<TestDialect>) {
+fn credentials() -> Sql<TestDialect> {
+    let mut sql = Sql::<TestDialect>::raw(
+        "INSERT INTO user_credentials (user_id, password, api_token) VALUES (",
+    );
+    sql.bind(42_i64);
+    sql.push_raw(", ");
+    sql.bind("DUMMY_PASSWORD_NEVER_USE_7Qm4");
+    sql.push_raw(", ");
+    sql.bind("DUMMY_API_TOKEN_NEVER_USE_k9P2");
+    sql.push_raw(")");
+    sql
+}
+
+fn record(
+    statements: &Mutex<Vec<String>>,
+    bindings: &Mutex<Vec<Vec<Value>>>,
+    sql: &Sql<TestDialect>,
+) {
     statements
         .lock()
         .expect("the statement log is never poisoned")
         .push(sql.sql().to_owned());
+    bindings
+        .lock()
+        .expect("the binding log is never poisoned")
+        .push(sql.args().to_vec());
 }
 
 /// A driver that records what it was asked to run and returns a fixed result.
 #[derive(Clone, Default)]
 struct Fake {
     statements: Arc<Mutex<Vec<String>>>,
+    bindings: Arc<Mutex<Vec<Vec<Value>>>>,
 }
 
 impl Fake {
@@ -84,6 +106,13 @@ impl Fake {
         self.statements
             .lock()
             .expect("the statement log is never poisoned")
+            .clone()
+    }
+
+    fn bindings(&self) -> Vec<Vec<Value>> {
+        self.bindings
+            .lock()
+            .expect("the binding log is never poisoned")
             .clone()
     }
 }
@@ -107,7 +136,7 @@ impl Driver for Fake {
     }
 
     async fn query(&self, sql: &Sql<Self::Dialect>) -> Result<Vec<Self::Row>, Self::Error> {
-        record(&self.statements, sql);
+        record(&self.statements, &self.bindings, sql);
         if sql.sql().contains("FAIL") {
             return Err(Error::unsupported("the fake driver was asked to fail"));
         }
@@ -115,13 +144,14 @@ impl Driver for Fake {
     }
 
     async fn execute(&self, sql: &Sql<Self::Dialect>) -> Result<Self::Output, Self::Error> {
-        record(&self.statements, sql);
+        record(&self.statements, &self.bindings, sql);
         Ok(1)
     }
 }
 
 struct FakeTransaction<'a> {
     statements: Arc<Mutex<Vec<String>>>,
+    bindings: Arc<Mutex<Vec<Vec<Value>>>>,
     marker: PhantomData<&'a ()>,
 }
 
@@ -131,6 +161,7 @@ impl TransactionDriver for Fake {
     async fn begin<'a>(&'a self) -> Result<Self::Transaction<'a>, Self::Error> {
         Ok(FakeTransaction {
             statements: self.statements.clone(),
+            bindings: self.bindings.clone(),
             marker: PhantomData,
         })
     }
@@ -147,7 +178,7 @@ impl TransactionDriver for Fake {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Self::Dialect>,
     ) -> Result<Vec<Self::Row>, Self::Error> {
-        record(&tx.statements, sql);
+        record(&tx.statements, &tx.bindings, sql);
         Ok(vec![1, 2, 3])
     }
 
@@ -155,7 +186,7 @@ impl TransactionDriver for Fake {
         tx: &'c mut Self::Transaction<'a>,
         sql: &Sql<Self::Dialect>,
     ) -> Result<Self::Output, Self::Error> {
-        record(&tx.statements, sql);
+        record(&tx.statements, &tx.bindings, sql);
         Ok(1)
     }
 
@@ -163,7 +194,7 @@ impl TransactionDriver for Fake {
         tx: &'c mut Self::Transaction<'a>,
         sql: &'c Sql<Self::Dialect>,
     ) -> Result<besu::RowStream<'c, Self>, Self::Error> {
-        record(&tx.statements, sql);
+        record(&tx.statements, &tx.bindings, sql);
         let rows: Vec<Result<i64, Error>> = vec![Ok(1), Ok(2), Ok(3)];
         Ok(Box::pin(besu::futures_stream::iter(rows)))
     }
@@ -192,11 +223,19 @@ impl Recorded {
 #[derive(Clone, Default)]
 struct Recorder {
     events: Arc<Mutex<Vec<Recorded>>>,
+    only_level: Option<Level>,
 }
 
 impl Recorder {
     fn take(&self) -> Vec<Recorded> {
         std::mem::take(&mut *self.events.lock().expect("the recorder is never poisoned"))
+    }
+
+    fn at_level(level: Level) -> Self {
+        Self {
+            only_level: Some(level),
+            ..Self::default()
+        }
     }
 }
 
@@ -214,8 +253,11 @@ impl Visit for Fields {
 }
 
 impl Subscriber for Recorder {
-    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.target() == "besu::query"
+            && self
+                .only_level
+                .is_none_or(|level| *metadata.level() == level)
     }
 
     fn new_span(&self, _attributes: &span::Attributes<'_>) -> span::Id {
@@ -292,10 +334,93 @@ fn a_query_still_returns_the_right_rows_and_runs_once() {
     assert_eq!(event.field("message"), Some("statement"));
     assert_eq!(
         event.field("sql"),
-        Some("SELECT * FROM users WHERE id = 42"),
-        "parameters are inlined for humans"
+        Some("SELECT * FROM users WHERE id = ?"),
+        "bound values must not enter the tracing pipeline"
     );
     assert!(event.field("elapsed").is_some());
+}
+
+#[test]
+fn bound_credentials_never_reach_debug_events_or_the_driver_log() {
+    let driver = Fake::default();
+    let db = Database::new(Logged::new(driver.clone()));
+    let recorder = Recorder::default();
+    let sql = credentials();
+    let expected = sql.args().to_vec();
+
+    run(&recorder, async {
+        db.driver().query(&sql).await.expect("query");
+        db.driver().execute(&sql).await.expect("execute");
+        let mut stream = db.driver().query_stream(&sql).await.expect("stream");
+        while poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
+            .await
+            .is_some()
+        {}
+    });
+
+    assert_eq!(
+        driver.bindings(),
+        vec![expected.clone(), expected.clone(), expected]
+    );
+    let events = recorder.take();
+    assert_eq!(events.len(), 3, "{events:?}");
+    for event in events {
+        assert_eq!(
+            event.field("sql"),
+            Some("INSERT INTO user_credentials (user_id, password, api_token) VALUES (?, ?, ?)")
+        );
+        assert_eq!(event.field("args"), Some("3"));
+        assert!(
+            event.fields.iter().all(
+                |(_, value)| !value.contains("DUMMY_PASSWORD_NEVER_USE_7Qm4")
+                    && !value.contains("DUMMY_API_TOKEN_NEVER_USE_k9P2")
+            ),
+            "{event:?}"
+        );
+    }
+}
+
+#[test]
+fn bound_credentials_never_reach_warn_only_slow_events() {
+    let driver = Fake::default();
+    let logged = Logged::with_policy(driver.clone(), Policy::slow_only(Duration::ZERO));
+    let recorder = Recorder::at_level(Level::WARN);
+    let sql = credentials();
+    let expected = sql.args().to_vec();
+
+    run(&recorder, async {
+        <Logged<Fake> as Driver>::query(&logged, &sql)
+            .await
+            .expect("query");
+        let mut tx = <Logged<Fake> as TransactionDriver>::begin(&logged)
+            .await
+            .expect("begin");
+        <Logged<Fake> as TransactionDriver>::txn_execute(&mut tx, &sql)
+            .await
+            .expect("transaction execute");
+        <Logged<Fake> as TransactionDriver>::commit(tx)
+            .await
+            .expect("commit");
+    });
+
+    assert_eq!(driver.bindings(), vec![expected.clone(), expected]);
+    let events = recorder.take();
+    assert_eq!(events.len(), 2, "{events:?}");
+    for event in events {
+        assert_eq!(event.level, Level::WARN);
+        assert_eq!(event.field("args"), Some("3"));
+        assert_eq!(
+            event.field("sql"),
+            Some("INSERT INTO user_credentials (user_id, password, api_token) VALUES (?, ?, ?)")
+        );
+        assert!(
+            event.fields.iter().all(
+                |(_, value)| !value.contains("DUMMY_PASSWORD_NEVER_USE_7Qm4")
+                    && !value.contains("DUMMY_API_TOKEN_NEVER_USE_k9P2")
+            ),
+            "{event:?}"
+        );
+    }
 }
 
 #[test]
@@ -339,7 +464,7 @@ fn a_zero_threshold_turns_every_statement_into_a_warning() {
     assert_eq!(event.field("message"), Some("slow statement"));
     assert_eq!(event.field("args"), Some("1"));
     assert_eq!(event.field("threshold"), Some("0ns"));
-    assert_eq!(event.field("sql"), Some("SELECT * FROM users WHERE id = 3"));
+    assert_eq!(event.field("sql"), Some("SELECT * FROM users WHERE id = ?"));
 }
 
 #[test]
