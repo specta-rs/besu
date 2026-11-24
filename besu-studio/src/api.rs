@@ -1315,9 +1315,11 @@ where
 
     Ok(Outcome {
         columns,
-        rows_affected: (kind == StatementKind::AffectingQuery)
-            .then_some(out.len() as u64)
-            .unwrap_or(0),
+        rows_affected: if kind == StatementKind::AffectingQuery {
+            out.len() as u64
+        } else {
+            0
+        },
         rows: out,
         last_insert_id: None,
     })
